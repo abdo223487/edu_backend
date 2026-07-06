@@ -24,8 +24,13 @@ public record ChangeAnswerMarkRequest(int QuizId, int StudentId, int QuestionId,
 
 // Field names match Takers.dart's expected JSON exactly: quizMark (not
 // "score"), totalQuizMarks (not "totalMarks"), date, groupName.
+// StudentId is sent as a STRING (not int) — ExamReview_for_Taker.dart's
+// StudentFullExamReviewPage widget declares `final String studentId;` and
+// Takers.dart forwards this field straight through untouched, so the JSON
+// shape has to match that String type or the widget crashes (gray screen)
+// when Takers.dart navigates to it.
 public record TakerDto(
-    int StudentId,
+    string StudentId,
     string StudentName,
     string GroupName,
     bool HasSubmitted,

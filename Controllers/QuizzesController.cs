@@ -341,7 +341,7 @@ public class QuizzesController : ControllerBase
             .Select(s => new { student = s, result = results.FirstOrDefault(r => r.StudentId == s.Id) })
             .Where(x => x.result != null)
             .Select(x => new TakerDto(
-                x.student.Id,
+                x.student.Id.ToString(),
                 x.student.Name,
                 x.student.Group?.Name ?? "",
                 true,
