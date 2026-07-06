@@ -224,13 +224,32 @@ public class QuizzesController : ControllerBase
         var priorResult = await _db.QuizResults.Include(r => r.Answers)
             .FirstOrDefaultAsync(r => r.QuizId == quizId && r.StudentId == studentId);
 
-        // BUGFIX: this endpoint used to hand back the questions with no check
-        // on quiz.Deadline at all, so a student opening the exam after time
-        // was up got in exactly like normal and could still submit answers.
-        // Block it here (unless they already have a result, in which case they
-        // fall through to review mode below as before).
+        // A student who never opened the exam and shows up after the deadline
+        // doesn't get blocked out anymore — they get dropped straight into
+        // review mode like anyone who actually took it, except every question
+        // is unanswered and awarded 0. This auto-creates their QuizResult (0
+        // score) right here so the teacher's "takers" list / student-answers
+        // screen shows this student exactly like a real (zero-scoring) taker
+        // — same DB row shape, same Score/TotalMarks/Answers as a genuine
+        // submission, just with blank answers and MarkAwarded = 0 each.
         if (priorResult == null && DateTime.UtcNow > quiz.Deadline)
-            return StatusCode(410, new { message = "انتهى وقت الامتحان." });
+        {
+            var totalMarks = quiz.Questions.Sum(q => q.Mark);
+            var autoZero = new QuizResult
+            {
+                QuizId = quiz.Id,
+                StudentId = studentId,
+                TotalMarks = totalMarks,
+                Score = 0
+            };
+            foreach (var q in quiz.Questions)
+                autoZero.Answers.Add(new QuizAnswer { QuestionId = q.Id, Answer = "", MarkAwarded = 0 });
+
+            _db.QuizResults.Add(autoZero);
+            await _db.SaveChangesAsync();
+
+            priorResult = autoZero;
+        }
 
         var reviewMode = priorResult != null;
         if (reviewMode) Response.Headers["x-redirected-to"] = "review";
