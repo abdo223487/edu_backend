@@ -1,0 +1,177 @@
+using EduApi.Common;
+using EduApi.Data;
+using EduApi.Models;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+
+namespace EduApi.Controllers;
+
+public record GenerateCodeRequest(int SchoolYear, List<int> UnitIds, List<int> LectureIds);
+
+/// <summary>
+/// Route: api/Codes
+///  GET  Codes/codeables?schoolYear=..     -> units (with nested lessons/lectures) +
+///                                             standalone lectures eligible for a code
+///  GET  Codes?schoolYear=..
+///  GET  Codes/{codeId}
+///  POST Codes/{codeId}/delete              -- now blocked once a code has been used
+///  POST Codes                              body: { schoolYear, unitIds, lectureIds }
+///
+/// Reconciled against the real client ("create Code .dart") — several things
+/// were mismatched before this pass and are now fixed to match the client
+/// exactly (see inline notes at each spot):
+///   1) GetCodeables: client reads data['lectures'], not data['standaloneLectures'];
+///      and expects unit['lessons'][]['lectures'][] nested trees, not flat {id,name}.
+///   2) Generate: client only treats HTTP 200 as success (`res.statusCode == 200`),
+///      not 201.
+///   3) ToDto: client's list item reads `isRedeemed` (not `isUsed`) and `unlocks`
+///      (a list, only its .length is used); the details sheet reads `redeemedBy`
+///      (object), `units`/`lectures` (arrays of {name} objects, not raw id lists),
+///      and `redeemedAt` (timestamp string) — none of which existed before.
+///   4) Delete: now returns 409 once a code IsUsed, per your request — deleting a
+///      redeemed code was allowed before with no restriction at all.
+/// </summary>
+[ApiController]
+[Route("api/[controller]")]
+[Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+public class CodesController : ControllerBase
+{
+    private readonly AppDbContext _db;
+    public CodesController(AppDbContext db) => _db = db;
+
+    // GET Codes/codeables?schoolYear=..
+    // Client shape (from "create Code .dart"): { units: [...], lectures: [...] }
+    // where each unit is { id, name, lessons: [ { name, lectures: [{id, name}] } ] }
+    // and each top-level "lectures" entry is a standalone lecture { id, name }.
+    [HttpGet("codeables")]
+    public async Task<IActionResult> GetCodeables([FromQuery] int schoolYear)
+    {
+        var units = await _db.Units.Where(u => u.SchoolYear == schoolYear)
+            .Include(u => u.Lessons)
+            .ToListAsync();
+
+        var unitIds = units.Select(u => u.Id).ToList();
+        var lecturesByUnit = await _db.Lectures
+            .Where(l => l.UnitId != null && unitIds.Contains(l.UnitId.Value))
+            .ToListAsync();
+
+        var unitTree = units.Select(u => new
+        {
+            id = u.Id,
+            name = u.Name,
+            lessons = u.Lessons.OrderBy(l => l.LessonIndex).Select(lesson => new
+            {
+                name = lesson.Name,
+                lectures = lecturesByUnit
+                    .Where(l => l.UnitId == u.Id && l.LessonIndex == lesson.LessonIndex)
+                    .Select(l => new { id = l.Id, name = l.Name })
+                    .ToList()
+            }).ToList()
+        }).ToList();
+
+        var standaloneLectures = await _db.Lectures.Where(l => l.UnitId == null && l.SchoolYear == schoolYear)
+            .Select(l => new { id = l.Id, name = l.Name })
+            .ToListAsync();
+
+        // NOTE: key is "lectures", NOT "standaloneLectures" — the client does
+        // `standaloneLectures = data['lectures'] ?? []`.
+        return Ok(new { units = unitTree, lectures = standaloneLectures });
+    }
+
+    [HttpGet]
+    public async Task<IActionResult> GetAll([FromQuery] int? schoolYear)
+    {
+        var query = _db.Codes.AsQueryable();
+        if (schoolYear.HasValue) query = query.Where(c => c.SchoolYear == schoolYear.Value);
+
+        var codes = await query.ToListAsync();
+        var dtos = new List<object>();
+        foreach (var c in codes) dtos.Add(await ToDto(c));
+        return Ok(dtos);
+    }
+
+    [HttpGet("{codeId:int}")]
+    public async Task<IActionResult> GetById(int codeId)
+    {
+        var code = await _db.Codes.FirstOrDefaultAsync(e => e.Id == (codeId));
+        if (code == null) return NotFound(new { message = "Code not found." });
+        return Ok(await ToDto(code));
+    }
+
+    // Was previously unconditional — a used code could be deleted with no
+    // warning, silently orphaning the student's already-granted subscriptions
+    // from any future audit trail. Now blocked once IsUsed is true.
+    [HttpPost("{codeId:int}/delete")]
+    public async Task<IActionResult> Delete(int codeId)
+    {
+        var code = await _db.Codes.FirstOrDefaultAsync(e => e.Id == (codeId));
+        if (code == null) return NotFound(new { message = "Code not found." });
+
+        if (code.IsUsed)
+            return StatusCode(409, new { message = "Cannot delete a code that has already been used." });
+
+        _db.Codes.Remove(code);
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "Code deleted." });
+    }
+
+    // Client success check is `res.statusCode == 200` (see _GenerateSheet._generate),
+    // so this MUST return 200, not 201, or the client silently does nothing on a
+    // successful create (no navigator pop, no onGenerated callback).
+    [HttpPost]
+    public async Task<IActionResult> Generate([FromBody] GenerateCodeRequest request)
+    {
+        var code = new Code
+        {
+            Value = GenerateRandomCode(),
+            SchoolYear = request.SchoolYear,
+            UnitIds = request.UnitIds ?? new(),
+            LectureIds = request.LectureIds ?? new(),
+            TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+        };
+        _db.Codes.Add(code);
+        await _db.SaveChangesAsync();
+
+        return Ok(await ToDto(code));
+    }
+
+    private static string GenerateRandomCode()
+    {
+        const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+        var random = Random.Shared;
+        return new string(Enumerable.Range(0, 8).Select(_ => chars[random.Next(chars.Length)]).ToArray());
+    }
+
+    private async Task<object> ToDto(Code c)
+    {
+        var units = await _db.Units.Where(u => c.UnitIds.Contains(u.Id))
+            .Select(u => new { id = u.Id, name = u.Name }).ToListAsync();
+        var lectures = await _db.Lectures.Where(l => c.LectureIds.Contains(l.Id))
+            .Select(l => new { id = l.Id, name = l.Name }).ToListAsync();
+
+        object? redeemedBy = null;
+        if (c.UsedByStudentId.HasValue)
+        {
+            redeemedBy = await _db.Students.IgnoreQueryFilters()
+                .Where(s => s.Id == c.UsedByStudentId.Value)
+                .Select(s => new { name = s.Name, groupName = s.Group!.Name, phoneNumber = s.PhoneNumber })
+                .FirstOrDefaultAsync();
+        }
+
+        return new
+        {
+            id = c.Id,
+            code = c.Value,
+            schoolYear = c.SchoolYear,
+            units,
+            lectures,
+            // "how many items this code unlocks" — only .length is read client-side.
+            unlocks = c.UnitIds.Concat(c.LectureIds).ToList(),
+            isUsed = c.IsUsed,
+            isRedeemed = c.IsUsed, // client's list item reads "isRedeemed" specifically
+            redeemedBy,
+            redeemedAt = c.UsedAt?.ToString("O")
+        };
+    }
+}
