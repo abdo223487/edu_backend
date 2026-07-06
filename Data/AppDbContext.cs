@@ -19,6 +19,7 @@ public class AppDbContext : DbContext
     public DbSet<Unit> Units => Set<Unit>();
     public DbSet<Lesson> Lessons => Set<Lesson>();
     public DbSet<StudentUnitSubscription> StudentUnitSubscriptions => Set<StudentUnitSubscription>();
+    public DbSet<StudentLectureUnlock> StudentLectureUnlocks => Set<StudentLectureUnlock>();
     public DbSet<Lecture> Lectures => Set<Lecture>();
     public DbSet<Material> Materials => Set<Material>();
     public DbSet<Notebook> Notebooks => Set<Notebook>();
@@ -110,6 +111,10 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<AssignmentSubmission>()
             .HasIndex(s => new { s.AssignmentId, s.StudentId })
+            .IsUnique();
+
+        modelBuilder.Entity<StudentLectureUnlock>()
+            .HasIndex(u => new { u.StudentId, u.LectureId })
             .IsUnique();
 
         base.OnModelCreating(modelBuilder);

@@ -182,6 +182,18 @@
         <member name="M:EduApi.Migrations.AddAssignments.BuildTargetModel(Microsoft.EntityFrameworkCore.ModelBuilder)">
             <inheritdoc />
         </member>
+        <member name="T:EduApi.Migrations.AddStudentLectureUnlocks">
+            <inheritdoc />
+        </member>
+        <member name="M:EduApi.Migrations.AddStudentLectureUnlocks.Up(Microsoft.EntityFrameworkCore.Migrations.MigrationBuilder)">
+            <inheritdoc />
+        </member>
+        <member name="M:EduApi.Migrations.AddStudentLectureUnlocks.Down(Microsoft.EntityFrameworkCore.Migrations.MigrationBuilder)">
+            <inheritdoc />
+        </member>
+        <member name="M:EduApi.Migrations.AddStudentLectureUnlocks.BuildTargetModel(Microsoft.EntityFrameworkCore.ModelBuilder)">
+            <inheritdoc />
+        </member>
         <member name="T:EduApi.Models.Roles">
             <summary>
             Roles as embedded in the JWT "role" claim.
@@ -230,6 +242,15 @@
         </member>
         <member name="P:EduApi.Models.Lesson.ImageUrl">
             <summary>Mandatory cover image for the lesson (enforced in UnitsController.AddLesson).</summary>
+        </member>
+        <member name="T:EduApi.Models.StudentLectureUnlock">
+            <summary>
+            Grants a student access to one standalone (no-unit) Lecture, created when a
+            Code carrying that LectureId is redeemed (see StudentsController.RedeemCode).
+            Mirrors StudentUnitSubscription, but for standalone lectures instead of units —
+            without this, a noUnitOnly lecture from LecturesController.ByGroup had no gate
+            at all and was visible to every student in the group regardless of any code.
+            </summary>
         </member>
         <member name="P:EduApi.Models.Lecture.GroupIdsCsv">
             <summary>Groups (as a joined string of ids) that this lecture is visible to.</summary>

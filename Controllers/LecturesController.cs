@@ -112,12 +112,20 @@ public class LecturesController : ControllerBase
         if (unitId.HasValue) query = query.Where(l => l.UnitId == unitId.Value);
 
         // Defensive: this action has no [Authorize(Roles=...)] restricting it to
-        // staff, so apply the same subscription gate in case a student token
-        // calls it directly.
+        // staff, so apply the same subscription/unlock gate as ByGroup in case
+        // a student token calls it directly.
         if (User.IsInRole(Roles.Student))
         {
+            var studentId = User.GetUserId();
             var subscribedIds = User.GetUnitIds();
-            query = query.Where(l => l.UnitId == null || subscribedIds.Contains(l.UnitId.Value));
+            var unlockedLectureIds = await _db.StudentLectureUnlocks
+                .Where(u => u.StudentId == studentId)
+                .Select(u => u.LectureId)
+                .ToListAsync();
+
+            query = query.Where(l =>
+                (l.UnitId != null && subscribedIds.Contains(l.UnitId.Value)) ||
+                (l.UnitId == null && unlockedLectureIds.Contains(l.Id)));
         }
 
         var items = await query.OrderBy(l => l.Id).ToListAsync();
@@ -146,12 +154,29 @@ public class LecturesController : ControllerBase
 
         // Same subscription gate as Units/Notifications: a lecture tied to a
         // specific unit is only visible to a student subscribed to that unit.
-        // Lectures with no UnitId (general center/online sessions) pass through
-        // untouched — they were never unit-scoped.
+        //
+        // BUGFIX: lectures with no UnitId (standalone/no-unit online lectures
+        // meant to be unlocked by a plain code, e.g. via Codes/codeables ->
+        // Codes POST with lectureIds) used to pass through completely
+        // ungated — every student in the group could see them with no code
+        // required at all. Now a standalone lecture only shows up once the
+        // student has actually redeemed a code that unlocks it (see
+        // StudentsController.RedeemCode, which now writes to
+        // StudentLectureUnlocks). We query the DB directly (not a JWT claim)
+        // so a lecture appears immediately after redeeming, without needing
+        // to refresh/re-login first.
         if (User.IsInRole(Roles.Student))
         {
+            var studentId = User.GetUserId();
             var subscribedIds = User.GetUnitIds();
-            query = query.Where(l => l.UnitId == null || subscribedIds.Contains(l.UnitId.Value));
+            var unlockedLectureIds = await _db.StudentLectureUnlocks
+                .Where(u => u.StudentId == studentId)
+                .Select(u => u.LectureId)
+                .ToListAsync();
+
+            query = query.Where(l =>
+                (l.UnitId != null && subscribedIds.Contains(l.UnitId.Value)) ||
+                (l.UnitId == null && unlockedLectureIds.Contains(l.Id)));
         }
 
         if (lessonIndex.HasValue) query = query.Where(l => l.LessonIndex == lessonIndex.Value);

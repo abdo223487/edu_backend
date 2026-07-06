@@ -129,6 +129,21 @@ public class StudentUnitSubscription
     public int UnitId { get; set; }
 }
 
+/// <summary>
+/// Grants a student access to one standalone (no-unit) Lecture, created when a
+/// Code carrying that LectureId is redeemed (see StudentsController.RedeemCode).
+/// Mirrors StudentUnitSubscription, but for standalone lectures instead of units —
+/// without this, a noUnitOnly lecture from LecturesController.ByGroup had no gate
+/// at all and was visible to every student in the group regardless of any code.
+/// </summary>
+public class StudentLectureUnlock
+{
+    public int Id { get; set; }
+    public int StudentId { get; set; }
+    public int LectureId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 public enum AttendanceMethod
 {
     Center,

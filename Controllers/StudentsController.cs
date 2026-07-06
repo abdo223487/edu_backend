@@ -274,6 +274,19 @@ public class StudentsController : ControllerBase
                 _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { StudentId = studentId, UnitId = unitId });
         }
 
+        // BUGFIX: code.LectureIds (standalone/no-unit lectures, e.g. an online
+        // lecture created without a Unit) used to be returned in the response
+        // but never actually persisted anywhere — the standalone lecture never
+        // became tied to this student. Meanwhile LecturesController.ByGroup let
+        // EVERY noUnitOnly lecture through untouched for students, no gate at
+        // all, so codes for standalone lectures never restricted anything.
+        // Now we record the unlock here, and ByGroup gates on it below.
+        foreach (var lectureId in code.LectureIds)
+        {
+            if (!await _db.StudentLectureUnlocks.AnyAsync(u => u.StudentId == studentId && u.LectureId == lectureId))
+                _db.StudentLectureUnlocks.Add(new StudentLectureUnlock { StudentId = studentId, LectureId = lectureId });
+        }
+
         await _db.SaveChangesAsync();
         return Ok(new { message = "Code redeemed successfully.", unitIds = code.UnitIds, lectureIds = code.LectureIds });
     }
