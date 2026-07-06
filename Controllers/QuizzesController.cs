@@ -37,6 +37,12 @@ public class QuizzesController : ControllerBase
         _files = files;
     }
 
+    private static string FormatDuration(int minutes)
+    {
+        var ts = TimeSpan.FromMinutes(minutes);
+        return $"{(int)ts.TotalHours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}";
+    }
+
     [HttpGet]
     public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? unitId, [FromQuery] int p = 1)
     {
@@ -90,7 +96,10 @@ public class QuizzesController : ControllerBase
             title = q.Title,
             unitId = q.UnitId,
             durationInMinutes = q.DurationInMinutes,
-            duration = q.DurationInMinutes,
+            // Flutter's ExamDetailPage expects duration as "HH:MM:SS" (it does
+            // widget.duration.split(":")), so format it here instead of sending
+            // a raw minutes count.
+            duration = FormatDuration(q.DurationInMinutes),
             deadline = q.Deadline,
             groupIds = q.GroupIds,
             groups = q.GroupIds.Select(gid => groupNamesById.TryGetValue(gid, out var n) ? n : gid.ToString()).ToList(),
