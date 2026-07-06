@@ -38,19 +38,19 @@ public class LecturesController : ControllerBase
         if (!Enum.TryParse<AttendanceMethod>(request.AttendanceMethod, true, out var method))
             return BadRequest(new { message = "attendanceMethod must be 'Center' or 'Online'." });
 
-        // BUGFIX: SchoolYear used to be left unset (null), so the lecture was
-        // saved successfully but could never show up in "Lectures/by-year",
-        // which filters by SchoolYear — that query would never match a null
-        // value. Teacher JWTs don't carry a "schoolYear" claim (only students
-        // do), so we can't read it from the token either. Instead, derive it
-        // from the chosen Unit (Unit.SchoolYear is always set) when a UnitId
-        // is provided, since every center lecture requires one.
-        int? schoolYear = null;
-        if (request.UnitId.HasValue)
-        {
-            schoolYear = await _db.Units.Where(u => u.Id == request.UnitId.Value)
-                .Select(u => (int?)u.SchoolYear).FirstOrDefaultAsync();
-        }
+        // BUGFIX: SchoolYear used to be left unset (null) whenever UnitId was
+        // omitted, so the lecture was saved fine but could never show up in
+        // "Lectures/by-year" NOR in "Codes/codeables" (both filter by
+        // SchoolYear — neither query ever matches a null value). Teacher JWTs
+        // don't carry a "schoolYear" claim (only students do), so we can't
+        // read it from the token either. When a UnitId is provided we still
+        // derive it from the Unit (Unit.SchoolYear is always set); otherwise
+        // (a standalone/no-unit lecture) we now require the client to send
+        // "schoolYear" explicitly in the request body.
+        int? schoolYear = request.UnitId.HasValue
+            ? await _db.Units.Where(u => u.Id == request.UnitId.Value)
+                .Select(u => (int?)u.SchoolYear).FirstOrDefaultAsync()
+            : request.SchoolYear;
 
         var lecture = new Lecture
         {
@@ -81,6 +81,7 @@ public class LecturesController : ControllerBase
         if (request.AttendanceMethod != null &&
             Enum.TryParse<AttendanceMethod>(request.AttendanceMethod, true, out var method))
             lecture.AttendanceMethod = method;
+        if (request.SchoolYear.HasValue) lecture.SchoolYear = request.SchoolYear.Value;
 
         await _db.SaveChangesAsync();
         return Ok(ToDto(lecture));
