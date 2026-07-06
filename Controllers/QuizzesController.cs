@@ -121,6 +121,17 @@ public class QuizzesController : ControllerBase
         for (var i = 0; form.ContainsKey($"GroupIds[{i}]"); i++)
             groupIds.Add(int.Parse(form[$"GroupIds[{i}]"].ToString()));
 
+        // BUGFIX: SchoolYear was read from User.GetSchoolYear(), which reads the
+        // "schoolYear" JWT claim — but that claim is only ever added for STUDENT
+        // tokens (see TokenService/AuthController), never for Teacher tokens. So
+        // every quiz created by a teacher was saved with SchoolYear = null, and
+        // the teacher's own quiz list ("Quizzes?schoolYear=X") filters by exact
+        // SchoolYear match, so the quiz they just created could never show up.
+        // Fix: derive it from the quiz's own Unit instead (Unit.SchoolYear is
+        // always set, and every quiz requires a UnitId).
+        var schoolYear = await _db.Units.Where(u => u.Id == unitId)
+            .Select(u => (int?)u.SchoolYear).FirstOrDefaultAsync();
+
         var quiz = new Quiz
         {
             Title = title,
@@ -128,7 +139,7 @@ public class QuizzesController : ControllerBase
             DurationInMinutes = duration,
             Deadline = deadline,
             GroupIds = groupIds,
-            SchoolYear = User.GetSchoolYear(),
+            SchoolYear = schoolYear,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
         };
 
@@ -204,6 +215,14 @@ public class QuizzesController : ControllerBase
         var priorResult = await _db.QuizResults.Include(r => r.Answers)
             .FirstOrDefaultAsync(r => r.QuizId == quizId && r.StudentId == studentId);
 
+        // BUGFIX: this endpoint used to hand back the questions with no check
+        // on quiz.Deadline at all, so a student opening the exam after time
+        // was up got in exactly like normal and could still submit answers.
+        // Block it here (unless they already have a result, in which case they
+        // fall through to review mode below as before).
+        if (priorResult == null && DateTime.UtcNow > quiz.Deadline)
+            return StatusCode(410, new { message = "انتهى وقت الامتحان." });
+
         var reviewMode = priorResult != null;
         if (reviewMode) Response.Headers["x-redirected-to"] = "review";
 
@@ -237,6 +256,15 @@ public class QuizzesController : ControllerBase
             return StatusCode(403, new { message = "Not subscribed to this unit." });
 
         var studentId = User.GetUserId();
+
+        // BUGFIX: same deadline gap as GetAsStudent — without this, a student
+        // could still POST a grade after the exam window closed even if the
+        // "get questions" step were fixed, since this is a separate endpoint.
+        var alreadySubmitted = await _db.QuizResults
+            .AnyAsync(r => r.QuizId == quiz.Id && r.StudentId == studentId);
+        if (!alreadySubmitted && DateTime.UtcNow > quiz.Deadline)
+            return StatusCode(410, new { message = "انتهى وقت الامتحان." });
+
         var totalMarks = quiz.Questions.Sum(q => q.Mark);
         var score = 0;
 

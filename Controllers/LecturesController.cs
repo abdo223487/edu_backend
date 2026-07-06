@@ -38,6 +38,20 @@ public class LecturesController : ControllerBase
         if (!Enum.TryParse<AttendanceMethod>(request.AttendanceMethod, true, out var method))
             return BadRequest(new { message = "attendanceMethod must be 'Center' or 'Online'." });
 
+        // BUGFIX: SchoolYear used to be left unset (null), so the lecture was
+        // saved successfully but could never show up in "Lectures/by-year",
+        // which filters by SchoolYear — that query would never match a null
+        // value. Teacher JWTs don't carry a "schoolYear" claim (only students
+        // do), so we can't read it from the token either. Instead, derive it
+        // from the chosen Unit (Unit.SchoolYear is always set) when a UnitId
+        // is provided, since every center lecture requires one.
+        int? schoolYear = null;
+        if (request.UnitId.HasValue)
+        {
+            schoolYear = await _db.Units.Where(u => u.Id == request.UnitId.Value)
+                .Select(u => (int?)u.SchoolYear).FirstOrDefaultAsync();
+        }
+
         var lecture = new Lecture
         {
             Name = request.Name,
@@ -47,6 +61,7 @@ public class LecturesController : ControllerBase
             GroupIds = request.GroupIds ?? new(),
             UnitId = request.UnitId,
             LessonIndex = request.LessonIndex,
+            SchoolYear = schoolYear,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
         };
 
