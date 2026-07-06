@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "eg5XvpXFszI=",
+  "dgSpecHash": "J6D9dVwSezM=",
   "success": true,
-  "projectFilePath": "C:\\Users\\Lenovo\\Downloads\\EduApi_neon\\EduApi\\EduApi.csproj",
+  "projectFilePath": "C:\\Users\\Lenovo\\Desktop\\Alhdad\\edu\\EduApi_neon\\EduApi\\EduApi.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\Lenovo\\.nuget\\packages\\awssdk.core\\3.7.402.2\\awssdk.core.3.7.402.2.nupkg.sha512",
     "C:\\Users\\Lenovo\\.nuget\\packages\\awssdk.s3\\3.7.415.1\\awssdk.s3.3.7.415.1.nupkg.sha512",
@@ -81,9 +81,9 @@
       "code": "NU1903",
       "level": "Warning",
       "message": "Package 'SQLitePCLRaw.lib.e_sqlite3' 2.1.11 has a known high severity vulnerability, https://github.com/advisories/GHSA-2m69-gcr7-jv3q",
-      "projectPath": "C:\\Users\\Lenovo\\Downloads\\EduApi_neon\\EduApi\\EduApi.csproj",
+      "projectPath": "C:\\Users\\Lenovo\\Desktop\\Alhdad\\edu\\EduApi_neon\\EduApi\\EduApi.csproj",
       "warningLevel": 1,
-      "filePath": "C:\\Users\\Lenovo\\Downloads\\EduApi_neon\\EduApi\\EduApi.csproj",
+      "filePath": "C:\\Users\\Lenovo\\Desktop\\Alhdad\\edu\\EduApi_neon\\EduApi\\EduApi.csproj",
       "libraryId": "SQLitePCLRaw.lib.e_sqlite3",
       "targetGraphs": [
         "net10.0"

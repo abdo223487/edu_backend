@@ -4506,11 +4506,11 @@
   "project": {
     "version": "1.0.0",
     "restore": {
-      "projectUniqueName": "C:\\Users\\Lenovo\\Downloads\\EduApi_neon\\EduApi\\EduApi.csproj",
+      "projectUniqueName": "C:\\Users\\Lenovo\\Desktop\\Alhdad\\edu\\EduApi_neon\\EduApi\\EduApi.csproj",
       "projectName": "EduApi",
-      "projectPath": "C:\\Users\\Lenovo\\Downloads\\EduApi_neon\\EduApi\\EduApi.csproj",
+      "projectPath": "C:\\Users\\Lenovo\\Desktop\\Alhdad\\edu\\EduApi_neon\\EduApi\\EduApi.csproj",
       "packagesPath": "C:\\Users\\Lenovo\\.nuget\\packages\\",
-      "outputPath": "C:\\Users\\Lenovo\\Downloads\\EduApi_neon\\EduApi\\obj\\",
+      "outputPath": "C:\\Users\\Lenovo\\Desktop\\Alhdad\\edu\\EduApi_neon\\EduApi\\obj\\",
       "projectStyle": "PackageReference",
       "fallbackFolders": [
         "C:\\Program Files (x86)\\Microsoft Visual Studio\\Shared\\NuGetPackages"

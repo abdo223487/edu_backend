@@ -30,6 +30,10 @@ public class AppDbContext : DbContext
     public DbSet<Question> Questions => Set<Question>();
     public DbSet<QuizResult> QuizResults => Set<QuizResult>();
     public DbSet<QuizAnswer> QuizAnswers => Set<QuizAnswer>();
+    public DbSet<Assignment> Assignments => Set<Assignment>();
+    public DbSet<AssignmentQuestion> AssignmentQuestions => Set<AssignmentQuestion>();
+    public DbSet<AssignmentSubmission> AssignmentSubmissions => Set<AssignmentSubmission>();
+    public DbSet<AssignmentAnswer> AssignmentAnswers => Set<AssignmentAnswer>();
     public DbSet<CenterQuizResult> CenterQuizResults => Set<CenterQuizResult>();
     public DbSet<HomeworkResult> HomeworkResults => Set<HomeworkResult>();
     public DbSet<StateHistoryEntry> StateHistoryEntries => Set<StateHistoryEntry>();
@@ -66,6 +70,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Code>().HasQueryFilter(c => c.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Notification>().HasQueryFilter(n => n.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Quiz>().HasQueryFilter(q => q.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<Assignment>().HasQueryFilter(a => a.TeacherId == _tenant.CurrentTenantId);
 
         // Student doesn't carry TeacherId directly — it's derived through its Group,
         // which itself is tenant-owned. This also automatically tenant-scopes every
@@ -90,6 +95,22 @@ public class AppDbContext : DbContext
             .WithMany(r => r.Answers)
             .HasForeignKey(a => a.QuizResultId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<AssignmentQuestion>()
+            .HasOne(q => q.Assignment)
+            .WithMany(a => a.Questions)
+            .HasForeignKey(q => q.AssignmentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<AssignmentAnswer>()
+            .HasOne(a => a.AssignmentSubmission)
+            .WithMany(s => s.Answers)
+            .HasForeignKey(a => a.AssignmentSubmissionId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<AssignmentSubmission>()
+            .HasIndex(s => new { s.AssignmentId, s.StudentId })
+            .IsUnique();
 
         base.OnModelCreating(modelBuilder);
     }

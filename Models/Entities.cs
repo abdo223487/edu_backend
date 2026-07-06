@@ -369,6 +369,81 @@ public class HomeworkResult
     public DateTime Date { get; set; } = DateTime.UtcNow;
 }
 
+/// <summary>
+/// Homework/assignment ("الواجب") set by a teacher for one or more groups,
+/// covering one or more units. Unlike Quiz (single unit, timed), an Assignment
+/// has no duration — just a Deadline after which no submission is accepted,
+/// and the correct answers are only revealed once that Deadline has fully
+/// passed (never immediately after a student submits).
+/// </summary>
+public class Assignment
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = default!;
+    public int? SchoolYear { get; set; }
+    public DateTime Deadline { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    public string GroupIdsCsv { get; set; } = string.Empty;
+    [NotMapped] public List<int> GroupIds
+    {
+        get => GroupIdsCsv.Length == 0 ? new() : GroupIdsCsv.Split(',').Select(int.Parse).ToList();
+        set => GroupIdsCsv = string.Join(',', value);
+    }
+
+    public string UnitIdsCsv { get; set; } = string.Empty;
+    [NotMapped] public List<int> UnitIds
+    {
+        get => UnitIdsCsv.Length == 0 ? new() : UnitIdsCsv.Split(',').Select(int.Parse).ToList();
+        set => UnitIdsCsv = string.Join(',', value);
+    }
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this assignment belongs to.</summary>
+    public int TeacherId { get; set; }
+
+    public ICollection<AssignmentQuestion> Questions { get; set; } = new List<AssignmentQuestion>();
+}
+
+public class AssignmentQuestion
+{
+    public int Id { get; set; }
+    public int AssignmentId { get; set; }
+    [ForeignKey(nameof(AssignmentId))] public Assignment? Assignment { get; set; }
+    public string Type { get; set; } = "MCQ";
+    public string Text { get; set; } = default!;
+    public string Answer { get; set; } = default!;
+    public int Mark { get; set; }
+    public string ChoicesCsv { get; set; } = string.Empty;
+    [NotMapped] public List<string> Choices
+    {
+        get => ChoicesCsv.Length == 0 ? new() : ChoicesCsv.Split('\u001F').ToList();
+        set => ChoicesCsv = string.Join('\u001F', value);
+    }
+    public string? ImageUrl { get; set; }
+}
+
+/// <summary>A student's single submission of an Assignment.</summary>
+public class AssignmentSubmission
+{
+    public int Id { get; set; }
+    public int AssignmentId { get; set; }
+    public int StudentId { get; set; }
+    public int Score { get; set; }
+    public int TotalMarks { get; set; }
+    public DateTime SubmittedAt { get; set; } = DateTime.UtcNow;
+    public ICollection<AssignmentAnswer> Answers { get; set; } = new List<AssignmentAnswer>();
+}
+
+public class AssignmentAnswer
+{
+    public int Id { get; set; }
+    public int AssignmentSubmissionId { get; set; }
+    [ForeignKey(nameof(AssignmentSubmissionId))] public AssignmentSubmission? AssignmentSubmission { get; set; }
+    public int QuestionId { get; set; }
+    public string Answer { get; set; } = default!;
+    public int? MarkAwarded { get; set; }
+}
+
 public class AppVersion
 {
     public int Id { get; set; }

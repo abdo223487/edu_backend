@@ -68,6 +68,7 @@
              GET AppVersions/latest    (called with no auth requirement on app startup)
             </summary>
         </member>
+        <!-- Badly formed XML comment ignored for member "T:EduApi.Controllers.AssignmentsController" -->
         <member name="T:EduApi.Controllers.AttendanceController">
             <summary>
             Route: api/Attendance
@@ -169,6 +170,18 @@
         <member name="M:EduApi.Migrations.InitialCreate.BuildTargetModel(Microsoft.EntityFrameworkCore.ModelBuilder)">
             <inheritdoc />
         </member>
+        <member name="T:EduApi.Migrations.AddAssignments">
+            <inheritdoc />
+        </member>
+        <member name="M:EduApi.Migrations.AddAssignments.Up(Microsoft.EntityFrameworkCore.Migrations.MigrationBuilder)">
+            <inheritdoc />
+        </member>
+        <member name="M:EduApi.Migrations.AddAssignments.Down(Microsoft.EntityFrameworkCore.Migrations.MigrationBuilder)">
+            <inheritdoc />
+        </member>
+        <member name="M:EduApi.Migrations.AddAssignments.BuildTargetModel(Microsoft.EntityFrameworkCore.ModelBuilder)">
+            <inheritdoc />
+        </member>
         <member name="T:EduApi.Models.Roles">
             <summary>
             Roles as embedded in the JWT "role" claim.
@@ -251,6 +264,21 @@
             Manually recorded center (offline) quiz/homework results, entered by a teacher
             via "Students/quiz-results/center/add" and "Students/homework-results/add".
             </summary>
+        </member>
+        <member name="T:EduApi.Models.Assignment">
+            <summary>
+            Homework/assignment ("الواجب") set by a teacher for one or more groups,
+            covering one or more units. Unlike Quiz (single unit, timed), an Assignment
+            has no duration — just a Deadline after which no submission is accepted,
+            and the correct answers are only revealed once that Deadline has fully
+            passed (never immediately after a student submits).
+            </summary>
+        </member>
+        <member name="P:EduApi.Models.Assignment.TeacherId">
+            <summary>TENANT LAYER: which teacher (tenant) this assignment belongs to.</summary>
+        </member>
+        <member name="T:EduApi.Models.AssignmentSubmission">
+            <summary>A student's single submission of an Assignment.</summary>
         </member>
         <member name="T:EduApi.Services.FileStorageService">
              <summary>
