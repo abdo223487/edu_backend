@@ -52,9 +52,25 @@ public class CodesController : ControllerBase
             .ToListAsync();
 
         var unitIds = units.Select(u => u.Id).ToList();
+
+        // A lecture is only "codeable" (redeemable via a Code) when a student
+        // has no other way to reach it: it must be an Online lecture with an
+        // actual YouTube link (a Center-only lecture, or an Online lecture
+        // still missing its link, isn't watchable yet), and it must carry a
+        // SchoolYear and at least one Group — the same fields that gate every
+        // other student-facing lecture query (ByGroup/ByYear). Without this
+        // filter, codes could be generated for lectures that either aren't
+        // playable or aren't scoped to any year/group at all.
+        static bool IsCodeable(Lecture l) =>
+            l.AttendanceMethod == AttendanceMethod.Online &&
+            !string.IsNullOrWhiteSpace(l.YoutubeLink) &&
+            l.SchoolYear != null &&
+            !string.IsNullOrEmpty(l.GroupIdsCsv);
+
         var lecturesByUnit = await _db.Lectures
             .Where(l => l.UnitId != null && unitIds.Contains(l.UnitId.Value))
             .ToListAsync();
+        lecturesByUnit = lecturesByUnit.Where(IsCodeable).ToList();
 
         var unitTree = units.Select(u => new
         {
@@ -67,16 +83,26 @@ public class CodesController : ControllerBase
                     .Where(l => l.UnitId == u.Id && l.LessonIndex == lesson.LessonIndex)
                     .Select(l => new { id = l.Id, name = l.Name })
                     .ToList()
-            }).ToList()
-        }).ToList();
+            })
+            // Drop lessons that end up with zero codeable lectures — nothing
+            // in them could actually be granted by a code.
+            .Where(lesson => lesson.lectures.Count > 0)
+            .ToList()
+        })
+        // Likewise drop units left with no codeable lessons at all.
+        .Where(u => u.lessons.Count > 0)
+        .ToList();
 
-        var standaloneLectures = await _db.Lectures.Where(l => l.UnitId == null && l.SchoolYear == schoolYear)
-            .Select(l => new { id = l.Id, name = l.Name })
+        var standaloneLectures = await _db.Lectures
+            .Where(l => l.UnitId == null && l.SchoolYear == schoolYear)
             .ToListAsync();
+        var standaloneDtos = standaloneLectures.Where(IsCodeable)
+            .Select(l => new { id = l.Id, name = l.Name })
+            .ToList();
 
         // NOTE: key is "lectures", NOT "standaloneLectures" — the client does
         // `standaloneLectures = data['lectures'] ?? []`.
-        return Ok(new { units = unitTree, lectures = standaloneLectures });
+        return Ok(new { units = unitTree, lectures = standaloneDtos });
     }
 
     [HttpGet]

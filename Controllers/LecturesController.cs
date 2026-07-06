@@ -124,8 +124,14 @@ public class LecturesController : ControllerBase
                 .Select(u => u.LectureId)
                 .ToListAsync();
 
+            // A lecture inside a Unit is visible either because the student is
+            // subscribed to the whole Unit, OR because they redeemed a code
+            // that unlocked that ONE lecture specifically (see RedeemCode) —
+            // previously only a full-unit subscription counted here, so a
+            // lecture-level code for an in-unit lecture was granted but never
+            // actually visible to the student.
             query = query.Where(l =>
-                (l.UnitId != null && subscribedIds.Contains(l.UnitId.Value)) ||
+                (l.UnitId != null && (subscribedIds.Contains(l.UnitId.Value) || unlockedLectureIds.Contains(l.Id))) ||
                 (l.UnitId == null && unlockedLectureIds.Contains(l.Id)));
         }
 
@@ -175,8 +181,11 @@ public class LecturesController : ControllerBase
                 .Select(u => u.LectureId)
                 .ToListAsync();
 
+            // See identical note in ByYear: a lecture-level code unlock must
+            // grant visibility to that lecture even when it belongs to a Unit
+            // the student never subscribed to as a whole.
             query = query.Where(l =>
-                (l.UnitId != null && subscribedIds.Contains(l.UnitId.Value)) ||
+                (l.UnitId != null && (subscribedIds.Contains(l.UnitId.Value) || unlockedLectureIds.Contains(l.Id))) ||
                 (l.UnitId == null && unlockedLectureIds.Contains(l.Id)));
         }
 
@@ -202,7 +211,16 @@ public class LecturesController : ControllerBase
             var lecture = await _db.Lectures.FirstOrDefaultAsync(l => l.Id == lectureId);
             if (lecture == null) return NotFound(new { message = "Lecture not found." });
             if (lecture.UnitId.HasValue && !User.GetUnitIds().Contains(lecture.UnitId.Value))
-                return StatusCode(403, new { message = "Not subscribed to this unit." });
+            {
+                // Same lecture-level-unlock exception as ByGroup/ByYear: a
+                // code redeemed for this one in-unit lecture should still let
+                // the student open its materials without a full subscription.
+                var studentId = User.GetUserId();
+                var unlocked = await _db.StudentLectureUnlocks
+                    .AnyAsync(u => u.StudentId == studentId && u.LectureId == lectureId);
+                if (!unlocked)
+                    return StatusCode(403, new { message = "Not subscribed to this unit." });
+            }
         }
 
         var materials = await _db.Materials.Where(m => m.LectureId == lectureId)

@@ -44,12 +44,25 @@ public class UnitsController : ControllerBase
 
         // Students only ever see units they're actually subscribed to
         // (StudentUnitSubscription, snapshotted into the "unitIds" JWT claim at
-        // login/refresh) — NOT every unit in their school year. Teacher/staff
-        // callers are unaffected (they manage the full catalog).
+        // login/refresh), OR a unit where they've redeemed a lecture-level
+        // code for at least one lecture inside it — in that case they only
+        // bought a single lesson's worth of content, not the whole unit, but
+        // the unit itself still needs to show up so they can open it (see
+        // GetUnit below, which trims it down to just that lesson). Teacher/
+        // staff callers are unaffected (they manage the full catalog).
         if (User.IsInRole(Roles.Student))
         {
             var subscribedIds = User.GetUnitIds();
-            query = query.Where(u => subscribedIds.Contains(u.Id));
+            var studentId = User.GetUserId();
+            var unlockedUnitIds = await _db.StudentLectureUnlocks
+                .Where(u => u.StudentId == studentId)
+                .Join(_db.Lectures, u => u.LectureId, l => l.Id, (u, l) => l.UnitId)
+                .Where(unitId => unitId != null)
+                .Select(unitId => unitId!.Value)
+                .Distinct()
+                .ToListAsync();
+
+            query = query.Where(u => subscribedIds.Contains(u.Id) || unlockedUnitIds.Contains(u.Id));
         }
 
         var units = await query
@@ -62,19 +75,40 @@ public class UnitsController : ControllerBase
     [HttpGet("{unitId:int}")]
     public async Task<IActionResult> GetUnit(int unitId)
     {
-        // Same subscription gate as the list endpoint, applied here too so a
-        // student can't bypass it by guessing/hardcoding a unitId directly.
+        // Same subscription gate as the list endpoint, plus the lecture-level
+        // exception: a student who redeemed a code for one lecture inside
+        // this unit (but never subscribed to the whole thing) is allowed in
+        // too — see below, where the lessons list gets trimmed to match.
+        HashSet<int>? unlockedLessonIndexes = null;
         if (User.IsInRole(Roles.Student) && !User.GetUnitIds().Contains(unitId))
-            return StatusCode(403, new { message = "Not subscribed to this unit." });
+        {
+            var studentId = User.GetUserId();
+            unlockedLessonIndexes = (await _db.StudentLectureUnlocks
+                    .Where(u => u.StudentId == studentId)
+                    .Join(_db.Lectures, u => u.LectureId, l => l.Id, (u, l) => l)
+                    .Where(l => l.UnitId == unitId && l.LessonIndex != null)
+                    .Select(l => l.LessonIndex!.Value)
+                    .Distinct()
+                    .ToListAsync())
+                .ToHashSet();
+
+            if (unlockedLessonIndexes.Count == 0)
+                return StatusCode(403, new { message = "Not subscribed to this unit." });
+        }
 
         var unit = await _db.Units.Include(u => u.Lessons)
             .FirstOrDefaultAsync(u => u.Id == unitId);
         if (unit == null) return NotFound(new { message = "Unit not found." });
 
+        var lessons = unit.Lessons.OrderBy(l => l.LessonIndex).AsEnumerable();
+        // Not a full subscriber — only expose the lesson(s) actually unlocked
+        // by a redeemed code, not the whole unit's content.
+        if (unlockedLessonIndexes != null)
+            lessons = lessons.Where(l => unlockedLessonIndexes.Contains(l.LessonIndex));
+
         var dto = new UnitDetailDto(
             unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl,
-            unit.Lessons.OrderBy(l => l.LessonIndex)
-                .Select(l => new LessonDto(l.LessonIndex, l.Name, l.ImageUrl)).ToList());
+            lessons.Select(l => new LessonDto(l.LessonIndex, l.Name, l.ImageUrl)).ToList());
 
         return Ok(dto);
     }
