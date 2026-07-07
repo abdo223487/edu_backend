@@ -459,6 +459,106 @@ public class AssignmentAnswer
     public int? MarkAwarded { get; set; }
 }
 
+/// <summary>
+/// A single reusable question in the teacher's "question bank" ("بنك الأسئلة"),
+/// always scoped to one specific Lesson and tagged with a Difficulty. Students
+/// later build their own timed practice quiz ("BankAttempt") by picking
+/// unit(s)/lesson(s) + difficulty + how many questions + a duration.
+/// </summary>
+public class BankQuestion
+{
+    public int Id { get; set; }
+    public int LessonId { get; set; }
+    [ForeignKey(nameof(LessonId))] public Lesson? Lesson { get; set; }
+
+    public string Type { get; set; } = "MCQ";
+    public string Text { get; set; } = default!;
+    public string Answer { get; set; } = default!;
+    public int Mark { get; set; }
+    public string ChoicesCsv { get; set; } = string.Empty;
+    [NotMapped] public List<string> Choices
+    {
+        get => ChoicesCsv.Length == 0 ? new() : ChoicesCsv.Split('\u001F').ToList();
+        set => ChoicesCsv = string.Join('\u001F', value);
+    }
+    public string? ImageUrl { get; set; }
+
+    /// <summary>"Easy" | "Medium" | "Hard".</summary>
+    public string Difficulty { get; set; } = "Medium";
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this bank question belongs to.</summary>
+    public int TeacherId { get; set; }
+}
+
+/// <summary>
+/// A student-generated timed practice quiz pulled from the question bank.
+/// Behaves like a Quiz: the Deadline is computed at creation time
+/// (StartedAt + DurationMinutes), and the correction is shown immediately
+/// after submitting (or once the deadline passes), unlike Assignment.
+/// </summary>
+public class BankAttempt
+{
+    public int Id { get; set; }
+    public int StudentId { get; set; }
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this attempt's bank belongs to.</summary>
+    public int TeacherId { get; set; }
+
+    public string UnitIdsCsv { get; set; } = string.Empty;
+    [NotMapped] public List<int> UnitIds
+    {
+        get => UnitIdsCsv.Length == 0 ? new() : UnitIdsCsv.Split(',').Select(int.Parse).ToList();
+        set => UnitIdsCsv = string.Join(',', value);
+    }
+
+    /// <summary>Empty means "all lessons within the selected units".</summary>
+    public string LessonIdsCsv { get; set; } = string.Empty;
+    [NotMapped] public List<int> LessonIds
+    {
+        get => LessonIdsCsv.Length == 0 ? new() : LessonIdsCsv.Split(',').Select(int.Parse).ToList();
+        set => LessonIdsCsv = string.Join(',', value);
+    }
+
+    /// <summary>"Easy" | "Medium" | "Hard" | null (any difficulty).</summary>
+    public string? Difficulty { get; set; }
+
+    public int DurationMinutes { get; set; }
+    public DateTime StartedAt { get; set; } = DateTime.UtcNow;
+    public DateTime Deadline { get; set; }
+
+    public int Score { get; set; }
+    public int TotalMarks { get; set; }
+    public DateTime? SubmittedAt { get; set; }
+
+    public ICollection<BankAttemptQuestion> Questions { get; set; } = new List<BankAttemptQuestion>();
+}
+
+public class BankAttemptQuestion
+{
+    public int Id { get; set; }
+    public int AttemptId { get; set; }
+    [ForeignKey(nameof(AttemptId))] public BankAttempt? Attempt { get; set; }
+
+    public int BankQuestionId { get; set; }
+    [ForeignKey(nameof(BankQuestionId))] public BankQuestion? BankQuestion { get; set; }
+
+    public string? Answer { get; set; }
+    public int? MarkAwarded { get; set; }
+
+    /// <summary>
+    /// Snapshot of this MCQ's choices in a randomized order, fixed at attempt
+    /// creation time so re-loading the same attempt doesn't reshuffle the
+    /// options underneath the student's already-selected answer. Empty for
+    /// non-MCQ question types.
+    /// </summary>
+    public string ShuffledChoicesCsv { get; set; } = string.Empty;
+    [NotMapped] public List<string> ShuffledChoices
+    {
+        get => ShuffledChoicesCsv.Length == 0 ? new() : ShuffledChoicesCsv.Split('\u001F').ToList();
+        set => ShuffledChoicesCsv = string.Join('\u001F', value);
+    }
+}
+
 public class AppVersion
 {
     public int Id { get; set; }

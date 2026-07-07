@@ -35,6 +35,9 @@ public class AppDbContext : DbContext
     public DbSet<AssignmentQuestion> AssignmentQuestions => Set<AssignmentQuestion>();
     public DbSet<AssignmentSubmission> AssignmentSubmissions => Set<AssignmentSubmission>();
     public DbSet<AssignmentAnswer> AssignmentAnswers => Set<AssignmentAnswer>();
+    public DbSet<BankQuestion> BankQuestions => Set<BankQuestion>();
+    public DbSet<BankAttempt> BankAttempts => Set<BankAttempt>();
+    public DbSet<BankAttemptQuestion> BankAttemptQuestions => Set<BankAttemptQuestion>();
     public DbSet<CenterQuizResult> CenterQuizResults => Set<CenterQuizResult>();
     public DbSet<HomeworkResult> HomeworkResults => Set<HomeworkResult>();
     public DbSet<StateHistoryEntry> StateHistoryEntries => Set<StateHistoryEntry>();
@@ -72,6 +75,8 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Notification>().HasQueryFilter(n => n.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Quiz>().HasQueryFilter(q => q.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Assignment>().HasQueryFilter(a => a.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<BankQuestion>().HasQueryFilter(bq => bq.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<BankAttempt>().HasQueryFilter(ba => ba.TeacherId == _tenant.CurrentTenantId);
 
         // Student doesn't carry TeacherId directly — it's derived through its Group,
         // which itself is tenant-owned. This also automatically tenant-scopes every
@@ -116,6 +121,18 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<StudentLectureUnlock>()
             .HasIndex(u => new { u.StudentId, u.LectureId })
             .IsUnique();
+
+        modelBuilder.Entity<BankAttemptQuestion>()
+            .HasOne(q => q.Attempt)
+            .WithMany(a => a.Questions)
+            .HasForeignKey(q => q.AttemptId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<BankAttemptQuestion>()
+            .HasOne(q => q.BankQuestion)
+            .WithMany()
+            .HasForeignKey(q => q.BankQuestionId)
+            .OnDelete(DeleteBehavior.Restrict);
 
         base.OnModelCreating(modelBuilder);
     }
