@@ -54,11 +54,21 @@ public class UnitsController : ControllerBase
         {
             var subscribedIds = User.GetUnitIds();
             var studentId = User.GetUserId();
-            var unlockedUnitIds = await _db.StudentLectureUnlocks
+
+            // BUGFIX: this used to be a single .Join(...) between
+            // StudentLectureUnlocks and Lectures selecting a nullable
+            // l.UnitId — that shape fails to translate reliably in EF Core
+            // and was throwing at runtime, breaking EVERY student request to
+            // this endpoint (and GetUnit below had the same pattern). Split
+            // into two plain queries instead: first the unlocked lecture
+            // ids, then which units those lectures belong to.
+            var unlockedLectureIds = await _db.StudentLectureUnlocks
                 .Where(u => u.StudentId == studentId)
-                .Join(_db.Lectures, u => u.LectureId, l => l.Id, (u, l) => l.UnitId)
-                .Where(unitId => unitId != null)
-                .Select(unitId => unitId!.Value)
+                .Select(u => u.LectureId)
+                .ToListAsync();
+            var unlockedUnitIds = await _db.Lectures
+                .Where(l => unlockedLectureIds.Contains(l.Id) && l.UnitId != null)
+                .Select(l => l.UnitId!.Value)
                 .Distinct()
                 .ToListAsync();
 
@@ -83,10 +93,15 @@ public class UnitsController : ControllerBase
         if (User.IsInRole(Roles.Student) && !User.GetUnitIds().Contains(unitId))
         {
             var studentId = User.GetUserId();
-            unlockedLessonIndexes = (await _db.StudentLectureUnlocks
-                    .Where(u => u.StudentId == studentId)
-                    .Join(_db.Lectures, u => u.LectureId, l => l.Id, (u, l) => l)
-                    .Where(l => l.UnitId == unitId && l.LessonIndex != null)
+
+            // Same fix as GetUnits above: two plain queries instead of a
+            // Join across a nullable column, which was throwing at runtime.
+            var unlockedLectureIds = await _db.StudentLectureUnlocks
+                .Where(u => u.StudentId == studentId)
+                .Select(u => u.LectureId)
+                .ToListAsync();
+            unlockedLessonIndexes = (await _db.Lectures
+                    .Where(l => unlockedLectureIds.Contains(l.Id) && l.UnitId == unitId && l.LessonIndex != null)
                     .Select(l => l.LessonIndex!.Value)
                     .Distinct()
                     .ToListAsync())

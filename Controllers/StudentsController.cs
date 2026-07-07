@@ -309,11 +309,15 @@ public class StudentsController : ControllerBase
         var student = await _db.Students.FirstOrDefaultAsync(s => s.Id == sid.Value);
         if (student == null) return NotFound(new { message = "Student not found." });
 
-        // Lectures scheduled for this student's group (Center attendance-taking only
-        // makes sense for Center lectures, but we don't hard-filter on that here since
-        // the client never distinguishes by attendanceMethod for this endpoint).
+        // Lectures scheduled for this student's group. Attendance-taking only
+        // makes sense for Center (on-site) lectures — Online lectures are
+        // watched on-demand and were never meant to show up here at all, but
+        // this query used to return both, so a student's attendance summary
+        // counted Online lectures as "absent" even though nobody ever takes
+        // attendance for them.
         var lecturesQuery = _db.Lectures
-            .Where(l => l.GroupIdsCsv.Contains(student.GroupId.ToString()));
+            .Where(l => l.GroupIdsCsv.Contains(student.GroupId.ToString())
+                && l.AttendanceMethod == AttendanceMethod.Center);
         if (unitId.HasValue) lecturesQuery = lecturesQuery.Where(l => l.UnitId == unitId.Value);
 
         var lectures = await lecturesQuery.OrderBy(l => l.CreatedAt).ToListAsync();
