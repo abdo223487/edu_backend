@@ -53,19 +53,34 @@ public class CodesController : ControllerBase
 
         var unitIds = units.Select(u => u.Id).ToList();
 
+        // Some lectures were saved earlier with SchoolYear = null (created
+        // without a Unit, before the Create endpoint derived it from the
+        // Group). Rather than requiring a DB backfill, compute an "effective"
+        // school year here: SchoolYear if set, otherwise the SchoolYear of
+        // the first Group the lecture belongs to (every lecture's group
+        // belongs to exactly one year, so this is always safe/correct).
+        var allGroupYears = await _db.Groups.ToDictionaryAsync(g => g.Id, g => g.SchoolYear);
+        int? EffectiveYear(Lecture l)
+        {
+            if (l.SchoolYear.HasValue) return l.SchoolYear;
+            foreach (var gid in l.GroupIds)
+                if (allGroupYears.TryGetValue(gid, out var y)) return y;
+            return null;
+        }
+
         // A lecture is only "codeable" (redeemable via a Code) when a student
         // has no other way to reach it: it must be an Online lecture with an
         // actual YouTube link (a Center-only lecture, or an Online lecture
-        // still missing its link, isn't watchable yet), and it must carry a
-        // SchoolYear and at least one Group — the same fields that gate every
-        // other student-facing lecture query (ByGroup/ByYear). Without this
-        // filter, codes could be generated for lectures that either aren't
-        // playable or aren't scoped to any year/group at all.
-        static bool IsCodeable(Lecture l) =>
+        // still missing its link, isn't watchable yet), and it must belong to
+        // this school year (directly or via its group) and carry at least
+        // one Group. Without this filter, codes could be generated for
+        // lectures that either aren't playable or aren't scoped to any
+        // year/group at all.
+        bool IsCodeable(Lecture l) =>
             l.AttendanceMethod == AttendanceMethod.Online &&
             !string.IsNullOrWhiteSpace(l.YoutubeLink) &&
-            l.SchoolYear != null &&
-            !string.IsNullOrEmpty(l.GroupIdsCsv);
+            !string.IsNullOrEmpty(l.GroupIdsCsv) &&
+            EffectiveYear(l) == schoolYear;
 
         var lecturesByUnit = await _db.Lectures
             .Where(l => l.UnitId != null && unitIds.Contains(l.UnitId.Value))
@@ -93,8 +108,11 @@ public class CodesController : ControllerBase
         .Where(u => u.lessons.Count > 0)
         .ToList();
 
+        // Fetch all no-unit lectures (not just ones with SchoolYear already
+        // set) so IsCodeable's group-fallback can still catch the
+        // already-created null-SchoolYear rows described above.
         var standaloneLectures = await _db.Lectures
-            .Where(l => l.UnitId == null && l.SchoolYear == schoolYear)
+            .Where(l => l.UnitId == null)
             .ToListAsync();
         var standaloneDtos = standaloneLectures.Where(IsCodeable)
             .Select(l => new { id = l.Id, name = l.Name })
@@ -103,6 +121,62 @@ public class CodesController : ControllerBase
         // NOTE: key is "lectures", NOT "standaloneLectures" — the client does
         // `standaloneLectures = data['lectures'] ?? []`.
         return Ok(new { units = unitTree, lectures = standaloneDtos });
+    }
+
+    // TEMPORARY DEBUG ENDPOINT — remove once codeables filtering is confirmed
+    // working. Shows the RAW field values for every lecture in this school
+    // year (both in-unit and standalone) so you can see exactly which of the
+    // 4 conditions (Online / YoutubeLink / SchoolYear / GroupIds) is failing,
+    // instead of just getting an empty result with no explanation.
+    // GET Codes/codeables/debug?schoolYear=..
+    [HttpGet("codeables/debug")]
+    public async Task<IActionResult> GetCodeablesDebug([FromQuery] int schoolYear)
+    {
+        var unitIds = await _db.Units.Where(u => u.SchoolYear == schoolYear).Select(u => u.Id).ToListAsync();
+        var allGroupYears = await _db.Groups.ToDictionaryAsync(g => g.Id, g => g.SchoolYear);
+
+        int? EffectiveYear(Lecture l)
+        {
+            if (l.SchoolYear.HasValue) return l.SchoolYear;
+            foreach (var gid in l.GroupIds)
+                if (allGroupYears.TryGetValue(gid, out var y)) return y;
+            return null;
+        }
+
+        var inUnitLectures = await _db.Lectures
+            .Where(l => l.UnitId != null && unitIds.Contains(l.UnitId.Value))
+            .ToListAsync();
+        // No year filter here on purpose — show every no-unit lecture so you
+        // can see its effectiveYear even if raw SchoolYear is null.
+        var standalone = await _db.Lectures.Where(l => l.UnitId == null).ToListAsync();
+
+        object Dump(Lecture l) => new
+        {
+            id = l.Id,
+            name = l.Name,
+            unitId = l.UnitId,
+            lessonIndex = l.LessonIndex,
+            attendanceMethod = l.AttendanceMethod.ToString(),
+            youtubeLink = l.YoutubeLink,
+            rawSchoolYear = l.SchoolYear,
+            effectiveSchoolYear = EffectiveYear(l),
+            groupIdsCsv = l.GroupIdsCsv,
+            // which of the conditions this lecture fails, if any
+            failsBecause = new
+            {
+                notOnline = l.AttendanceMethod != AttendanceMethod.Online,
+                noYoutubeLink = string.IsNullOrWhiteSpace(l.YoutubeLink),
+                noGroup = string.IsNullOrEmpty(l.GroupIdsCsv),
+                effectiveYearDoesNotMatchRequested = EffectiveYear(l) != schoolYear
+            }
+        };
+
+        return Ok(new
+        {
+            unitIdsFoundForYear = unitIds,
+            inUnitLectures = inUnitLectures.Select(Dump),
+            standaloneLectures = standalone.Select(Dump)
+        });
     }
 
     [HttpGet]

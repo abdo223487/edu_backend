@@ -43,14 +43,32 @@ public class LecturesController : ControllerBase
         // "Lectures/by-year" NOR in "Codes/codeables" (both filter by
         // SchoolYear — neither query ever matches a null value). Teacher JWTs
         // don't carry a "schoolYear" claim (only students do), so we can't
-        // read it from the token either. When a UnitId is provided we still
-        // derive it from the Unit (Unit.SchoolYear is always set); otherwise
-        // (a standalone/no-unit lecture) we now require the client to send
-        // "schoolYear" explicitly in the request body.
-        int? schoolYear = request.UnitId.HasValue
-            ? await _db.Units.Where(u => u.Id == request.UnitId.Value)
-                .Select(u => (int?)u.SchoolYear).FirstOrDefaultAsync()
-            : request.SchoolYear;
+        // read it from the token either. When a UnitId is provided we derive
+        // it from the Unit (Unit.SchoolYear is always set). Otherwise we used
+        // to require the client to send "schoolYear" explicitly — but the
+        // real client NEVER sends it for Center or Online lectures, so every
+        // no-unit lecture kept landing with SchoolYear = null even though it
+        // always carries at least one GroupId. Now we fall back to that
+        // group's SchoolYear (a lecture's group always belongs to exactly one
+        // school year), which is exactly how the teacher expects "the group's
+        // year" to be inferred.
+        int? schoolYear;
+        if (request.UnitId.HasValue)
+        {
+            schoolYear = await _db.Units.Where(u => u.Id == request.UnitId.Value)
+                .Select(u => (int?)u.SchoolYear).FirstOrDefaultAsync();
+        }
+        else if (request.SchoolYear.HasValue)
+        {
+            schoolYear = request.SchoolYear;
+        }
+        else
+        {
+            var firstGroupId = (request.GroupIds ?? new()).FirstOrDefault();
+            schoolYear = firstGroupId != 0
+                ? await _db.Groups.Where(g => g.Id == firstGroupId).Select(g => (int?)g.SchoolYear).FirstOrDefaultAsync()
+                : null;
+        }
 
         var lecture = new Lecture
         {
