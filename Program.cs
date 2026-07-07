@@ -129,6 +129,50 @@ builder.Services.AddSwaggerGen(options =>
 
 var app = builder.Build();
 
+// ---------- Apply pending migrations ----------
+// BUGFIX: nothing in this project ever called Database.Migrate() — every
+// migration added to the codebase (e.g. AddStudentLectureUnlocks) had to be
+// applied to the live Postgres database manually via the CLI, and that step
+// was missed at least once, which meant the app's code referenced a table
+// ("StudentLectureUnlocks") that never actually existed in the real database
+// -> every query touching it failed with Postgres error 42P01 ("relation
+// does not exist"), even though the C# code was completely correct.
+//
+// Safer version of "just call Migrate() unconditionally": a bare Migrate()
+// call would turn a bad DB connection/permission problem into the ENTIRE app
+// refusing to start (crash-loop), instead of just the one feature that
+// actually needs the missing table. So here we:
+//   1) only attempt it if EF actually reports pending migrations (cheap,
+//      read-only check — avoids taking any DB lock on every single restart
+//      when there's nothing to do),
+//   2) log exactly which migrations are pending before applying them, so
+//      this is visible in the deploy logs instead of a silent no-op,
+//   3) catch and log a failure instead of throwing — the app still starts
+//      and every OTHER feature keeps working; only whatever depends on the
+//      missing table will fail, with a clear log line pointing at why.
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    try
+    {
+        var pending = db.Database.GetPendingMigrations().ToList();
+        if (pending.Count > 0)
+        {
+            logger.LogWarning("Applying {Count} pending EF Core migration(s): {Migrations}",
+                pending.Count, string.Join(", ", pending));
+            db.Database.Migrate();
+            logger.LogInformation("Migrations applied successfully.");
+        }
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex,
+            "Failed to apply pending EF Core migrations. The app will still start, " +
+            "but any feature depending on a missing table/column will fail until this is resolved manually.");
+    }
+}
+
 // ---------- Seed demo data ----------
 using (var scope = app.Services.CreateScope())
 {
