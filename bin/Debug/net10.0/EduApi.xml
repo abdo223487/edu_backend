@@ -194,6 +194,18 @@
         <member name="M:EduApi.Migrations.AddStudentLectureUnlocks.BuildTargetModel(Microsoft.EntityFrameworkCore.ModelBuilder)">
             <inheritdoc />
         </member>
+        <member name="T:EduApi.Migrations.FixStudentLectureUnlocksTable">
+            <inheritdoc />
+        </member>
+        <member name="M:EduApi.Migrations.FixStudentLectureUnlocksTable.Up(Microsoft.EntityFrameworkCore.Migrations.MigrationBuilder)">
+            <inheritdoc />
+        </member>
+        <member name="M:EduApi.Migrations.FixStudentLectureUnlocksTable.Down(Microsoft.EntityFrameworkCore.Migrations.MigrationBuilder)">
+            <inheritdoc />
+        </member>
+        <member name="M:EduApi.Migrations.FixStudentLectureUnlocksTable.BuildTargetModel(Microsoft.EntityFrameworkCore.ModelBuilder)">
+            <inheritdoc />
+        </member>
         <member name="T:EduApi.Models.Roles">
             <summary>
             Roles as embedded in the JWT "role" claim.
