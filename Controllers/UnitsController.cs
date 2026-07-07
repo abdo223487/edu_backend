@@ -123,7 +123,7 @@ public class UnitsController : ControllerBase
 
         var dto = new UnitDetailDto(
             unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl,
-            lessons.Select(l => new LessonDto(l.LessonIndex, l.Name, l.ImageUrl)).ToList());
+            lessons.Select(l => new LessonDto(l.Id, l.LessonIndex, l.Name, l.ImageUrl)).ToList());
 
         return Ok(dto);
     }
@@ -248,7 +248,7 @@ public class UnitsController : ControllerBase
         _db.Lessons.Add(lesson);
         await _db.SaveChangesAsync();
 
-        return StatusCode(201, new LessonDto(lesson.LessonIndex, lesson.Name, lesson.ImageUrl));
+        return StatusCode(201, new LessonDto(lesson.Id, lesson.LessonIndex, lesson.Name, lesson.ImageUrl));
     }
 
     // Real client contract (confirmed from "edit lesson .dart"): ALWAYS multipart,
@@ -272,11 +272,11 @@ public class UnitsController : ControllerBase
             lesson.ImageUrl = await _files.SaveAsync(image, "lessons");
             await _db.SaveChangesAsync();
             await _files.DeleteAsync(oldImageUrl);
-            return Ok(new LessonDto(lesson.LessonIndex, lesson.Name, lesson.ImageUrl));
+            return Ok(new LessonDto(lesson.Id, lesson.LessonIndex, lesson.Name, lesson.ImageUrl));
         }
 
         await _db.SaveChangesAsync();
-        return Ok(new LessonDto(lesson.LessonIndex, lesson.Name, lesson.ImageUrl));
+        return Ok(new LessonDto(lesson.Id, lesson.LessonIndex, lesson.Name, lesson.ImageUrl));
     }
 
     [HttpPost("lessons/delete")]

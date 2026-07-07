@@ -7,7 +7,7 @@ public record CreateUnitRequest(string Name, int SchoolYear, int? Month);
 
 public record UnitListItem(int Id, string Name, int SchoolYear, int? Month, string? ImageUrl);
 
-public record LessonDto(int Index, string Name, string? ImageUrl);
+public record LessonDto(int Id, int Index, string Name, string? ImageUrl);
 
 public record UnitDetailDto(
     int Id,
