@@ -253,10 +253,22 @@ public class CodesController : ControllerBase
         object? redeemedBy = null;
         if (c.UsedByStudentId.HasValue)
         {
-            redeemedBy = await _db.Students.IgnoreQueryFilters()
+            // MULTI-TENANT: IgnoreQueryFilters() because a student's own row
+            // might not be "visible" under this tenant if they somehow redeemed
+            // a code without a matching membership; the group NAME below is
+            // still resolved specifically for THIS code's tenant (c.TeacherId),
+            // not the student's legacy/other-tenant group.
+            var student = await _db.Students.IgnoreQueryFilters()
                 .Where(s => s.Id == c.UsedByStudentId.Value)
-                .Select(s => new { name = s.Name, groupName = s.Group!.Name, phoneNumber = s.PhoneNumber })
+                .Select(s => new { s.Name, s.PhoneNumber })
                 .FirstOrDefaultAsync();
+            var groupName = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+                .Where(m => m.StudentId == c.UsedByStudentId.Value && m.Group!.TeacherId == c.TeacherId)
+                .Select(m => m.Group!.Name)
+                .FirstOrDefaultAsync();
+
+            if (student != null)
+                redeemedBy = new { name = student.Name, groupName = groupName ?? "", phoneNumber = student.PhoneNumber };
         }
 
         return new

@@ -48,8 +48,8 @@ public static class DbSeeder
         db.Units.AddRange(unitA, unitB, unitC);
         db.SaveChanges(); // need their Ids before subscribing
 
-        db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { StudentId = student.Id, UnitId = unitA.Id });
-        db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { StudentId = student.Id, UnitId = unitB.Id });
+        db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = teacher.Id, StudentId = student.Id, UnitId = unitA.Id });
+        db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = teacher.Id, StudentId = student.Id, UnitId = unitB.Id });
         // unitC intentionally left out.
 
         // An Assistant working FOR teacher #1's tenant (TenantOwnerId set, not a root).

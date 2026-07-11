@@ -83,6 +83,34 @@ public class Student
 
     public ICollection<StudentUnitSubscription> UnitSubscriptions { get; set; } = new List<StudentUnitSubscription>();
     public ICollection<StateHistoryEntry> StateHistory { get; set; } = new List<StateHistoryEntry>();
+
+    /// <summary>
+    /// MULTI-TENANT MEMBERSHIP: a student can now belong to a Group at MORE THAN
+    /// ONE teacher (tenant) at the same time -- e.g. subscribed to Teacher A for
+    /// Math and Teacher B for Physics. GroupId/Group above are kept as the
+    /// student's ORIGINAL/legacy group (set at creation) for backward
+    /// compatibility with old data and simple lookups; for anything tenant-aware
+    /// (which group does this student belong to under teacher X) use this
+    /// collection instead, filtered by Group.TeacherId == current tenant.
+    /// </summary>
+    public ICollection<StudentGroupMembership> GroupMemberships { get; set; } = new List<StudentGroupMembership>();
+}
+
+/// <summary>
+/// TENANT LAYER: join table letting a Student belong to a Group under more than
+/// one teacher (tenant) at once. One row per (Student, Group). A student can only
+/// ever have ONE membership per teacher in practice (enforced in code, not DB,
+/// since Group.TeacherId isn't directly on this table) -- a teacher assigns the
+/// student to exactly one of their own Groups.
+/// </summary>
+public class StudentGroupMembership
+{
+    public int Id { get; set; }
+    public int StudentId { get; set; }
+    [ForeignKey(nameof(StudentId))] public Student? Student { get; set; }
+    public int GroupId { get; set; }
+    [ForeignKey(nameof(GroupId))] public Group? Group { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
 /// <summary>History log for suspend/reactivate/cancel/delete actions on a student.</summary>
@@ -125,6 +153,13 @@ public class Lesson
 public class StudentUnitSubscription
 {
     public int Id { get; set; }
+    // MULTI-TENANT SECURITY: a Unit belongs to exactly one Teacher, so a
+    // subscription row is always scoped to that same tenant. Without this
+    // (and the matching global query filter in AppDbContext), any endpoint
+    // querying this table by StudentId alone -- instead of always joining
+    // through the tenant-filtered Units table first -- would silently leak
+    // subscriptions across teachers. Same pattern as the QuizResult fix.
+    public int TeacherId { get; set; }
     public int StudentId { get; set; }
     public int UnitId { get; set; }
 }
@@ -139,6 +174,8 @@ public class StudentUnitSubscription
 public class StudentLectureUnlock
 {
     public int Id { get; set; }
+    // MULTI-TENANT SECURITY: same reasoning as StudentUnitSubscription.TeacherId.
+    public int TeacherId { get; set; }
     public int StudentId { get; set; }
     public int LectureId { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -224,6 +261,9 @@ public class Notebook
 public class NotebookPayment
 {
     public int Id { get; set; }
+    // MULTI-TENANT SECURITY: same reasoning as StudentUnitSubscription.TeacherId
+    // -- a Notebook belongs to exactly one Teacher, so a payment row does too.
+    public int TeacherId { get; set; }
     public int NotebookId { get; set; }
     public int StudentId { get; set; }
     public int Price { get; set; }
@@ -287,6 +327,9 @@ public class Notification
 public class Attendance
 {
     public int Id { get; set; }
+    // MULTI-TENANT SECURITY: same reasoning as StudentUnitSubscription.TeacherId
+    // -- a Lecture belongs to exactly one Teacher, so an attendance row does too.
+    public int TeacherId { get; set; }
     public int LectureId { get; set; }
     public int StudentId { get; set; }
     public string? EncodedStudentId { get; set; }
@@ -348,6 +391,14 @@ public class QuizResult
     public int TotalMarks { get; set; }
     public DateTime GradedAt { get; set; } = DateTime.UtcNow;
     public ICollection<QuizAnswer> Answers { get; set; } = new List<QuizAnswer>();
+
+    /// <summary>
+    /// TENANT LAYER: which teacher (tenant) this result belongs to (copied from
+    /// the parent Quiz at creation time). Without this, a student subscribed to
+    /// more than one teacher would see quiz marks from ALL of their teachers
+    /// mixed together, since this table was only ever filtered by StudentId.
+    /// </summary>
+    public int TeacherId { get; set; }
 }
 
 public class QuizAnswer
@@ -372,6 +423,14 @@ public class CenterQuizResult
     public int Marks { get; set; }
     public int TotalMarks { get; set; }
     public DateTime Date { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// TENANT LAYER: which teacher (tenant) entered this manual result. Without
+    /// this, a student subscribed to more than one teacher would see center-quiz
+    /// marks from ALL of their teachers mixed together, since this table was
+    /// only ever filtered by StudentId.
+    /// </summary>
+    public int TeacherId { get; set; }
 }
 
 public class HomeworkResult
@@ -382,6 +441,12 @@ public class HomeworkResult
     public int Marks { get; set; }
     public int TotalMarks { get; set; }
     public DateTime Date { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// TENANT LAYER: which teacher (tenant) entered this manual result. Same
+    /// leak as CenterQuizResult without it.
+    /// </summary>
+    public int TeacherId { get; set; }
 }
 
 /// <summary>
@@ -441,6 +506,9 @@ public class AssignmentQuestion
 public class AssignmentSubmission
 {
     public int Id { get; set; }
+    // MULTI-TENANT SECURITY: same reasoning as StudentUnitSubscription.TeacherId
+    // -- an Assignment belongs to exactly one Teacher, so a submission does too.
+    public int TeacherId { get; set; }
     public int AssignmentId { get; set; }
     public int StudentId { get; set; }
     public int Score { get; set; }

@@ -26,10 +26,13 @@ public class LecturesController : ControllerBase
     private readonly AppDbContext _db;
     private readonly IFileStorageService _files;
 
-    public LecturesController(AppDbContext db, IFileStorageService files)
+    private readonly Common.ITenantContext _tenant;
+
+    public LecturesController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant)
     {
         _db = db;
         _files = files;
+        _tenant = tenant;
     }
 
     [HttpPost]
@@ -166,7 +169,7 @@ public class LecturesController : ControllerBase
         [FromQuery] bool noUnitOnly = false,
         [FromQuery] int p = 1)
     {
-        var gId = groupId ?? User.GetGroupId();
+        var gId = groupId ?? User.GetGroupId(_tenant.CurrentTenantId);
         var query = _db.Lectures.AsQueryable();
 
         if (gId.HasValue) query = query.Where(l => l.GroupIdsCsv.Contains(gId.Value.ToString()));

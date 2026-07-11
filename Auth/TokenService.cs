@@ -31,7 +31,8 @@ public class TokenService
         int? groupId = null,
         int? schoolYear = null,
         int? tenantId = null,
-        IEnumerable<int>? unitIds = null)
+        IEnumerable<int>? unitIds = null,
+        IEnumerable<(int TeacherId, int GroupId)>? groupMemberships = null)
     {
         var jwtSection = _config.GetSection("Jwt");
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSection["Key"]!));
@@ -65,6 +66,15 @@ public class TokenService
         var unitIdList = unitIds?.ToList();
         if (unitIdList is { Count: > 0 })
             claims.Add(new Claim("unitIds", string.Join(",", unitIdList)));
+
+        // MULTI-TENANT: student-only. Snapshot of every (TeacherId, GroupId) pair
+        // from the student's StudentGroupMembership rows, so a single access token
+        // works across all the teachers this student is subscribed to -- the
+        // right GroupId is picked per-request based on X-TenantId (see
+        // ClaimsExtensions.GetGroupId(tenantId) and HttpTenantContext).
+        var membershipList = groupMemberships?.ToList();
+        if (membershipList is { Count: > 0 })
+            claims.Add(new Claim("groupIds", string.Join(",", membershipList.Select(m => $"{m.TeacherId}:{m.GroupId}"))));
 
         var minutes = double.Parse(jwtSection["AccessTokenMinutes"] ?? "20");
 

@@ -48,8 +48,19 @@ public class HttpTenantContext : ITenantContext
         if (user.IsInRole(Models.Roles.Student))
         {
             // Students carry the tenant (chosen teacher) via the X-TenantId header.
+            // MULTI-TENANT SECURITY FIX: this header is fully client-controlled, so
+            // it must be validated against the student's OWN teacherIds (from the
+            // "groupIds" JWT claim, a snapshot of their real StudentGroupMembership
+            // rows) before being trusted. A student can no longer read another
+            // teacher's data just by sending an arbitrary X-TenantId — if the
+            // header doesn't match one of their real memberships, the tenant
+            // resolves to null and every tenant-scoped query filter matches zero
+            // rows (the existing safe default).
             var header = httpContext!.Request.Headers["X-TenantId"].ToString();
-            _tenantId = int.TryParse(header, out var fromHeader) ? fromHeader : null;
+            var parsed = int.TryParse(header, out var fromHeader) ? fromHeader : (int?)null;
+            _tenantId = parsed.HasValue && user.GetTeacherIds().Contains(parsed.Value)
+                ? parsed
+                : null;
         }
         else
         {

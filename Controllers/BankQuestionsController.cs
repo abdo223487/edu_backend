@@ -165,14 +165,14 @@ public class BankQuestionsController : ControllerBase
             .ToListAsync();
 
         var studentIds = attempts.Select(a => a.StudentId).Distinct().ToList();
-        var students = await _db.Students.Include(s => s.Group)
-            .Where(s => studentIds.Contains(s.Id)).ToListAsync();
+        var students = await _db.Students.Where(s => studentIds.Contains(s.Id)).ToListAsync();
+        var groupNames = await _db.GetTenantGroupNamesAsync(studentIds);
 
         var items = attempts.Select(a =>
         {
             var student = students.FirstOrDefault(s => s.Id == a.StudentId);
             return new BankAttemptListItemDto(
-                a.Id, a.StudentId, student?.Name ?? "", student?.Group?.Name ?? "",
+                a.Id, a.StudentId, student?.Name ?? "", groupNames.GetValueOrDefault(a.StudentId, ""),
                 a.StartedAt, a.Deadline, a.SubmittedAt != null,
                 a.SubmittedAt != null ? a.Score : null,
                 a.SubmittedAt != null ? a.TotalMarks : null,
@@ -190,7 +190,8 @@ public class BankQuestionsController : ControllerBase
             .FirstOrDefaultAsync(a => a.Id == attemptId);
         if (attempt == null) return NotFound(new { message = "Attempt not found." });
 
-        var student = await _db.Students.Include(s => s.Group).FirstOrDefaultAsync(s => s.Id == attempt.StudentId);
+        var student = await _db.Students.FirstOrDefaultAsync(s => s.Id == attempt.StudentId);
+        var groupName = await _db.GetTenantGroupNameAsync(attempt.StudentId);
 
         var items = attempt.Questions.Select(aq => new
         {
@@ -209,7 +210,7 @@ public class BankQuestionsController : ControllerBase
         return Ok(new
         {
             studentName = student?.Name ?? "",
-            groupName = student?.Group?.Name ?? "",
+            groupName = groupName ?? "",
             startedAt = attempt.StartedAt,
             deadline = attempt.Deadline,
             submittedAt = attempt.SubmittedAt,

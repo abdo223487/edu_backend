@@ -20,15 +20,66 @@ namespace EduApi.Controllers;
 public class StudentsController : ControllerBase
 {
     private readonly AppDbContext _db;
-    public StudentsController(AppDbContext db) => _db = db;
+    private readonly Common.ITenantContext _tenant;
+    public StudentsController(AppDbContext db, Common.ITenantContext tenant)
+    {
+        _db = db;
+        _tenant = tenant;
+    }
 
     // POST Students
+    // MULTI-TENANT DEDUPE FIX: previously this always inserted a brand new
+    // Student row with zero regard for whether the phone number already
+    // belonged to someone else's student — a teacher adding a student who
+    // already had an account with a DIFFERENT teacher silently ended up with
+    // TWO separate accounts (two different Ids, two different
+    // usernames/passwords) for the same real person, instead of one shared
+    // account visible under both tenants via StudentGroupMembership. Now this
+    // does the same phone-number lookup Students/link does, and if a match is
+    // found, folds into that existing account (adds a membership + any
+    // requested unit subscriptions) instead of creating a duplicate — the
+    // teacher doesn't need to know or care whether the student already
+    // exists elsewhere; any UserName/Password passed in the request is
+    // ignored in that case since the original account's login must win.
     [HttpPost]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> Create([FromBody] CreateStudentRequest request)
     {
         var group = await _db.Groups.FirstOrDefaultAsync(e => e.Id == (request.GroupId));
         if (group == null) return BadRequest(new { message = "Group not found." });
+
+        // Cross-tenant lookup by design — this student may already exist under
+        // a completely different teacher's tenant (see Students/link).
+        var existing = await _db.Students.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.PhoneNumber == request.PhoneNumber);
+
+        if (existing != null)
+        {
+            if (existing.IsSuspended || existing.IsCancelled)
+                return BadRequest(new { message = "A student with this phone number already exists and their account is suspended or cancelled." });
+
+            var alreadyLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+                .AnyAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
+            if (!alreadyLinked)
+                _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = existing.Id, GroupId = group.Id });
+
+            foreach (var unitId in request.UnitIds ?? new())
+            {
+                if (!await _db.StudentUnitSubscriptions
+                        .AnyAsync(s => s.StudentId == existing.Id && s.UnitId == unitId && s.TeacherId == group.TeacherId))
+                    _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = group.TeacherId, StudentId = existing.Id, UnitId = unitId });
+            }
+            await _db.SaveChangesAsync();
+
+            // NOTE: same tradeoff as Students/link — if this student is
+            // already logged in elsewhere, their current access token won't
+            // include this new membership until they log in again / refresh.
+            return Ok(new
+            {
+                message = "A student with this phone number already existed, so they were linked to your group instead of creating a duplicate account.",
+                student = ToListItem(existing, group.Name)
+            });
+        }
 
         var student = new Student
         {
@@ -45,11 +96,66 @@ public class StudentsController : ControllerBase
         _db.Students.Add(student);
         await _db.SaveChangesAsync();
 
+        // MULTI-TENANT: keep the membership table in sync with the legacy GroupId
+        // from day one, so every student (old or new) is queryable the same way.
+        _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = student.Id, GroupId = group.Id });
+
         foreach (var unitId in request.UnitIds ?? new())
-            _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { StudentId = student.Id, UnitId = unitId });
+            _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = group.TeacherId, StudentId = student.Id, UnitId = unitId });
         await _db.SaveChangesAsync();
 
         return StatusCode(201, ToListItem(student, group.Name));
+    }
+
+    // POST Students/link  body: { phoneNumber, groupId }
+    // MULTI-TENANT: lets a Teacher/AssistantAdmin subscribe an EXISTING student
+    // (already registered under a DIFFERENT teacher) to their OWN tenant, by
+    // looking them up via phone number and creating a StudentGroupMembership
+    // under one of the caller's own Groups. The student keeps their single
+    // login/password and can now switch between all their teachers via
+    // X-TenantId. Idempotent: linking twice to the same teacher just no-ops.
+    // NOTE: Students/Create (POST Students) now does this exact same lookup
+    // and merge automatically, so a teacher never has to know in advance
+    // whether a student already exists elsewhere — this endpoint is kept as
+    // an explicit alternative (e.g. a dedicated "link existing student" UI
+    // flow that doesn't collect a Name/etc.) but is no longer required to
+    // avoid duplicate accounts.
+    [HttpPost("link")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> LinkExistingStudent([FromBody] LinkStudentRequest request)
+    {
+        var group = await _db.Groups.FirstOrDefaultAsync(g => g.Id == request.GroupId);
+        if (group == null) return BadRequest(new { message = "Group not found." });
+
+        // Cross-tenant lookup by design — this student may not belong to the
+        // caller's tenant yet, so the normal tenant-scoped filter must be bypassed.
+        var student = await _db.Students.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s => s.PhoneNumber == request.PhoneNumber);
+        if (student == null)
+            return NotFound(new { message = "No student with this phone number exists yet. Use Create instead." });
+        if (student.IsSuspended || student.IsCancelled)
+            return BadRequest(new { message = "This student's account is suspended or cancelled." });
+
+        var alreadyLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+            .AnyAsync(m => m.StudentId == student.Id && m.Group!.TeacherId == group.TeacherId);
+        if (!alreadyLinked)
+        {
+            _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = student.Id, GroupId = group.Id });
+            await _db.SaveChangesAsync();
+        }
+
+        foreach (var unitId in request.UnitIds ?? new())
+        {
+            if (!await _db.StudentUnitSubscriptions
+                    .AnyAsync(s => s.StudentId == student.Id && s.UnitId == unitId && s.TeacherId == group.TeacherId))
+                _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = group.TeacherId, StudentId = student.Id, UnitId = unitId });
+        }
+        await _db.SaveChangesAsync();
+
+        // NOTE: the student's CURRENT access token won't include this new
+        // membership until they log in again or hit /Auth/refresh (same
+        // snapshot tradeoff already accepted for groupId/unitIds).
+        return Ok(new { message = "Student linked to your account.", studentId = student.Id, studentName = student.Name });
     }
 
     // GET Students?schoolYear=..&groupId=..&p=..&q=..
@@ -78,8 +184,12 @@ public class StudentsController : ControllerBase
         System.Linq.Expressions.Expression<Func<Student, bool>> statusFilter,
         int? schoolYear, int? groupId, int p, string? q)
     {
-        var query = _db.Students.Include(s => s.Group).Where(statusFilter);
-        if (groupId.HasValue) query = query.Where(s => s.GroupId == groupId.Value);
+        // MULTI-TENANT: filter/display by the Group under the CURRENT tenant, not
+        // necessarily the student's legacy single Group (which may belong to a
+        // different teacher if the student is also linked elsewhere).
+        var query = _db.Students.Where(statusFilter);
+        if (groupId.HasValue)
+            query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
         if (!string.IsNullOrWhiteSpace(q)) query = query.Where(s => s.Name.Contains(q) || s.PhoneNumber.Contains(q));
 
@@ -89,7 +199,8 @@ public class StudentsController : ControllerBase
             .Take(PagingDefaults.PageSize)
             .ToListAsync();
 
-        return Ok(students.Select(s => ToListItem(s, s.Group?.Name)));
+        var tenantGroupNames = await _db.GetTenantGroupNamesAsync(students.Select(s => s.Id));
+        return Ok(students.Select(s => ToListItem(s, tenantGroupNames.GetValueOrDefault(s.Id))));
     }
 
     // GET Students/count
@@ -103,11 +214,17 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetById(int id)
     {
-        var student = await _db.Students.Include(s => s.Group)
-            .FirstOrDefaultAsync(s => s.Id == id);
+        var student = await _db.Students.FirstOrDefaultAsync(s => s.Id == id);
         if (student == null) return NotFound(new { message = "Student not found." });
 
         var subs = await _db.StudentUnitSubscriptions.Where(u => u.StudentId == id).Select(u => u.UnitId).ToListAsync();
+
+        // MULTI-TENANT: this student's Group/GroupId under the CALLER's own
+        // tenant specifically, not necessarily their legacy single Group.
+        var tenantMembership = await _db.StudentGroupMemberships
+            .Where(m => m.StudentId == id)
+            .Select(m => new { m.GroupId, GroupName = m.Group!.Name })
+            .FirstOrDefaultAsync();
 
         return Ok(new
         {
@@ -118,8 +235,8 @@ public class StudentsController : ControllerBase
             // NOTE: intentionally lowercase "username" (not "userName") — the
             // Flutter profile page reads _student!["username"] exactly.
             username = student.UserName,
-            groupId = student.GroupId,
-            groupName = student.Group?.Name,
+            groupId = tenantMembership?.GroupId ?? student.GroupId,
+            groupName = tenantMembership?.GroupName,
             schoolYear = student.SchoolYear,
             isSuspended = student.IsSuspended,
             isCancelled = student.IsCancelled,
@@ -147,13 +264,31 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> ChangeGroup(int id, [FromBody] ChangeGroupRequest request)
     {
+        // `_db.Students`/`_db.Groups` are both tenant-filtered, so this already
+        // only matches a student/group that belong to the CALLER's own tenant —
+        // safe even now that a student can have groups under several tenants.
         var student = await _db.Students.FirstOrDefaultAsync(e => e.Id == (id));
         if (student == null) return NotFound(new { message = "Student not found." });
 
         var group = await _db.Groups.FirstOrDefaultAsync(e => e.Id == (request.GroupId));
         if (group == null) return BadRequest(new { message = "Group not found." });
 
-        student.GroupId = request.GroupId;
+        // MULTI-TENANT: only touch the legacy single GroupId if it currently
+        // points at THIS tenant (or is unset) — never let one teacher's group
+        // change stomp on the student's group under a different teacher.
+        if (student.GroupId == 0 || _tenant.CurrentTenantId == group.TeacherId && !await _db.Groups.IgnoreQueryFilters()
+                .AnyAsync(g => g.Id == student.GroupId && g.TeacherId != _tenant.CurrentTenantId))
+        {
+            student.GroupId = request.GroupId;
+        }
+
+        var membership = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(m => m.StudentId == id && m.Group!.TeacherId == group.TeacherId);
+        if (membership == null)
+            _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = id, GroupId = request.GroupId });
+        else
+            membership.GroupId = request.GroupId;
+
         await _db.SaveChangesAsync();
         return Ok(new { message = "Group updated." });
     }
@@ -271,7 +406,7 @@ public class StudentsController : ControllerBase
         foreach (var unitId in code.UnitIds)
         {
             if (!await _db.StudentUnitSubscriptions.AnyAsync(s => s.StudentId == studentId && s.UnitId == unitId))
-                _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { StudentId = studentId, UnitId = unitId });
+                _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = code.TeacherId, StudentId = studentId, UnitId = unitId });
         }
 
         // BUGFIX: code.LectureIds (standalone/no-unit lectures, e.g. an online
@@ -284,7 +419,7 @@ public class StudentsController : ControllerBase
         foreach (var lectureId in code.LectureIds)
         {
             if (!await _db.StudentLectureUnlocks.AnyAsync(u => u.StudentId == studentId && u.LectureId == lectureId))
-                _db.StudentLectureUnlocks.Add(new StudentLectureUnlock { StudentId = studentId, LectureId = lectureId });
+                _db.StudentLectureUnlocks.Add(new StudentLectureUnlock { TeacherId = code.TeacherId, StudentId = studentId, LectureId = lectureId });
         }
 
         await _db.SaveChangesAsync();
@@ -315,8 +450,17 @@ public class StudentsController : ControllerBase
         // this query used to return both, so a student's attendance summary
         // counted Online lectures as "absent" even though nobody ever takes
         // attendance for them.
+        // MULTI-TENANT: lectures live under a specific tenant already (_db.Lectures
+        // is tenant-filtered), so we need THIS student's group under the CURRENT
+        // tenant specifically -- not their legacy single GroupId, which may
+        // belong to a different teacher entirely.
+        var tenantGroupId = await _db.StudentGroupMemberships
+            .Where(m => m.StudentId == sid.Value)
+            .Select(m => (int?)m.GroupId)
+            .FirstOrDefaultAsync() ?? student.GroupId;
+
         var lecturesQuery = _db.Lectures
-            .Where(l => l.GroupIdsCsv.Contains(student.GroupId.ToString())
+            .Where(l => l.GroupIdsCsv.Contains(tenantGroupId.ToString())
                 && l.AttendanceMethod == AttendanceMethod.Center);
         if (unitId.HasValue) lecturesQuery = lecturesQuery.Where(l => l.UnitId == unitId.Value);
 
@@ -356,9 +500,26 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> SubscribeUnit([FromBody] UnitSubscriptionRequest request)
     {
-        if (!await _db.StudentUnitSubscriptions.AnyAsync(s => s.StudentId == request.StudentId && s.UnitId == request.UnitId))
+        // SECURITY FIX: previously this had NO check that the Unit even belongs
+        // to the caller's own tenant, nor that the student is actually linked to
+        // that teacher — a caller could subscribe ANY student to ANY unit from
+        // ANY teacher. Both are now enforced. `_db.Units` is already
+        // tenant-filtered, so a unitId from another tenant simply won't be found.
+        var unit = await _db.Units.FirstOrDefaultAsync(u => u.Id == request.UnitId);
+        if (unit == null) return NotFound(new { message = "Unit not found." });
+
+        var isLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+            .AnyAsync(m => m.StudentId == request.StudentId && m.Group!.TeacherId == unit.TeacherId);
+        if (!isLinked)
+            return BadRequest(new
+            {
+                message = "This student isn't linked to your account yet. Use POST Students/link first."
+            });
+
+        if (!await _db.StudentUnitSubscriptions
+                .AnyAsync(s => s.StudentId == request.StudentId && s.UnitId == request.UnitId))
         {
-            _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { StudentId = request.StudentId, UnitId = request.UnitId });
+            _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = unit.TeacherId, StudentId = request.StudentId, UnitId = request.UnitId });
             await _db.SaveChangesAsync();
         }
         return Ok(new { message = "Subscribed." });
@@ -402,6 +563,7 @@ public class StudentsController : ControllerBase
 
         var payment = new NotebookPayment
         {
+            TeacherId = notebook.TeacherId,
             NotebookId = notebookId,
             StudentId = request.StudentId,
             Price = request.Amount
@@ -449,6 +611,7 @@ public class StudentsController : ControllerBase
 
         var payment = new NotebookPayment
         {
+            TeacherId = notebook.TeacherId,
             NotebookId = notebookId,
             StudentId = studentId,
             Price = notebook.Price,
@@ -479,12 +642,15 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> AddCenterQuizResult([FromBody] AddCenterQuizResultRequest request)
     {
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
         var result = new CenterQuizResult
         {
             StudentId = request.StudentId,
             Title = "Center Quiz",
             Marks = request.Mark,
-            TotalMarks = request.QuizTotalMarks
+            TotalMarks = request.QuizTotalMarks,
+            TeacherId = _tenant.CurrentTenantId.Value
         };
         _db.CenterQuizResults.Add(result);
         await _db.SaveChangesAsync();
@@ -536,12 +702,15 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> AddHomeworkResult([FromBody] AddHomeworkResultRequest request)
     {
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
         var result = new HomeworkResult
         {
             StudentId = request.StudentId,
             Title = "Homework",
             Marks = request.Mark,
-            TotalMarks = request.TotalMarks
+            TotalMarks = request.TotalMarks,
+            TeacherId = _tenant.CurrentTenantId.Value
         };
         _db.HomeworkResults.Add(result);
         await _db.SaveChangesAsync();

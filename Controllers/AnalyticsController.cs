@@ -32,7 +32,12 @@ namespace EduApi.Controllers;
 public class AnalyticsController : ControllerBase
 {
     private readonly AppDbContext _db;
-    public AnalyticsController(AppDbContext db) => _db = db;
+    private readonly ITenantContext _tenant;
+    public AnalyticsController(AppDbContext db, ITenantContext tenant)
+    {
+        _db = db;
+        _tenant = tenant;
+    }
 
     [HttpGet("students")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
@@ -40,7 +45,7 @@ public class AnalyticsController : ControllerBase
         [FromQuery] int p = 1, [FromQuery] int? groupId = null, [FromQuery] int? schoolYear = null)
     {
         var query = _db.Students.Include(s => s.Group).AsQueryable();
-        if (groupId.HasValue) query = query.Where(s => s.GroupId == groupId.Value);
+        if (groupId.HasValue) query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
 
         var students = await query
@@ -84,7 +89,7 @@ public class AnalyticsController : ControllerBase
         const int passMarkPercent = 50;
 
         var studentQuery = _db.Students.Include(s => s.Group).AsQueryable();
-        if (groupId.HasValue) studentQuery = studentQuery.Where(s => s.GroupId == groupId.Value);
+        if (groupId.HasValue) studentQuery = studentQuery.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) studentQuery = studentQuery.Where(s => s.SchoolYear == schoolYear.Value);
 
         var students = await studentQuery.ToListAsync();
@@ -125,7 +130,7 @@ public class AnalyticsController : ControllerBase
         [FromQuery] int? groupId = null, [FromQuery] int? schoolYear = null, [FromQuery] bool byYear = false)
     {
         // Priority: explicit groupId > explicit schoolYear/byYear > student's own group from JWT.
-        var effectiveGroupId = groupId ?? (User.IsInRole(Roles.Student) ? User.GetGroupId() : null);
+        var effectiveGroupId = groupId ?? (User.IsInRole(Roles.Student) ? User.GetGroupId(_tenant.CurrentTenantId) : null);
 
         var query = from result in _db.CenterQuizResults
                      group result by result.StudentId into g
@@ -135,7 +140,7 @@ public class AnalyticsController : ControllerBase
         var ids = top.Select(t => t.StudentId).ToList();
 
         var studentsQuery = _db.Students.Include(s => s.Group).Where(s => ids.Contains(s.Id));
-        if (effectiveGroupId.HasValue) studentsQuery = studentsQuery.Where(s => s.GroupId == effectiveGroupId.Value);
+        if (effectiveGroupId.HasValue) studentsQuery = studentsQuery.Where(s => s.GroupMemberships.Any(m => m.GroupId == effectiveGroupId.Value));
         else if (schoolYear.HasValue) studentsQuery = studentsQuery.Where(s => s.SchoolYear == schoolYear.Value);
 
         var students = await studentsQuery.ToDictionaryAsync(s => s.Id);
@@ -230,7 +235,7 @@ public class AnalyticsController : ControllerBase
     public async Task<IActionResult> DownloadGeneralSheet([FromQuery] int? schoolYear, [FromQuery] int? groupId)
     {
         var query = _db.Students.AsQueryable();
-        if (groupId.HasValue) query = query.Where(s => s.GroupId == groupId.Value);
+        if (groupId.HasValue) query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
 
         var students = await query.ToListAsync();
@@ -257,9 +262,9 @@ public class AnalyticsController : ControllerBase
         if (notebook == null) return NotFound(new { message = "Notebook not found." });
 
         var query = _db.Students.AsQueryable();
-        if (groupId.HasValue) query = query.Where(s => s.GroupId == groupId.Value);
+        if (groupId.HasValue) query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
-        else query = query.Where(s => notebook.GroupIds.Contains(s.GroupId));
+        else query = query.Where(s => s.GroupMemberships.Any(m => notebook.GroupIds.Contains(m.GroupId)));
 
         var students = await query.OrderBy(s => s.Name)
             .Skip((p - 1) * PagingDefaults.PageSize).Take(PagingDefaults.PageSize).ToListAsync();

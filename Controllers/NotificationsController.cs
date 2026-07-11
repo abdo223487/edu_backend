@@ -26,7 +26,12 @@ public record EditNotificationRequest(string Title, string Message, int? UnitId,
 public class NotificationsController : ControllerBase
 {
     private readonly AppDbContext _db;
-    public NotificationsController(AppDbContext db) => _db = db;
+    private readonly Common.ITenantContext _tenant;
+    public NotificationsController(AppDbContext db, Common.ITenantContext tenant)
+    {
+        _db = db;
+        _tenant = tenant;
+    }
 
     [HttpGet]
     public async Task<IActionResult> GetAll(
@@ -37,7 +42,7 @@ public class NotificationsController : ControllerBase
 
         if (User.IsInRole(Roles.Student))
         {
-            var myGroup = User.GetGroupId();
+            var myGroup = User.GetGroupId(_tenant.CurrentTenantId);
             if (myGroup.HasValue) query = query.Where(n => n.GroupIdsCsv.Contains(myGroup.Value.ToString()));
 
             // Same subscription gate as Units: a notification tied to a specific

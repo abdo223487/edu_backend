@@ -122,9 +122,9 @@ public class NotebooksController : ControllerBase
 
         var studentIds = payments.Select(p => p.StudentId).Distinct().ToList();
         var students = await _db.Students
-            .Include(s => s.Group)
             .Where(s => studentIds.Contains(s.Id))
             .ToDictionaryAsync(s => s.Id);
+        var groupNames = await _db.GetTenantGroupNamesAsync(studentIds);
 
         var result = payments.Select(p =>
         {
@@ -143,7 +143,7 @@ public class NotebooksController : ControllerBase
                 {
                     id = s.Id,
                     name = s.Name,
-                    groupName = s.Group?.Name,
+                    groupName = groupNames.GetValueOrDefault(s.Id),
                     phoneNumber = s.PhoneNumber,
                     status = s.IsCancelled ? "ملغي" : (s.IsSuspended ? "موقوف" : "نشط")
                 }

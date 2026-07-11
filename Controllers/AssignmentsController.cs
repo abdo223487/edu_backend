@@ -38,11 +38,13 @@ public class AssignmentsController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IFileStorageService _files;
+    private readonly Common.ITenantContext _tenant;
 
-    public AssignmentsController(AppDbContext db, IFileStorageService files)
+    public AssignmentsController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant)
     {
         _db = db;
         _files = files;
+        _tenant = tenant;
     }
 
     [HttpGet]
@@ -55,7 +57,7 @@ public class AssignmentsController : ControllerBase
         {
             studentId = User.GetUserId();
 
-            var groupId = User.GetGroupId();
+            var groupId = User.GetGroupId(_tenant.CurrentTenantId);
             if (groupId.HasValue) query = query.Where(a => a.GroupIdsCsv.Contains(groupId.Value.ToString()));
 
             // Only assignments that cover at least one unit the student is subscribed to.
@@ -251,7 +253,13 @@ public class AssignmentsController : ControllerBase
         var totalMarks = assignment.Questions.Sum(q => q.Mark);
         var score = 0;
 
-        var submission = new AssignmentSubmission { AssignmentId = assignment.Id, StudentId = studentId, TotalMarks = totalMarks };
+        var submission = new AssignmentSubmission
+        {
+            TeacherId = assignment.TeacherId,
+            AssignmentId = assignment.Id,
+            StudentId = studentId,
+            TotalMarks = totalMarks
+        };
 
         foreach (var submitted in request.Answers ?? new())
         {
@@ -288,8 +296,11 @@ public class AssignmentsController : ControllerBase
         if (assignment == null) return NotFound(new { message = "Assignment not found." });
 
         var groupIds = assignment.GroupIds;
+        // MULTI-TENANT: match via GroupMemberships (this tenant's groups), not the
+        // legacy single GroupId, so students linked here from another teacher too
+        // still show up correctly against THIS teacher's assignment groups.
         var students = await _db.Students.Include(s => s.Group)
-            .Where(s => groupIds.Contains(s.GroupId)).ToListAsync();
+            .Where(s => s.GroupMemberships.Any(m => groupIds.Contains(m.GroupId))).ToListAsync();
         var submissions = await _db.AssignmentSubmissions.Where(s => s.AssignmentId == assignmentId).ToListAsync();
 
         // Full roster (unlike Quiz's takers list), so the teacher can see who

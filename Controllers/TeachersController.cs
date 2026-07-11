@@ -40,14 +40,18 @@ public class TeachersController : ControllerBase
         // exactly one entry (at most) will come back with isSubscribedTo == true.
         // Only students in this multi-tenant flow; teacher/staff callers see it
         // as false for everyone since the concept doesn't apply to them.
-        int? myTenantId = null;
+        // MULTI-TENANT: a student can now be subscribed to SEVERAL teachers at
+        // once (StudentGroupMembership), so "isSubscribedTo" is true for every
+        // teacher the student actually has a group under -- not just one.
+        List<int> mySubscribedTeacherIds = new();
         if (User.IsInRole(Roles.Student))
         {
             var studentId = User.GetUserId();
-            myTenantId = await _db.Students.IgnoreQueryFilters()
+            mySubscribedTeacherIds = await _db.Students.IgnoreQueryFilters()
                 .Where(s => s.Id == studentId)
-                .Select(s => (int?)s.Group!.TeacherId)
-                .FirstOrDefaultAsync();
+                .SelectMany(s => s.GroupMemberships.Select(m => m.Group!.TeacherId))
+                .Distinct()
+                .ToListAsync();
         }
 
         var teachers = await _db.Teachers
@@ -63,7 +67,7 @@ public class TeachersController : ControllerBase
                 // with no null-check, which throws a runtime TypeError on a null
                 // src. Fall back to a generated placeholder avatar instead.
                 imageUrl = t.ImageUrl ?? PlaceholderAvatar(t.Name),
-                isSubscribedTo = myTenantId != null && myTenantId == t.Id
+                isSubscribedTo = mySubscribedTeacherIds.Contains(t.Id)
             })
             .ToListAsync();
 

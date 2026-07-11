@@ -3,6 +3,7 @@ using System;
 using EduApi.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,10 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace EduApi.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260709010000_AddTeacherIdToResultsTables")]
+    partial class AddTeacherIdToResultsTables
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -172,9 +174,6 @@ namespace EduApi.Migrations
                     b.Property<DateTime>("SubmittedAt")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<int>("TeacherId")
-                        .HasColumnType("integer");
-
                     b.Property<int>("TotalMarks")
                         .HasColumnType("integer");
 
@@ -204,9 +203,6 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.Property<int>("StudentId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("TeacherId")
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
@@ -651,9 +647,6 @@ namespace EduApi.Migrations
                     b.Property<int>("StudentId")
                         .HasColumnType("integer");
 
-                    b.Property<int>("TeacherId")
-                        .HasColumnType("integer");
-
                     b.HasKey("Id");
 
                     b.ToTable("NotebookPayments");
@@ -930,9 +923,6 @@ namespace EduApi.Migrations
                     b.Property<int>("StudentId")
                         .HasColumnType("integer");
 
-                    b.Property<int>("TeacherId")
-                        .HasColumnType("integer");
-
                     b.Property<int>("UnitId")
                         .HasColumnType("integer");
 
@@ -958,9 +948,6 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.Property<int>("StudentId")
-                        .HasColumnType("integer");
-
-                    b.Property<int>("TeacherId")
                         .HasColumnType("integer");
 
                     b.HasKey("Id");

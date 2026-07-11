@@ -67,10 +67,15 @@ public class AuthController : ControllerBase
             if (student.IsSuspended || student.IsCancelled)
                 return Unauthorized(new { message = "Account is suspended or cancelled." });
 
-            var unitIds = await _db.StudentUnitSubscriptions
+            // IgnoreQueryFilters(): same reasoning as the Students.IgnoreQueryFilters()
+            // calls above -- no tenant is known yet, and we need this student's
+            // subscriptions across ALL their teachers for the unitIds JWT claim.
+            var unitIds = await _db.StudentUnitSubscriptions.IgnoreQueryFilters()
                 .Where(s => s.StudentId == student.Id)
                 .Select(s => s.UnitId)
                 .ToListAsync();
+
+            var groupMemberships = await GetGroupMembershipsAsync(student.Id);
 
             var access = _tokens.CreateAccessToken(
                 student.Id.ToString(),
@@ -78,7 +83,8 @@ public class AuthController : ControllerBase
                 new[] { Roles.Student },
                 student.GroupId,
                 student.SchoolYear,
-                unitIds: unitIds);
+                unitIds: unitIds,
+                groupMemberships: groupMemberships);
 
             var refresh = _tokens.CreateRefreshToken();
             student.RefreshToken = refresh;
@@ -124,10 +130,15 @@ public class AuthController : ControllerBase
             if (student.RefreshTokenExpiry < DateTime.UtcNow)
                 return Unauthorized(new { message = "Refresh token expired." });
 
-            var unitIds = await _db.StudentUnitSubscriptions
+            // IgnoreQueryFilters(): same reasoning as the Students.IgnoreQueryFilters()
+            // calls above -- no tenant is known yet, and we need this student's
+            // subscriptions across ALL their teachers for the unitIds JWT claim.
+            var unitIds = await _db.StudentUnitSubscriptions.IgnoreQueryFilters()
                 .Where(s => s.StudentId == student.Id)
                 .Select(s => s.UnitId)
                 .ToListAsync();
+
+            var groupMemberships = await GetGroupMembershipsAsync(student.Id);
 
             var access = _tokens.CreateAccessToken(
                 student.Id.ToString(),
@@ -135,7 +146,8 @@ public class AuthController : ControllerBase
                 new[] { Roles.Student },
                 student.GroupId,
                 student.SchoolYear,
-                unitIds: unitIds);
+                unitIds: unitIds,
+                groupMemberships: groupMemberships);
             var newRefresh = _tokens.CreateRefreshToken();
             student.RefreshToken = newRefresh;
             student.RefreshTokenExpiry = DateTime.UtcNow.AddDays(double.Parse(_config["Jwt:RefreshTokenDays"] ?? "30"));
@@ -150,5 +162,32 @@ public class AuthController : ControllerBase
     {
         try { return BCrypt.Net.BCrypt.Verify(plain, hash); }
         catch { return false; }
+    }
+
+    /// <summary>
+    /// MULTI-TENANT: builds the (TeacherId, GroupId) snapshot for the "groupIds"
+    /// JWT claim from a student's StudentGroupMembership rows, PLUS their legacy
+    /// single Group (if it isn't already covered by a membership row -- keeps old
+    /// students who predate this feature working with zero data migration).
+    /// IgnoreQueryFilters() is required: no tenant is known yet at login/refresh.
+    /// </summary>
+    private async Task<List<(int TeacherId, int GroupId)>> GetGroupMembershipsAsync(int studentId)
+    {
+        var memberships = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+            .Where(m => m.StudentId == studentId)
+            .Select(m => new { m.GroupId, TeacherId = m.Group!.TeacherId })
+            .ToListAsync();
+
+        var result = memberships.Select(m => (m.TeacherId, m.GroupId)).ToList();
+
+        var legacy = await _db.Students.IgnoreQueryFilters()
+            .Where(s => s.Id == studentId)
+            .Select(s => new { s.GroupId, TeacherId = s.Group!.TeacherId })
+            .FirstOrDefaultAsync();
+
+        if (legacy != null && !result.Any(r => r.TeacherId == legacy.TeacherId))
+            result.Add((legacy.TeacherId, legacy.GroupId));
+
+        return result;
     }
 }

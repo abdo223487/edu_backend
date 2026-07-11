@@ -1,3 +1,4 @@
+using EduApi.Common;
 using EduApi.Data;
 using EduApi.Models;
 using Microsoft.AspNetCore.Authorization;
@@ -26,11 +27,18 @@ public record BulkAttendanceItem(string EncodedStudentId, DateTime Date);
 public class AttendanceController : ControllerBase
 {
     private readonly AppDbContext _db;
-    public AttendanceController(AppDbContext db) => _db = db;
+    private readonly ITenantContext _tenant;
+    public AttendanceController(AppDbContext db, ITenantContext tenant)
+    {
+        _db = db;
+        _tenant = tenant;
+    }
 
     [HttpPost]
     public async Task<IActionResult> Record([FromQuery] int lectureId, [FromBody] RecordAttendanceRequest request)
     {
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
         if (string.IsNullOrWhiteSpace(request.EncodedStudentId) && request.StudentId == null)
             return BadRequest(new { message = "Either encodedStudentId or studentId must be provided." });
 
@@ -64,6 +72,7 @@ public class AttendanceController : ControllerBase
 
         var attendance = new Attendance
         {
+            TeacherId = _tenant.CurrentTenantId.Value,
             LectureId = lectureId,
             StudentId = studentId.Value,
             EncodedStudentId = encodedStudentId,
@@ -79,6 +88,8 @@ public class AttendanceController : ControllerBase
     [HttpPost("bulk")]
     public async Task<IActionResult> RecordBulk([FromQuery] int lectureId, [FromBody] List<BulkAttendanceItem> items)
     {
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
         var created = 0;
         foreach (var item in items)
         {
@@ -88,6 +99,7 @@ public class AttendanceController : ControllerBase
 
             _db.Attendances.Add(new Attendance
             {
+                TeacherId = _tenant.CurrentTenantId.Value,
                 LectureId = lectureId,
                 StudentId = studentId.Value,
                 EncodedStudentId = item.EncodedStudentId,

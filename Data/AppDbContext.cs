@@ -19,6 +19,7 @@ public class AppDbContext : DbContext
     public DbSet<Unit> Units => Set<Unit>();
     public DbSet<Lesson> Lessons => Set<Lesson>();
     public DbSet<StudentUnitSubscription> StudentUnitSubscriptions => Set<StudentUnitSubscription>();
+    public DbSet<StudentGroupMembership> StudentGroupMemberships => Set<StudentGroupMembership>();
     public DbSet<StudentLectureUnlock> StudentLectureUnlocks => Set<StudentLectureUnlock>();
     public DbSet<Lecture> Lectures => Set<Lecture>();
     public DbSet<Material> Materials => Set<Material>();
@@ -78,11 +79,66 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<BankQuestion>().HasQueryFilter(bq => bq.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<BankAttempt>().HasQueryFilter(ba => ba.TeacherId == _tenant.CurrentTenantId);
 
-        // Student doesn't carry TeacherId directly — it's derived through its Group,
-        // which itself is tenant-owned. This also automatically tenant-scopes every
-        // screen built on top of Students (Analytics, quiz/homework results, etc.).
+        // MULTI-TENANT SECURITY FIX: these three results tables are queried by
+        // StudentId ALONE in StudentsController (they don't join through Quiz),
+        // so without their own TeacherId + filter, a student subscribed to more
+        // than one teacher would have marks from every teacher mixed together
+        // whichever tenant asked. The Student-level filter below does NOT cover
+        // these because they're queried directly off their own DbSet, not via
+        // Student.
+        modelBuilder.Entity<QuizResult>().HasQueryFilter(qr => qr.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<CenterQuizResult>().HasQueryFilter(cr => cr.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<HomeworkResult>().HasQueryFilter(hr => hr.TeacherId == _tenant.CurrentTenantId);
+
+        // MULTI-TENANT SECURITY HARDENING: these tables never had their own
+        // TeacherId before -- every current call site happens to be safe
+        // today because it joins against an already tenant-filtered table
+        // (Lecture/Assignment/Notebook/Unit) before touching these, but
+        // nothing enforced that at the database level. Same class of bug as
+        // the QuizResult/CenterQuizResult/HomeworkResult fix above: any
+        // future endpoint that queries these by StudentId alone would leak
+        // rows across teachers. Adding TeacherId + a global filter here
+        // closes that off structurally instead of relying on every call
+        // site remembering to join correctly.
+        modelBuilder.Entity<Attendance>().HasQueryFilter(a => a.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<AssignmentSubmission>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<NotebookPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<StudentLectureUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<StudentUnitSubscription>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
+
+        // MULTI-TENANT MEMBERSHIP: a Student can belong to Groups under MORE THAN
+        // ONE teacher now (StudentGroupMembership). A Student row is visible under
+        // the current tenant if EITHER their legacy single Group belongs to this
+        // tenant OR they have a membership row for a Group under this tenant.
+        // NOTE: this filter only applies when querying the Students DbSet itself
+        // (or navigating via a Student navigation property). It does NOT cascade
+        // to result tables (QuizResult/CenterQuizResult/HomeworkResult) queried
+        // directly off their own DbSet by StudentId — those need their own
+        // TeacherId + filter, added below.
         modelBuilder.Entity<Student>()
-            .HasQueryFilter(s => s.Group != null && s.Group.TeacherId == _tenant.CurrentTenantId);
+            .HasQueryFilter(s =>
+                (s.Group != null && s.Group.TeacherId == _tenant.CurrentTenantId) ||
+                s.GroupMemberships.Any(m => m.Group != null && m.Group.TeacherId == _tenant.CurrentTenantId));
+
+        modelBuilder.Entity<StudentGroupMembership>()
+            .HasIndex(m => new { m.StudentId, m.GroupId }).IsUnique();
+
+        modelBuilder.Entity<StudentGroupMembership>()
+            .HasOne(m => m.Student)
+            .WithMany(s => s.GroupMemberships)
+            .HasForeignKey(m => m.StudentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<StudentGroupMembership>()
+            .HasOne(m => m.Group)
+            .WithMany()
+            .HasForeignKey(m => m.GroupId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Same tenant scoping as Group itself — a staff member of teacher X should
+        // never see membership rows tying students to teacher Y's groups.
+        modelBuilder.Entity<StudentGroupMembership>()
+            .HasQueryFilter(m => m.Group != null && m.Group.TeacherId == _tenant.CurrentTenantId);
 
         modelBuilder.Entity<Lesson>()
             .HasOne(l => l.Unit)

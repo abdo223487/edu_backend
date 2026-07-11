@@ -31,10 +31,13 @@ public class QuizzesController : ControllerBase
     private readonly AppDbContext _db;
     private readonly IFileStorageService _files;
 
-    public QuizzesController(AppDbContext db, IFileStorageService files)
+    private readonly Common.ITenantContext _tenant;
+
+    public QuizzesController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant)
     {
         _db = db;
         _files = files;
+        _tenant = tenant;
     }
 
     private static string FormatDuration(int minutes)
@@ -53,7 +56,7 @@ public class QuizzesController : ControllerBase
         {
             studentId = User.GetUserId();
 
-            var groupId = User.GetGroupId();
+            var groupId = User.GetGroupId(_tenant.CurrentTenantId);
             if (groupId.HasValue) query = query.Where(q => q.GroupIdsCsv.Contains(groupId.Value.ToString()));
 
             // Same subscription gate as Units/Lectures/Material/Notifications.
@@ -240,7 +243,8 @@ public class QuizzesController : ControllerBase
                 QuizId = quiz.Id,
                 StudentId = studentId,
                 TotalMarks = totalMarks,
-                Score = 0
+                Score = 0,
+                TeacherId = quiz.TeacherId
             };
             foreach (var q in quiz.Questions)
                 autoZero.Answers.Add(new QuizAnswer { QuestionId = q.Id, Answer = "", MarkAwarded = 0 });
@@ -296,7 +300,7 @@ public class QuizzesController : ControllerBase
         var totalMarks = quiz.Questions.Sum(q => q.Mark);
         var score = 0;
 
-        var result = new QuizResult { QuizId = quiz.Id, StudentId = studentId, TotalMarks = totalMarks };
+        var result = new QuizResult { QuizId = quiz.Id, StudentId = studentId, TotalMarks = totalMarks, TeacherId = quiz.TeacherId };
 
         foreach (var submitted in request.Answers ?? new())
         {
@@ -330,8 +334,9 @@ public class QuizzesController : ControllerBase
         if (quiz == null) return NotFound(new { message = "Quiz not found." });
 
         var groupIds = quiz.GroupIds;
+        // MULTI-TENANT: match via GroupMemberships, not the legacy single GroupId.
         var students = await _db.Students.Include(s => s.Group)
-            .Where(s => groupIds.Contains(s.GroupId)).ToListAsync();
+            .Where(s => s.GroupMemberships.Any(m => groupIds.Contains(m.GroupId))).ToListAsync();
         var results = await _db.QuizResults.Where(r => r.QuizId == quizId).ToListAsync();
 
         // Takers.dart's UI (score bar, pct calc) assumes every returned taker has
