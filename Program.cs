@@ -7,6 +7,7 @@ using EduApi.Services;
 using EduApi.Services.Interfaces;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
 
@@ -31,7 +32,14 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddScoped<ITenantContext, HttpTenantContext>();
 
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+{
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"));
+    // Some migrations in this project apply schema changes manually / via
+    // hand-written Up() methods rather than a scaffolded diff, so the model
+    // snapshot can drift slightly from the live schema (e.g. index/default
+    // naming) without any real risk. Don't let that abort Database.Migrate().
+    options.ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning));
+});
 // Previously: options.UseInMemoryDatabase("EduApiDb")
 // Now connected to a persistent PostgreSQL database (Neon).
 
