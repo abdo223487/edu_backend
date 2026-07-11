@@ -749,7 +749,11 @@ public class StudentsController : ControllerBase
     public async Task<IActionResult> GetOnlineQuizResults()
     {
         var studentId = User.GetUserId();
-        var results = await _db.QuizResults.Include(r => r.Answers)
+        // PERFORMANCE: no .Include(r => r.Answers) here -- the projection below
+        // only reads scalar columns off QuizResult itself, so pulling in the
+        // Answers collection would mean a needless extra join/round trip for
+        // data that's thrown away immediately.
+        var results = await _db.QuizResults
             .Where(r => r.StudentId == studentId)
             .Select(r => new { id = r.Id, quizId = r.QuizId, mark = r.Score, quizTotalMarks = r.TotalMarks, date = r.GradedAt })
             .ToListAsync();

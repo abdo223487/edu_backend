@@ -54,15 +54,31 @@ public class AnalyticsController : ControllerBase
             .Take(PagingDefaults.PageSize)
             .ToListAsync();
 
-        var result = new List<object>();
-        foreach (var s in students)
-        {
-            var lastQuiz = await _db.CenterQuizResults.Where(r => r.StudentId == s.Id)
-                .OrderByDescending(r => r.Date).FirstOrDefaultAsync();
-            var lastHomework = await _db.HomeworkResults.Where(r => r.StudentId == s.Id)
-                .OrderByDescending(r => r.Date).FirstOrDefaultAsync();
+        // PERFORMANCE: this used to run 2 extra queries PER STUDENT in a loop
+        // (2 * PageSize round trips per page load). Batch both lookups into a
+        // single query each for the whole page, then pick the latest result
+        // per student in memory -- same result, 2 queries total instead of
+        // up to 40+.
+        var pageStudentIds = students.Select(s => s.Id).ToList();
 
-            result.Add(new
+        var lastQuizByStudent = (await _db.CenterQuizResults
+                .Where(r => pageStudentIds.Contains(r.StudentId))
+                .ToListAsync())
+            .GroupBy(r => r.StudentId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(r => r.Date).First());
+
+        var lastHomeworkByStudent = (await _db.HomeworkResults
+                .Where(r => pageStudentIds.Contains(r.StudentId))
+                .ToListAsync())
+            .GroupBy(r => r.StudentId)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(r => r.Date).First());
+
+        var result = students.Select(s =>
+        {
+            lastQuizByStudent.TryGetValue(s.Id, out var lastQuiz);
+            lastHomeworkByStudent.TryGetValue(s.Id, out var lastHomework);
+
+            return new
             {
                 id = s.Id,
                 name = s.Name,
@@ -71,8 +87,8 @@ public class AnalyticsController : ControllerBase
                 lastQuizResultId = lastQuiz?.Id,
                 lastHomeworkMarks = lastHomework != null ? $"{lastHomework.Marks}/{lastHomework.TotalMarks}" : null,
                 lastHomeworkResultId = lastHomework?.Id
-            });
-        }
+            };
+        }).ToList();
 
         return Ok(result);
     }

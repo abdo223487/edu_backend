@@ -79,6 +79,25 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<BankQuestion>().HasQueryFilter(bq => bq.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<BankAttempt>().HasQueryFilter(ba => ba.TeacherId == _tenant.CurrentTenantId);
 
+        // PERFORMANCE: every entity above (and the three result tables + five
+        // activity tables filtered below) is scoped to the current tenant via
+        // HasQueryFilter, which means EVERY query against them carries an
+        // implicit "WHERE TeacherId = @tenant" -- with no index, Postgres has
+        // no choice but a full sequential scan on every single request. These
+        // indexes turn that into an index scan and cost is negligible on
+        // writes. See AddTeacherIdIndexesForTenantIsolation migration.
+        modelBuilder.Entity<Group>().HasIndex(g => g.TeacherId);
+        modelBuilder.Entity<Unit>().HasIndex(u => u.TeacherId);
+        modelBuilder.Entity<Lecture>().HasIndex(l => l.TeacherId);
+        modelBuilder.Entity<Material>().HasIndex(m => m.TeacherId);
+        modelBuilder.Entity<Notebook>().HasIndex(n => n.TeacherId);
+        modelBuilder.Entity<Code>().HasIndex(c => c.TeacherId);
+        modelBuilder.Entity<Notification>().HasIndex(n => n.TeacherId);
+        modelBuilder.Entity<Quiz>().HasIndex(q => q.TeacherId);
+        modelBuilder.Entity<Assignment>().HasIndex(a => a.TeacherId);
+        modelBuilder.Entity<BankQuestion>().HasIndex(bq => bq.TeacherId);
+        modelBuilder.Entity<BankAttempt>().HasIndex(ba => ba.TeacherId);
+
         // MULTI-TENANT SECURITY FIX: these three results tables are queried by
         // StudentId ALONE in StudentsController (they don't join through Quiz),
         // so without their own TeacherId + filter, a student subscribed to more
@@ -89,6 +108,17 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<QuizResult>().HasQueryFilter(qr => qr.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<CenterQuizResult>().HasQueryFilter(cr => cr.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<HomeworkResult>().HasQueryFilter(hr => hr.TeacherId == _tenant.CurrentTenantId);
+
+        // Composite (not just TeacherId alone): every read of these three
+        // tables filters by TeacherId (query filter) AND StudentId (explicit,
+        // "this student's result history") together -- see
+        // AnalyticsController/StudentsController/QuizzesController. A single
+        // composite index serves both the tenant-only filter (leftmost
+        // column) and the common TeacherId+StudentId combination, instead of
+        // needing two separate indexes.
+        modelBuilder.Entity<QuizResult>().HasIndex(qr => new { qr.TeacherId, qr.StudentId });
+        modelBuilder.Entity<CenterQuizResult>().HasIndex(cr => new { cr.TeacherId, cr.StudentId });
+        modelBuilder.Entity<HomeworkResult>().HasIndex(hr => new { hr.TeacherId, hr.StudentId });
 
         // MULTI-TENANT SECURITY HARDENING: these tables never had their own
         // TeacherId before -- every current call site happens to be safe
@@ -105,6 +135,12 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<NotebookPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentLectureUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentUnitSubscription>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
+
+        modelBuilder.Entity<Attendance>().HasIndex(a => a.TeacherId);
+        modelBuilder.Entity<AssignmentSubmission>().HasIndex(s => s.TeacherId);
+        modelBuilder.Entity<NotebookPayment>().HasIndex(p => p.TeacherId);
+        modelBuilder.Entity<StudentLectureUnlock>().HasIndex(u => u.TeacherId);
+        modelBuilder.Entity<StudentUnitSubscription>().HasIndex(s => s.TeacherId);
 
         // MULTI-TENANT MEMBERSHIP: a Student can belong to Groups under MORE THAN
         // ONE teacher now (StudentGroupMembership). A Student row is visible under

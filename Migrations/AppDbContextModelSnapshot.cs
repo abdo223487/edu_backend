@@ -81,6 +81,8 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Assignments");
                 });
 
@@ -183,6 +185,8 @@ namespace EduApi.Migrations
                     b.HasIndex("AssignmentId", "StudentId")
                         .IsUnique();
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("AssignmentSubmissions");
                 });
 
@@ -210,6 +214,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("Attendances");
                 });
@@ -258,6 +264,8 @@ namespace EduApi.Migrations
                         .HasColumnType("text");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("BankAttempts");
                 });
@@ -339,6 +347,8 @@ namespace EduApi.Migrations
 
                     b.HasIndex("LessonId");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("BankQuestions");
                 });
 
@@ -370,6 +380,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId", "StudentId");
 
                     b.ToTable("CenterQuizResults");
                 });
@@ -414,6 +426,8 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Codes");
                 });
 
@@ -436,6 +450,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("Groups");
                 });
@@ -468,6 +484,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId", "StudentId");
 
                     b.ToTable("HomeworkResults");
                 });
@@ -516,6 +534,8 @@ namespace EduApi.Migrations
                         .HasColumnType("text");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("Lectures");
                 });
@@ -588,6 +608,8 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Materials");
                 });
 
@@ -625,6 +647,8 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Notebooks");
                 });
 
@@ -655,6 +679,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("NotebookPayments");
                 });
@@ -696,6 +722,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("Notifications");
                 });
@@ -773,6 +801,8 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Quizzes");
                 });
 
@@ -831,6 +861,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId", "StudentId");
 
                     b.ToTable("QuizResults");
                 });
@@ -940,6 +972,8 @@ namespace EduApi.Migrations
 
                     b.HasIndex("StudentId");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("StudentUnitSubscriptions");
                 });
 
@@ -967,6 +1001,8 @@ namespace EduApi.Migrations
 
                     b.HasIndex("StudentId", "LectureId")
                         .IsUnique();
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("StudentLectureUnlocks");
                 });
@@ -1040,6 +1076,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("Units");
                 });
