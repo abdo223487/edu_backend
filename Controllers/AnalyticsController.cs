@@ -44,14 +44,18 @@ public class AnalyticsController : ControllerBase
     public async Task<IActionResult> GetStudentsAnalytics(
         [FromQuery] int p = 1, [FromQuery] int? groupId = null, [FromQuery] int? schoolYear = null)
     {
-        var query = _db.Students.AsNoTracking().Include(s => s.Group).AsQueryable();
+        var query = _db.Students.AsNoTracking().AsQueryable();
         if (groupId.HasValue) query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
 
+        // Only Id/Name/Group name are ever read below -- project at the SQL
+        // level instead of materializing (and Include()-joining) the full
+        // Student entity just to throw most of its columns away.
         var students = await query
             .OrderBy(s => s.Name)
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
+            .Select(s => new { s.Id, s.Name, GroupName = s.Group!.Name })
             .ToListAsync();
 
         // PERFORMANCE: this used to run 2 extra queries PER STUDENT in a loop
@@ -61,14 +65,19 @@ public class AnalyticsController : ControllerBase
         // up to 40+.
         var pageStudentIds = students.Select(s => s.Id).ToList();
 
+        // Only StudentId/Marks/TotalMarks/Date/Id are read below -- select
+        // those columns instead of the whole result row (Title/TeacherId etc.
+        // are never touched here).
         var lastQuizByStudent = (await _db.CenterQuizResults.AsNoTracking()
                 .Where(r => pageStudentIds.Contains(r.StudentId))
+                .Select(r => new { r.Id, r.StudentId, r.Marks, r.TotalMarks, r.Date })
                 .ToListAsync())
             .GroupBy(r => r.StudentId)
             .ToDictionary(g => g.Key, g => g.OrderByDescending(r => r.Date).First());
 
         var lastHomeworkByStudent = (await _db.HomeworkResults.AsNoTracking()
                 .Where(r => pageStudentIds.Contains(r.StudentId))
+                .Select(r => new { r.Id, r.StudentId, r.Marks, r.TotalMarks, r.Date })
                 .ToListAsync())
             .GroupBy(r => r.StudentId)
             .ToDictionary(g => g.Key, g => g.OrderByDescending(r => r.Date).First());
@@ -82,7 +91,7 @@ public class AnalyticsController : ControllerBase
             {
                 id = s.Id,
                 name = s.Name,
-                groupName = s.Group?.Name,
+                groupName = s.GroupName,
                 lastQuizMarks = lastQuiz != null ? $"{lastQuiz.Marks}/{lastQuiz.TotalMarks}" : null,
                 lastQuizResultId = lastQuiz?.Id,
                 lastHomeworkMarks = lastHomework != null ? $"{lastHomework.Marks}/{lastHomework.TotalMarks}" : null,
@@ -104,15 +113,19 @@ public class AnalyticsController : ControllerBase
     {
         const int passMarkPercent = 50;
 
-        var studentQuery = _db.Students.Include(s => s.Group).AsQueryable();
+        var studentQuery = _db.Students.AsNoTracking().AsQueryable();
         if (groupId.HasValue) studentQuery = studentQuery.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) studentQuery = studentQuery.Where(s => s.SchoolYear == schoolYear.Value);
 
-        var students = await studentQuery.ToListAsync();
+        // Only Id/Name/Group name are used below -- project at the SQL level.
+        var students = await studentQuery
+            .Select(s => new { s.Id, s.Name, GroupName = s.Group!.Name })
+            .ToListAsync();
         var studentIds = students.Select(s => s.Id).ToList();
 
-        var allResults = await _db.CenterQuizResults
+        var allResults = await _db.CenterQuizResults.AsNoTracking()
             .Where(r => studentIds.Contains(r.StudentId))
+            .Select(r => new { r.StudentId, r.Marks, r.TotalMarks, r.Date })
             .ToListAsync();
 
         var items = new List<object>();
@@ -130,7 +143,7 @@ public class AnalyticsController : ControllerBase
             items.Add(new
             {
                 name = s.Name,
-                groupName = s.Group?.Name,
+                groupName = s.GroupName,
                 averageMarks = Math.Round(averagePercent, 1),
                 failedQuizzesCount = failedCount,
                 lastQuizMarks = $"{lastQuiz.Marks}/{lastQuiz.TotalMarks}"
@@ -155,16 +168,21 @@ public class AnalyticsController : ControllerBase
         var top = await query.OrderByDescending(x => x.TotalMarks).Take(5).ToListAsync();
         var ids = top.Select(t => t.StudentId).ToList();
 
-        var studentsQuery = _db.Students.AsNoTracking().Include(s => s.Group).Where(s => ids.Contains(s.Id));
+        var studentsQuery = _db.Students.AsNoTracking().Where(s => ids.Contains(s.Id));
         if (effectiveGroupId.HasValue) studentsQuery = studentsQuery.Where(s => s.GroupMemberships.Any(m => m.GroupId == effectiveGroupId.Value));
         else if (schoolYear.HasValue) studentsQuery = studentsQuery.Where(s => s.SchoolYear == schoolYear.Value);
 
-        var students = await studentsQuery.ToDictionaryAsync(s => s.Id);
+        // Only Id/Name/Group name are read below -- project at the SQL level.
+        var students = await studentsQuery
+            .Select(s => new { s.Id, s.Name, GroupName = s.Group!.Name })
+            .ToDictionaryAsync(s => s.Id);
 
         // Need per-student result lists for averageMarks/lastQuizMarks (client
-        // reads both — see "topfive analytics .dart").
+        // reads both — see "topfive analytics .dart"). Only the columns
+        // actually used in the aggregation below are selected.
         var allResultsByStudent = await _db.CenterQuizResults.AsNoTracking()
             .Where(r => ids.Contains(r.StudentId))
+            .Select(r => new { r.StudentId, r.Marks, r.TotalMarks, r.Date })
             .ToListAsync();
 
         var items = top.Where(t => students.ContainsKey(t.StudentId))
@@ -180,7 +198,7 @@ public class AnalyticsController : ControllerBase
                     rank = i + 1,
                     studentId = t.StudentId,
                     name = students[t.StudentId].Name,
-                    groupName = students[t.StudentId].Group?.Name,
+                    groupName = students[t.StudentId].GroupName,
                     totalMarks = t.TotalMarks,
                     averageMarks = Math.Round(averagePercent, 1),
                     lastQuizMarks = lastQuiz != null ? $"{lastQuiz.Marks}/{lastQuiz.TotalMarks}" : null
@@ -198,7 +216,9 @@ public class AnalyticsController : ControllerBase
         if (groupId.HasValue) lectureQuery = lectureQuery.Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == groupId.Value));
         else if (schoolYear.HasValue) lectureQuery = lectureQuery.Where(l => l.SchoolYear == schoolYear.Value);
 
-        var lectures = await lectureQuery.ToListAsync();
+        // Only Id/Name are read below -- project at the SQL level instead of
+        // pulling every Lecture column.
+        var lectures = await lectureQuery.Select(l => new { l.Id, l.Name }).ToListAsync();
         var lectureIds = lectures.Select(l => l.Id).ToList();
         var countsByLecture = await _db.Attendances.AsNoTracking()
             .Where(a => lectureIds.Contains(a.LectureId))
@@ -232,9 +252,14 @@ public class AnalyticsController : ControllerBase
         var lecture = await _db.Lectures.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (id));
         if (lecture == null) return NotFound(new { message = "Lecture not found." });
 
-        var attendees = await _db.Attendances.AsNoTracking().Where(a => a.LectureId == id).ToListAsync();
+        // Only StudentId/Date and Name/PhoneNumber are used in the rows below.
+        var attendees = await _db.Attendances.AsNoTracking().Where(a => a.LectureId == id)
+            .Select(a => new { a.StudentId, a.Date })
+            .ToListAsync();
         var studentIds = attendees.Select(a => a.StudentId).ToList();
-        var students = await _db.Students.AsNoTracking().Where(s => studentIds.Contains(s.Id)).ToDictionaryAsync(s => s.Id);
+        var students = await _db.Students.AsNoTracking().Where(s => studentIds.Contains(s.Id))
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber })
+            .ToDictionaryAsync(s => s.Id);
 
         var rows = attendees.Select(a =>
         {
@@ -254,7 +279,8 @@ public class AnalyticsController : ControllerBase
         if (groupId.HasValue) query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
 
-        var students = await query.ToListAsync();
+        // Only Name/PhoneNumber end up in the exported rows.
+        var students = await query.Select(s => new { s.Name, s.PhoneNumber }).ToListAsync();
         var rows = students.Select(s => new[] { s.Name, s.PhoneNumber });
 
         var bytes = BuildXlsx("Students", new[] { "Name", "PhoneNumber" }, rows);
@@ -282,8 +308,11 @@ public class AnalyticsController : ControllerBase
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
         else query = query.Where(s => s.GroupMemberships.Any(m => notebook.GroupIds.Contains(m.GroupId)));
 
+        // Only Id/Name/PhoneNumber are read below -- project at the SQL level.
         var students = await query.OrderBy(s => s.Name)
-            .Skip((p - 1) * PagingDefaults.PageSize).Take(PagingDefaults.PageSize).ToListAsync();
+            .Skip((p - 1) * PagingDefaults.PageSize).Take(PagingDefaults.PageSize)
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber })
+            .ToListAsync();
 
         var payments = await _db.NotebookPayments.AsNoTracking()
             .Where(pay => pay.NotebookId == notebookId)
@@ -370,11 +399,14 @@ public class AnalyticsController : ControllerBase
     public async Task<IActionResult> GetOwnAnalytics()
     {
         var studentId = User.GetUserId();
-        var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (studentId));
+        var studentName = await _db.Students.AsNoTracking()
+            .Where(e => e.Id == studentId)
+            .Select(e => (string?)e.Name)
+            .FirstOrDefaultAsync();
         var quizMarks = await _db.CenterQuizResults.AsNoTracking().Where(r => r.StudentId == studentId).SumAsync(r => r.Marks);
         var homeworkMarks = await _db.HomeworkResults.AsNoTracking().Where(r => r.StudentId == studentId).SumAsync(r => r.Marks);
 
-        return Ok(new { name = student?.Name, totalMarks = quizMarks + homeworkMarks });
+        return Ok(new { name = studentName, totalMarks = quizMarks + homeworkMarks });
     }
 
     // Real contract: { "totalMarks": 0, "averageMarks": 0 } — scoped to ONLINE quizzes only
@@ -384,12 +416,14 @@ public class AnalyticsController : ControllerBase
     public async Task<IActionResult> GetOwnOnlineAnalytics()
     {
         var studentId = User.GetUserId();
-        var onlineResults = await _db.QuizResults.AsNoTracking().Where(r => r.StudentId == studentId).ToListAsync();
+        var scores = await _db.QuizResults.AsNoTracking().Where(r => r.StudentId == studentId)
+            .Select(r => r.Score)
+            .ToListAsync();
 
         return Ok(new
         {
-            totalMarks = onlineResults.Sum(r => r.Score),
-            averageMarks = onlineResults.Count == 0 ? 0 : onlineResults.Average(r => r.Score)
+            totalMarks = scores.Sum(),
+            averageMarks = scores.Count == 0 ? 0 : scores.Average()
         });
     }
 }

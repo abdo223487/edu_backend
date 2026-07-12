@@ -37,6 +37,7 @@ public class NotebooksController : ControllerBase
         // per notebook, computed in one query instead of N+1.
         var payments = await _db.NotebookPayments.AsNoTracking()
             .Where(p => notebookIds.Contains(p.NotebookId))
+            .Select(p => new { p.NotebookId, p.DiscountedPrice, p.Price })
             .ToListAsync();
         var paidByNotebook = payments
             .GroupBy(p => p.NotebookId)
@@ -123,6 +124,7 @@ public class NotebooksController : ControllerBase
         var studentIds = payments.Select(p => p.StudentId).Distinct().ToList();
         var students = await _db.Students.AsNoTracking()
             .Where(s => studentIds.Contains(s.Id))
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.IsCancelled, s.IsSuspended })
             .ToDictionaryAsync(s => s.Id);
         var groupNames = await _db.GetTenantGroupNamesAsync(studentIds);
 

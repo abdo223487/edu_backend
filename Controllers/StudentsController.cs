@@ -193,14 +193,25 @@ public class StudentsController : ControllerBase
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
         if (!string.IsNullOrWhiteSpace(q)) query = query.Where(s => s.Name.Contains(q) || s.PhoneNumber.Contains(q));
 
+        // ToListItem only reads Id/Name/PhoneNumber/UserName/GroupId/IsSuspended/
+        // IsCancelled -- project those columns at the SQL level so we don't pull
+        // PasswordHash, RefreshToken, ParentPhoneNumber, etc. off the wire.
         var students = await query
             .OrderBy(s => s.Name)
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, s.IsSuspended, s.IsCancelled })
             .ToListAsync();
 
         var tenantGroupNames = await _db.GetTenantGroupNamesAsync(students.Select(s => s.Id));
-        return Ok(students.Select(s => ToListItem(s, tenantGroupNames.GetValueOrDefault(s.Id))));
+        return Ok(students.Select(s =>
+        {
+            var groupName = tenantGroupNames.GetValueOrDefault(s.Id);
+            var status = s.IsCancelled ? "Cancelled" : s.IsSuspended ? "Suspended" : "Active";
+            return new StudentListItem(
+                s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, groupName, s.IsSuspended, s.IsCancelled,
+                status, null);
+        }));
     }
 
     // GET Students/count

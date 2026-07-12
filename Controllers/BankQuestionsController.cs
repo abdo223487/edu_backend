@@ -112,7 +112,12 @@ public class BankQuestionsController : ControllerBase
         if (lessonId.HasValue) query = query.Where(q => q.LessonId == lessonId.Value);
         if (unitId.HasValue) query = query.Where(q => q.Lesson!.UnitId == unitId.Value);
 
-        var questions = await query.ToListAsync();
+        // Only Id/Text/Difficulty/Lesson name are read below -- project those
+        // columns instead of the full question row (Choices/Answer/Mark/
+        // ImageUrl/TeacherId are never used in this endpoint).
+        var questions = await query
+            .Select(q => new { q.Id, q.Text, q.Difficulty, LessonName = q.Lesson != null ? q.Lesson.Name : null })
+            .ToListAsync();
         var questionIds = questions.Select(q => q.Id).ToList();
 
         // Every time one of these questions was actually answered inside an attempt.
@@ -131,7 +136,7 @@ public class BankQuestionsController : ControllerBase
                 .Select(a => a.StudentId).Distinct().Count();
 
             return new BankQuestionStatsDto(
-                q.Id, q.Text, q.Difficulty, q.Lesson?.Name ?? "",
+                q.Id, q.Text, q.Difficulty, q.LessonName ?? "",
                 timesAnswered, correctCount, incorrectCount,
                 timesAnswered > 0 ? Math.Round(correctCount * 100.0 / timesAnswered, 1) : 0,
                 studentsWrongCount);
@@ -165,7 +170,10 @@ public class BankQuestionsController : ControllerBase
             .ToListAsync();
 
         var studentIds = attempts.Select(a => a.StudentId).Distinct().ToList();
-        var students = await _db.Students.AsNoTracking().Where(s => studentIds.Contains(s.Id)).ToListAsync();
+        // Only Id/Name are read below.
+        var students = await _db.Students.AsNoTracking().Where(s => studentIds.Contains(s.Id))
+            .Select(s => new { s.Id, s.Name })
+            .ToListAsync();
         var groupNames = await _db.GetTenantGroupNamesAsync(studentIds);
 
         var items = attempts.Select(a =>

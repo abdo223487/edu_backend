@@ -156,8 +156,17 @@ public class LecturesController : ControllerBase
                 (l.UnitId == null && unlockedLectureIds.Contains(l.Id)));
         }
 
-        var items = await query.OrderBy(l => l.Id).ToListAsync();
-        return Ok(items.Select(ToDto));
+        // ToDto only reads Id/Name/AttendanceMethod/YoutubeLink/UnitId/LessonIndex/
+        // GroupIdsCsv/CreatedAt -- project those columns at the SQL level instead
+        // of materializing the full Lecture row (StorageFileKey/TeacherId/Months/
+        // SchoolYear are never used here).
+        var items = await query.OrderBy(l => l.Id)
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt })
+            .ToListAsync();
+        return Ok(items.Select(l => new LectureListItem(
+            l.Id, l.Name, l.AttendanceMethod.ToString(), l.YoutubeLink, l.UnitId, l.LessonIndex,
+            l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
+            l.CreatedAt)));
     }
 
     [HttpGet("by-group")]
@@ -216,9 +225,13 @@ public class LecturesController : ControllerBase
             .OrderBy(l => l.Id)
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt })
             .ToListAsync();
 
-        return Ok(items.Select(ToDto));
+        return Ok(items.Select(l => new LectureListItem(
+            l.Id, l.Name, l.AttendanceMethod.ToString(), l.YoutubeLink, l.UnitId, l.LessonIndex,
+            l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
+            l.CreatedAt)));
     }
 
     [HttpGet("{lectureId:int}/materials")]
