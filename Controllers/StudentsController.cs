@@ -188,8 +188,10 @@ public class StudentsController : ControllerBase
     [HttpPost("import")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     [RequestSizeLimit(10_000_000)]
-    public async Task<IActionResult> ImportFromExcel([FromForm] IFormFile file, [FromForm] int? groupId)
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> ImportFromExcel([FromForm] ImportFromExcelForm form)
     {
+        var file = form.File;
         if (file == null || file.Length == 0)
             return BadRequest(new { message = "No file uploaded." });
 
@@ -200,7 +202,7 @@ public class StudentsController : ControllerBase
         using var stream = new MemoryStream();
         await file.CopyToAsync(stream);
         stream.Position = 0;
-        return await ImportStudentsFromWorkbookStream(stream, groupId);
+        return await ImportStudentsFromWorkbookStream(stream, form.GroupId);
     }
 
     // POST Students/import/google-sheet  body: { url, groupId }

@@ -53,6 +53,16 @@ public record QrCodeResponse(string StudentId, string QrPayload);
 // processed, success or not, so the teacher can see exactly what happened to
 // every row (including which ones were skipped and why) instead of just a
 // total count.
+// Bound as a single class (not two separate [FromForm] params) because
+// Swashbuckle/Swagger cannot generate a schema for an action with more than
+// one [FromForm] parameter when one of them is IFormFile — it throws and
+// takes down the ENTIRE /swagger/v1/swagger.json endpoint, not just this one.
+public class ImportFromExcelForm
+{
+    public Microsoft.AspNetCore.Http.IFormFile File { get; set; } = default!;
+    public int? GroupId { get; set; }
+}
+
 public record ImportStudentsRowResult(int Row, string? Name, string? PhoneNumber, string Status, string Message, int? StudentId);
 public record ImportStudentsResponse(int TotalRows, int Created, int Linked, int Failed, List<ImportStudentsRowResult> Results);
 
