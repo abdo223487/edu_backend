@@ -38,12 +38,12 @@ public class NotificationsController : ControllerBase
         [FromQuery] int p = 1, [FromQuery] int? groupId = null,
         [FromQuery] int? schoolYear = null, [FromQuery] int? unitId = null)
     {
-        var query = _db.Notifications.AsQueryable();
+        var query = _db.Notifications.AsNoTracking().AsQueryable();
 
         if (User.IsInRole(Roles.Student))
         {
             var myGroup = User.GetGroupId(_tenant.CurrentTenantId);
-            if (myGroup.HasValue) query = query.Where(n => n.GroupIdsCsv.Contains(myGroup.Value.ToString()));
+            if (myGroup.HasValue) query = query.Where(n => _db.NotificationGroupLinks.Any(x => x.NotificationId == n.Id && x.GroupId == myGroup.Value));
 
             // Same subscription gate as Units: a notification tied to a specific
             // unit (UnitId != null) is only visible if the student is subscribed
@@ -54,7 +54,7 @@ public class NotificationsController : ControllerBase
         }
         else if (groupId.HasValue)
         {
-            query = query.Where(n => n.GroupIdsCsv.Contains(groupId.Value.ToString()));
+            query = query.Where(n => _db.NotificationGroupLinks.Any(x => x.NotificationId == n.Id && x.GroupId == groupId.Value));
         }
 
         if (unitId.HasValue) query = query.Where(n => n.UnitId == unitId.Value);

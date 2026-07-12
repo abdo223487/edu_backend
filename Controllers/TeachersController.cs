@@ -47,14 +47,14 @@ public class TeachersController : ControllerBase
         if (User.IsInRole(Roles.Student))
         {
             var studentId = User.GetUserId();
-            mySubscribedTeacherIds = await _db.Students.IgnoreQueryFilters()
+            mySubscribedTeacherIds = await _db.Students.AsNoTracking().IgnoreQueryFilters()
                 .Where(s => s.Id == studentId)
                 .SelectMany(s => s.GroupMemberships.Select(m => m.Group!.TeacherId))
                 .Distinct()
                 .ToListAsync();
         }
 
-        var teachers = await _db.Teachers
+        var teachers = await _db.Teachers.AsNoTracking()
             .Where(t => t.TenantOwnerId == null) // only real tenant-root teachers are "selectable"
             .Select(t => new
             {

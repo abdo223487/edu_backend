@@ -85,7 +85,7 @@ public class BankQuestionsController : ControllerBase
     public async Task<IActionResult> GetAll([FromQuery] int? lessonId, [FromQuery] int? unitId,
         [FromQuery] string? difficulty, [FromQuery] int p = 1)
     {
-        var query = _db.BankQuestions.Include(q => q.Lesson).ThenInclude(l => l!.Unit).AsQueryable();
+        var query = _db.BankQuestions.AsNoTracking().Include(q => q.Lesson).ThenInclude(l => l!.Unit).AsQueryable();
 
         if (lessonId.HasValue) query = query.Where(q => q.LessonId == lessonId.Value);
         if (unitId.HasValue) query = query.Where(q => q.Lesson!.UnitId == unitId.Value);
@@ -108,7 +108,7 @@ public class BankQuestionsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetStats([FromQuery] int? lessonId, [FromQuery] int? unitId)
     {
-        var query = _db.BankQuestions.Include(q => q.Lesson).AsQueryable();
+        var query = _db.BankQuestions.AsNoTracking().Include(q => q.Lesson).AsQueryable();
         if (lessonId.HasValue) query = query.Where(q => q.LessonId == lessonId.Value);
         if (unitId.HasValue) query = query.Where(q => q.Lesson!.UnitId == unitId.Value);
 
@@ -116,7 +116,7 @@ public class BankQuestionsController : ControllerBase
         var questionIds = questions.Select(q => q.Id).ToList();
 
         // Every time one of these questions was actually answered inside an attempt.
-        var answered = await _db.BankAttemptQuestions
+        var answered = await _db.BankAttemptQuestions.AsNoTracking()
             .Where(aq => questionIds.Contains(aq.BankQuestionId) && aq.Answer != null)
             .Select(aq => new { aq.BankQuestionId, aq.MarkAwarded, StudentId = aq.Attempt!.StudentId })
             .ToListAsync();
@@ -158,14 +158,14 @@ public class BankQuestionsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetAttempts([FromQuery] int p = 1)
     {
-        var attempts = await _db.BankAttempts.Include(a => a.Questions)
+        var attempts = await _db.BankAttempts.AsNoTracking().Include(a => a.Questions)
             .OrderByDescending(a => a.Id)
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
             .ToListAsync();
 
         var studentIds = attempts.Select(a => a.StudentId).Distinct().ToList();
-        var students = await _db.Students.Where(s => studentIds.Contains(s.Id)).ToListAsync();
+        var students = await _db.Students.AsNoTracking().Where(s => studentIds.Contains(s.Id)).ToListAsync();
         var groupNames = await _db.GetTenantGroupNamesAsync(studentIds);
 
         var items = attempts.Select(a =>
@@ -186,11 +186,11 @@ public class BankQuestionsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetAttemptDetails(int attemptId)
     {
-        var attempt = await _db.BankAttempts.Include(a => a.Questions).ThenInclude(q => q.BankQuestion)
+        var attempt = await _db.BankAttempts.AsNoTracking().Include(a => a.Questions).ThenInclude(q => q.BankQuestion)
             .FirstOrDefaultAsync(a => a.Id == attemptId);
         if (attempt == null) return NotFound(new { message = "Attempt not found." });
 
-        var student = await _db.Students.FirstOrDefaultAsync(s => s.Id == attempt.StudentId);
+        var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == attempt.StudentId);
         var groupName = await _db.GetTenantGroupNameAsync(attempt.StudentId);
 
         var items = attempt.Questions.Select(aq => new
@@ -231,11 +231,11 @@ public class BankQuestionsController : ControllerBase
         var subscribedUnitIds = User.GetUnitIds();
         if (subscribedUnitIds.Count == 0) return Ok(new List<BankUnitScopeDto>());
 
-        var units = await _db.Units.Where(u => subscribedUnitIds.Contains(u.Id))
+        var units = await _db.Units.AsNoTracking().Where(u => subscribedUnitIds.Contains(u.Id))
             .Include(u => u.Lessons).ToListAsync();
 
         var lessonIds = units.SelectMany(u => u.Lessons).Select(l => l.Id).ToList();
-        var counts = await _db.BankQuestions.Where(q => lessonIds.Contains(q.LessonId))
+        var counts = await _db.BankQuestions.AsNoTracking().Where(q => lessonIds.Contains(q.LessonId))
             .GroupBy(q => new { q.LessonId, q.Difficulty })
             .Select(g => new { g.Key.LessonId, g.Key.Difficulty, Count = g.Count() })
             .ToListAsync();
@@ -367,7 +367,7 @@ public class BankQuestionsController : ControllerBase
     public async Task<IActionResult> GetAttempt(int attemptId)
     {
         var studentId = User.GetUserId();
-        var attempt = await _db.BankAttempts.Include(a => a.Questions).ThenInclude(q => q.BankQuestion)
+        var attempt = await _db.BankAttempts.AsNoTracking().Include(a => a.Questions).ThenInclude(q => q.BankQuestion)
             .FirstOrDefaultAsync(a => a.Id == attemptId && a.StudentId == studentId);
         if (attempt == null) return NotFound(new { message = "Attempt not found." });
 

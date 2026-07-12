@@ -47,7 +47,7 @@ public class CodesController : ControllerBase
     [HttpGet("codeables")]
     public async Task<IActionResult> GetCodeables([FromQuery] int schoolYear)
     {
-        var units = await _db.Units.Where(u => u.SchoolYear == schoolYear)
+        var units = await _db.Units.AsNoTracking().Where(u => u.SchoolYear == schoolYear)
             .Include(u => u.Lessons)
             .ToListAsync();
 
@@ -59,7 +59,7 @@ public class CodesController : ControllerBase
         // school year here: SchoolYear if set, otherwise the SchoolYear of
         // the first Group the lecture belongs to (every lecture's group
         // belongs to exactly one year, so this is always safe/correct).
-        var allGroupYears = await _db.Groups.ToDictionaryAsync(g => g.Id, g => g.SchoolYear);
+        var allGroupYears = await _db.Groups.AsNoTracking().ToDictionaryAsync(g => g.Id, g => g.SchoolYear);
         int? EffectiveYear(Lecture l)
         {
             if (l.SchoolYear.HasValue) return l.SchoolYear;
@@ -82,7 +82,7 @@ public class CodesController : ControllerBase
             !string.IsNullOrEmpty(l.GroupIdsCsv) &&
             EffectiveYear(l) == schoolYear;
 
-        var lecturesByUnit = await _db.Lectures
+        var lecturesByUnit = await _db.Lectures.AsNoTracking()
             .Where(l => l.UnitId != null && unitIds.Contains(l.UnitId.Value))
             .ToListAsync();
         lecturesByUnit = lecturesByUnit.Where(IsCodeable).ToList();
@@ -111,7 +111,7 @@ public class CodesController : ControllerBase
         // Fetch all no-unit lectures (not just ones with SchoolYear already
         // set) so IsCodeable's group-fallback can still catch the
         // already-created null-SchoolYear rows described above.
-        var standaloneLectures = await _db.Lectures
+        var standaloneLectures = await _db.Lectures.AsNoTracking()
             .Where(l => l.UnitId == null)
             .ToListAsync();
         var standaloneDtos = standaloneLectures.Where(IsCodeable)
@@ -132,8 +132,8 @@ public class CodesController : ControllerBase
     [HttpGet("codeables/debug")]
     public async Task<IActionResult> GetCodeablesDebug([FromQuery] int schoolYear)
     {
-        var unitIds = await _db.Units.Where(u => u.SchoolYear == schoolYear).Select(u => u.Id).ToListAsync();
-        var allGroupYears = await _db.Groups.ToDictionaryAsync(g => g.Id, g => g.SchoolYear);
+        var unitIds = await _db.Units.AsNoTracking().Where(u => u.SchoolYear == schoolYear).Select(u => u.Id).ToListAsync();
+        var allGroupYears = await _db.Groups.AsNoTracking().ToDictionaryAsync(g => g.Id, g => g.SchoolYear);
 
         int? EffectiveYear(Lecture l)
         {
@@ -143,12 +143,12 @@ public class CodesController : ControllerBase
             return null;
         }
 
-        var inUnitLectures = await _db.Lectures
+        var inUnitLectures = await _db.Lectures.AsNoTracking()
             .Where(l => l.UnitId != null && unitIds.Contains(l.UnitId.Value))
             .ToListAsync();
         // No year filter here on purpose — show every no-unit lecture so you
         // can see its effectiveYear even if raw SchoolYear is null.
-        var standalone = await _db.Lectures.Where(l => l.UnitId == null).ToListAsync();
+        var standalone = await _db.Lectures.AsNoTracking().Where(l => l.UnitId == null).ToListAsync();
 
         object Dump(Lecture l) => new
         {
@@ -194,7 +194,7 @@ public class CodesController : ControllerBase
     [HttpGet("{codeId:int}")]
     public async Task<IActionResult> GetById(int codeId)
     {
-        var code = await _db.Codes.FirstOrDefaultAsync(e => e.Id == (codeId));
+        var code = await _db.Codes.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (codeId));
         if (code == null) return NotFound(new { message = "Code not found." });
         return Ok(await ToDto(code));
     }

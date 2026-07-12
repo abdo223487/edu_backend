@@ -130,7 +130,7 @@ public class LecturesController : ControllerBase
         if (!Enum.TryParse<AttendanceMethod>(attendanceMethod, true, out var method))
             return BadRequest(new { message = "attendanceMethod must be 'Center' or 'Online'." });
 
-        var query = _db.Lectures.Where(l => l.SchoolYear == schoolYear && l.AttendanceMethod == method);
+        var query = _db.Lectures.AsNoTracking().Where(l => l.SchoolYear == schoolYear && l.AttendanceMethod == method);
         if (unitId.HasValue) query = query.Where(l => l.UnitId == unitId.Value);
 
         // Defensive: this action has no [Authorize(Roles=...)] restricting it to
@@ -140,7 +140,7 @@ public class LecturesController : ControllerBase
         {
             var studentId = User.GetUserId();
             var subscribedIds = User.GetUnitIds();
-            var unlockedLectureIds = await _db.StudentLectureUnlocks
+            var unlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
                 .Where(u => u.StudentId == studentId)
                 .Select(u => u.LectureId)
                 .ToListAsync();
@@ -170,9 +170,9 @@ public class LecturesController : ControllerBase
         [FromQuery] int p = 1)
     {
         var gId = groupId ?? User.GetGroupId(_tenant.CurrentTenantId);
-        var query = _db.Lectures.AsQueryable();
+        var query = _db.Lectures.AsNoTracking().AsQueryable();
 
-        if (gId.HasValue) query = query.Where(l => l.GroupIdsCsv.Contains(gId.Value.ToString()));
+        if (gId.HasValue) query = query.Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == gId.Value));
         if (!string.IsNullOrEmpty(attendanceMethod) &&
             Enum.TryParse<AttendanceMethod>(attendanceMethod, true, out var method))
             query = query.Where(l => l.AttendanceMethod == method);
@@ -197,7 +197,7 @@ public class LecturesController : ControllerBase
         {
             var studentId = User.GetUserId();
             var subscribedIds = User.GetUnitIds();
-            var unlockedLectureIds = await _db.StudentLectureUnlocks
+            var unlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
                 .Where(u => u.StudentId == studentId)
                 .Select(u => u.LectureId)
                 .ToListAsync();
@@ -229,7 +229,7 @@ public class LecturesController : ControllerBase
         // they already knew the lectureId.
         if (User.IsInRole(Roles.Student))
         {
-            var lecture = await _db.Lectures.FirstOrDefaultAsync(l => l.Id == lectureId);
+            var lecture = await _db.Lectures.AsNoTracking().FirstOrDefaultAsync(l => l.Id == lectureId);
             if (lecture == null) return NotFound(new { message = "Lecture not found." });
             if (lecture.UnitId.HasValue && !User.GetUnitIds().Contains(lecture.UnitId.Value))
             {
@@ -237,14 +237,14 @@ public class LecturesController : ControllerBase
                 // code redeemed for this one in-unit lecture should still let
                 // the student open its materials without a full subscription.
                 var studentId = User.GetUserId();
-                var unlocked = await _db.StudentLectureUnlocks
+                var unlocked = await _db.StudentLectureUnlocks.AsNoTracking()
                     .AnyAsync(u => u.StudentId == studentId && u.LectureId == lectureId);
                 if (!unlocked)
                     return StatusCode(403, new { message = "Not subscribed to this unit." });
             }
         }
 
-        var materials = await _db.Materials.Where(m => m.LectureId == lectureId)
+        var materials = await _db.Materials.AsNoTracking().Where(m => m.LectureId == lectureId)
             .Select(m => new MaterialListItem(m.Id, m.Name, m.Type, m.Link))
             .ToListAsync();
 

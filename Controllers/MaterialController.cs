@@ -49,7 +49,7 @@ public class MaterialController : ControllerBase
         // already used in UnitsController.
         var year = schoolYear ?? (User.IsInRole(Roles.Student) ? User.GetSchoolYear() : null);
 
-        var query = _db.Materials.AsQueryable();
+        var query = _db.Materials.AsNoTracking().AsQueryable();
         if (year.HasValue) query = query.Where(m => m.SchoolYear == year.Value);
         if (unitId.HasValue) query = query.Where(m => m.UnitId == unitId.Value);
 
@@ -68,7 +68,7 @@ public class MaterialController : ControllerBase
         // property) so Drive/PDF list screens can show the real unit name
         // instead of a hardcoded "Unit" placeholder.
         var unitIds = materials.Where(m => m.UnitId.HasValue).Select(m => m.UnitId!.Value).Distinct().ToList();
-        var unitNames = await _db.Units.Where(u => unitIds.Contains(u.Id))
+        var unitNames = await _db.Units.AsNoTracking().Where(u => unitIds.Contains(u.Id))
             .ToDictionaryAsync(u => u.Id, u => u.Name);
 
         var result = materials.Select(m => new
@@ -87,7 +87,7 @@ public class MaterialController : ControllerBase
     [HttpGet("{id:int}")]
     public async Task<IActionResult> GetById(int id)
     {
-        var material = await _db.Materials.FirstOrDefaultAsync(e => e.Id == (id));
+        var material = await _db.Materials.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (id));
         if (material == null) return NotFound(new { message = "Material not found." });
 
         if (User.IsInRole(Roles.Student) && material.UnitId.HasValue &&
@@ -97,7 +97,7 @@ public class MaterialController : ControllerBase
         string? unitName = null;
         if (material.UnitId.HasValue)
         {
-            unitName = await _db.Units.Where(u => u.Id == material.UnitId.Value)
+            unitName = await _db.Units.AsNoTracking().Where(u => u.Id == material.UnitId.Value)
                 .Select(u => u.Name).FirstOrDefaultAsync();
         }
 

@@ -211,6 +211,20 @@ public class Lecture
     public int TeacherId { get; set; }
 }
 
+/// <summary>
+/// Real join row backing Lecture.GroupIds (kept in sync automatically from
+/// GroupIdsCsv by AppDbContext.SaveChangesAsync). Queries filter on this
+/// table (indexed, exact match) instead of doing a substring Contains() on
+/// the CSV string, which was both unindexable and capable of false-positive
+/// matches (e.g. group 1 matching inside "10,21").
+/// </summary>
+public class LectureGroupLink
+{
+    public int Id { get; set; }
+    public int LectureId { get; set; }
+    public int GroupId { get; set; }
+}
+
 public enum MaterialType
 {
     File,
@@ -324,6 +338,13 @@ public class Notification
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
+public class NotificationGroupLink
+{
+    public int Id { get; set; }
+    public int NotificationId { get; set; }
+    public int GroupId { get; set; }
+}
+
 public class Attendance
 {
     public int Id { get; set; }
@@ -362,6 +383,13 @@ public class Quiz
     public int TeacherId { get; set; }
 
     public ICollection<Question> Questions { get; set; } = new List<Question>();
+}
+
+public class QuizGroupLink
+{
+    public int Id { get; set; }
+    public int QuizId { get; set; }
+    public int GroupId { get; set; }
 }
 
 public class Question
@@ -482,6 +510,20 @@ public class Assignment
     public int TeacherId { get; set; }
 
     public ICollection<AssignmentQuestion> Questions { get; set; } = new List<AssignmentQuestion>();
+}
+
+public class AssignmentGroupLink
+{
+    public int Id { get; set; }
+    public int AssignmentId { get; set; }
+    public int GroupId { get; set; }
+}
+
+public class AssignmentUnitLink
+{
+    public int Id { get; set; }
+    public int AssignmentId { get; set; }
+    public int UnitId { get; set; }
 }
 
 public class AssignmentQuestion

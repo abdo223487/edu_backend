@@ -50,7 +50,7 @@ public class AssignmentsController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? unitId, [FromQuery] int p = 1)
     {
-        var query = _db.Assignments.AsQueryable();
+        var query = _db.Assignments.AsNoTracking().AsQueryable();
         int? studentId = null;
 
         if (User.IsInRole(Roles.Student))
@@ -58,18 +58,18 @@ public class AssignmentsController : ControllerBase
             studentId = User.GetUserId();
 
             var groupId = User.GetGroupId(_tenant.CurrentTenantId);
-            if (groupId.HasValue) query = query.Where(a => a.GroupIdsCsv.Contains(groupId.Value.ToString()));
+            if (groupId.HasValue) query = query.Where(a => _db.AssignmentGroupLinks.Any(x => x.AssignmentId == a.Id && x.GroupId == groupId.Value));
 
             // Only assignments that cover at least one unit the student is subscribed to.
             var subscribedIds = User.GetUnitIds();
-            query = query.Where(a => subscribedIds.Any(id => a.UnitIdsCsv.Contains(id.ToString())));
+            query = query.Where(a => _db.AssignmentUnitLinks.Any(x => x.AssignmentId == a.Id && subscribedIds.Contains(x.UnitId)));
         }
         else if (schoolYear.HasValue)
         {
             query = query.Where(a => a.SchoolYear == schoolYear.Value);
         }
 
-        if (unitId.HasValue) query = query.Where(a => a.UnitIdsCsv.Contains(unitId.Value.ToString()));
+        if (unitId.HasValue) query = query.Where(a => _db.AssignmentUnitLinks.Any(x => x.AssignmentId == a.Id && x.UnitId == unitId.Value));
 
         var assignments = await query
             .OrderByDescending(a => a.Id)
@@ -80,7 +80,7 @@ public class AssignmentsController : ControllerBase
         var assignmentIds = assignments.Select(a => a.Id).ToList();
 
         var submittedIds = studentId.HasValue
-            ? (await _db.AssignmentSubmissions
+            ? (await _db.AssignmentSubmissions.AsNoTracking()
                 .Where(s => s.StudentId == studentId.Value && assignmentIds.Contains(s.AssignmentId))
                 .Select(s => s.AssignmentId).ToListAsync()).ToHashSet()
             : new HashSet<int>();
@@ -166,7 +166,7 @@ public class AssignmentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetAsTeacher(int assignmentId)
     {
-        var assignment = await _db.Assignments.Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == assignmentId);
+        var assignment = await _db.Assignments.AsNoTracking().Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == assignmentId);
         if (assignment == null) return NotFound(new { message = "Assignment not found." });
 
         var items = assignment.Questions.Select(q => new AssignmentQuestionTeacherDto(
@@ -182,14 +182,14 @@ public class AssignmentsController : ControllerBase
     [Authorize(Roles = Roles.Student)]
     public async Task<IActionResult> GetAsStudent(int assignmentId)
     {
-        var assignment = await _db.Assignments.Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == assignmentId);
+        var assignment = await _db.Assignments.AsNoTracking().Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == assignmentId);
         if (assignment == null) return NotFound(new { message = "Assignment not found." });
 
         if (!assignment.UnitIds.Any(id => User.GetUnitIds().Contains(id)))
             return StatusCode(403, new { message = "Not subscribed to any unit of this assignment." });
 
         var studentId = User.GetUserId();
-        var submission = await _db.AssignmentSubmissions.Include(s => s.Answers)
+        var submission = await _db.AssignmentSubmissions.AsNoTracking().Include(s => s.Answers)
             .FirstOrDefaultAsync(s => s.AssignmentId == assignmentId && s.StudentId == studentId);
 
         var deadlinePassed = DateTime.UtcNow > assignment.Deadline;
@@ -292,16 +292,16 @@ public class AssignmentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetTakers([FromQuery] int assignmentId)
     {
-        var assignment = await _db.Assignments.FirstOrDefaultAsync(a => a.Id == assignmentId);
+        var assignment = await _db.Assignments.AsNoTracking().FirstOrDefaultAsync(a => a.Id == assignmentId);
         if (assignment == null) return NotFound(new { message = "Assignment not found." });
 
         var groupIds = assignment.GroupIds;
         // MULTI-TENANT: match via GroupMemberships (this tenant's groups), not the
         // legacy single GroupId, so students linked here from another teacher too
         // still show up correctly against THIS teacher's assignment groups.
-        var students = await _db.Students.Include(s => s.Group)
+        var students = await _db.Students.AsNoTracking().Include(s => s.Group)
             .Where(s => s.GroupMemberships.Any(m => groupIds.Contains(m.GroupId))).ToListAsync();
-        var submissions = await _db.AssignmentSubmissions.Where(s => s.AssignmentId == assignmentId).ToListAsync();
+        var submissions = await _db.AssignmentSubmissions.AsNoTracking().Where(s => s.AssignmentId == assignmentId).ToListAsync();
 
         // Full roster (unlike Quiz's takers list), so the teacher can see who
         // HASN'T done the assignment yet, not just who has.
@@ -327,10 +327,10 @@ public class AssignmentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetStudentAnswers([FromQuery] int assignmentId, [FromQuery] int studentId)
     {
-        var assignment = await _db.Assignments.Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == assignmentId);
+        var assignment = await _db.Assignments.AsNoTracking().Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == assignmentId);
         if (assignment == null) return NotFound(new { message = "Assignment not found." });
 
-        var submission = await _db.AssignmentSubmissions.Include(s => s.Answers)
+        var submission = await _db.AssignmentSubmissions.AsNoTracking().Include(s => s.Answers)
             .FirstOrDefaultAsync(s => s.AssignmentId == assignmentId && s.StudentId == studentId);
 
         var items = assignment.Questions.Select(q =>

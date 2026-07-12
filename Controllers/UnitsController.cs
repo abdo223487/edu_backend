@@ -39,7 +39,7 @@ public class UnitsController : ControllerBase
     public async Task<IActionResult> GetUnits([FromQuery] int? schoolYear)
     {
         var year = schoolYear ?? User.GetSchoolYear();
-        var query = _db.Units.AsQueryable();
+        var query = _db.Units.AsNoTracking().AsQueryable();
         if (year.HasValue) query = query.Where(u => u.SchoolYear == year.Value);
 
         // Students only ever see units they're actually subscribed to
@@ -62,11 +62,11 @@ public class UnitsController : ControllerBase
             // this endpoint (and GetUnit below had the same pattern). Split
             // into two plain queries instead: first the unlocked lecture
             // ids, then which units those lectures belong to.
-            var unlockedLectureIds = await _db.StudentLectureUnlocks
+            var unlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
                 .Where(u => u.StudentId == studentId)
                 .Select(u => u.LectureId)
                 .ToListAsync();
-            var unlockedUnitIds = await _db.Lectures
+            var unlockedUnitIds = await _db.Lectures.AsNoTracking()
                 .Where(l => unlockedLectureIds.Contains(l.Id) && l.UnitId != null)
                 .Select(l => l.UnitId!.Value)
                 .Distinct()
@@ -96,11 +96,11 @@ public class UnitsController : ControllerBase
 
             // Same fix as GetUnits above: two plain queries instead of a
             // Join across a nullable column, which was throwing at runtime.
-            var unlockedLectureIds = await _db.StudentLectureUnlocks
+            var unlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
                 .Where(u => u.StudentId == studentId)
                 .Select(u => u.LectureId)
                 .ToListAsync();
-            unlockedLessonIndexes = (await _db.Lectures
+            unlockedLessonIndexes = (await _db.Lectures.AsNoTracking()
                     .Where(l => unlockedLectureIds.Contains(l.Id) && l.UnitId == unitId && l.LessonIndex != null)
                     .Select(l => l.LessonIndex!.Value)
                     .Distinct()
@@ -111,7 +111,7 @@ public class UnitsController : ControllerBase
                 return StatusCode(403, new { message = "Not subscribed to this unit." });
         }
 
-        var unit = await _db.Units.Include(u => u.Lessons)
+        var unit = await _db.Units.AsNoTracking().Include(u => u.Lessons)
             .FirstOrDefaultAsync(u => u.Id == unitId);
         if (unit == null) return NotFound(new { message = "Unit not found." });
 

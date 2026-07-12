@@ -187,7 +187,7 @@ public class StudentsController : ControllerBase
         // MULTI-TENANT: filter/display by the Group under the CURRENT tenant, not
         // necessarily the student's legacy single Group (which may belong to a
         // different teacher if the student is also linked elsewhere).
-        var query = _db.Students.Where(statusFilter);
+        var query = _db.Students.AsNoTracking().Where(statusFilter);
         if (groupId.HasValue)
             query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
@@ -214,14 +214,14 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetById(int id)
     {
-        var student = await _db.Students.FirstOrDefaultAsync(s => s.Id == id);
+        var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == id);
         if (student == null) return NotFound(new { message = "Student not found." });
 
-        var subs = await _db.StudentUnitSubscriptions.Where(u => u.StudentId == id).Select(u => u.UnitId).ToListAsync();
+        var subs = await _db.StudentUnitSubscriptions.AsNoTracking().Where(u => u.StudentId == id).Select(u => u.UnitId).ToListAsync();
 
         // MULTI-TENANT: this student's Group/GroupId under the CALLER's own
         // tenant specifically, not necessarily their legacy single Group.
-        var tenantMembership = await _db.StudentGroupMemberships
+        var tenantMembership = await _db.StudentGroupMemberships.AsNoTracking()
             .Where(m => m.StudentId == id)
             .Select(m => new { m.GroupId, GroupName = m.Group!.Name })
             .FirstOrDefaultAsync();
@@ -251,7 +251,7 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetStateHistory(int id)
     {
-        var history = await _db.StateHistoryEntries.Where(h => h.StudentId == id)
+        var history = await _db.StateHistoryEntries.AsNoTracking().Where(h => h.StudentId == id)
             .OrderByDescending(h => h.Date)
             .Select(h => new StateHistoryItem(h.Action, null, h.Reason, h.Date))
             .ToListAsync();
@@ -441,7 +441,7 @@ public class StudentsController : ControllerBase
         var sid = User.IsInRole(Roles.Student) ? User.GetUserId() : studentId;
         if (sid == null) return BadRequest(new { message = "studentId is required." });
 
-        var student = await _db.Students.FirstOrDefaultAsync(s => s.Id == sid.Value);
+        var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == sid.Value);
         if (student == null) return NotFound(new { message = "Student not found." });
 
         // Lectures scheduled for this student's group. Attendance-taking only
@@ -454,19 +454,19 @@ public class StudentsController : ControllerBase
         // is tenant-filtered), so we need THIS student's group under the CURRENT
         // tenant specifically -- not their legacy single GroupId, which may
         // belong to a different teacher entirely.
-        var tenantGroupId = await _db.StudentGroupMemberships
+        var tenantGroupId = await _db.StudentGroupMemberships.AsNoTracking()
             .Where(m => m.StudentId == sid.Value)
             .Select(m => (int?)m.GroupId)
             .FirstOrDefaultAsync() ?? student.GroupId;
 
-        var lecturesQuery = _db.Lectures
-            .Where(l => l.GroupIdsCsv.Contains(tenantGroupId.ToString())
+        var lecturesQuery = _db.Lectures.AsNoTracking()
+            .Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == tenantGroupId)
                 && l.AttendanceMethod == AttendanceMethod.Center);
         if (unitId.HasValue) lecturesQuery = lecturesQuery.Where(l => l.UnitId == unitId.Value);
 
         var lectures = await lecturesQuery.OrderBy(l => l.CreatedAt).ToListAsync();
 
-        var attendedLookup = await _db.Attendances
+        var attendedLookup = await _db.Attendances.AsNoTracking()
             .Where(a => a.StudentId == sid.Value)
             .ToDictionaryAsync(a => a.LectureId, a => a.Date);
 
@@ -545,7 +545,7 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetNotebookPaymentsForStudent(int notebookId, [FromQuery] int studentId)
     {
-        var payments = await _db.NotebookPayments
+        var payments = await _db.NotebookPayments.AsNoTracking()
             .Where(p => p.NotebookId == notebookId && p.StudentId == studentId)
             .Select(p => new { id = p.Id, price = p.Price, discountedPrice = p.DiscountedPrice, date = p.Date })
             .ToListAsync();
@@ -582,10 +582,10 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetNotebookDiscountInfo(int notebookId, [FromQuery] int studentId)
     {
-        var notebook = await _db.Notebooks.FirstOrDefaultAsync(e => e.Id == (notebookId));
+        var notebook = await _db.Notebooks.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (notebookId));
         if (notebook == null) return NotFound(new { message = "Notebook not found." });
 
-        var payments = await _db.NotebookPayments
+        var payments = await _db.NotebookPayments.AsNoTracking()
             .Where(p => p.NotebookId == notebookId && p.StudentId == studentId)
             .OrderByDescending(p => p.Date)
             .ToListAsync();
@@ -630,7 +630,7 @@ public class StudentsController : ControllerBase
         var sid = User.IsInRole(Roles.Student) ? User.GetUserId() : studentId;
         if (sid == null) return BadRequest(new { message = "studentId is required." });
 
-        var results = await _db.CenterQuizResults.Where(r => r.StudentId == sid.Value)
+        var results = await _db.CenterQuizResults.AsNoTracking().Where(r => r.StudentId == sid.Value)
             .Select(r => new { id = r.Id, title = r.Title, mark = r.Marks, quizTotalMarks = r.TotalMarks, date = r.Date })
             .ToListAsync();
 
@@ -690,7 +690,7 @@ public class StudentsController : ControllerBase
         var sid = User.IsInRole(Roles.Student) ? User.GetUserId() : studentId;
         if (sid == null) return BadRequest(new { message = "studentId is required." });
 
-        var results = await _db.HomeworkResults.Where(r => r.StudentId == sid.Value)
+        var results = await _db.HomeworkResults.AsNoTracking().Where(r => r.StudentId == sid.Value)
             .Select(r => new { id = r.Id, title = r.Title, mark = r.Marks, totalMarks = r.TotalMarks, date = r.Date })
             .ToListAsync();
 
@@ -749,7 +749,11 @@ public class StudentsController : ControllerBase
     public async Task<IActionResult> GetOnlineQuizResults()
     {
         var studentId = User.GetUserId();
-        var results = await _db.QuizResults.Include(r => r.Answers)
+        // PERFORMANCE: no .Include(r => r.Answers) here -- the projection below
+        // only reads scalar columns off QuizResult itself, so pulling in the
+        // Answers collection would mean a needless extra join/round trip for
+        // data that's thrown away immediately.
+        var results = await _db.QuizResults.AsNoTracking()
             .Where(r => r.StudentId == studentId)
             .Select(r => new { id = r.Id, quizId = r.QuizId, mark = r.Score, quizTotalMarks = r.TotalMarks, date = r.GradedAt })
             .ToListAsync();

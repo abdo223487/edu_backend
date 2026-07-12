@@ -27,7 +27,7 @@ public class NotebooksController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetAll([FromQuery] int? schoolYear)
     {
-        var query = _db.Notebooks.AsQueryable();
+        var query = _db.Notebooks.AsNoTracking().AsQueryable();
         if (schoolYear.HasValue) query = query.Where(n => n.SchoolYear == schoolYear.Value);
 
         var notebooks = await query.ToListAsync();
@@ -35,7 +35,7 @@ public class NotebooksController : ControllerBase
 
         // Sum of what students actually paid (DiscountedPrice if set, else full Price)
         // per notebook, computed in one query instead of N+1.
-        var payments = await _db.NotebookPayments
+        var payments = await _db.NotebookPayments.AsNoTracking()
             .Where(p => notebookIds.Contains(p.NotebookId))
             .ToListAsync();
         var paidByNotebook = payments
@@ -88,15 +88,15 @@ public class NotebooksController : ControllerBase
     [HttpGet("{id:int}")]
     public async Task<IActionResult> GetById(int id)
     {
-        var notebook = await _db.Notebooks.FirstOrDefaultAsync(e => e.Id == id);
+        var notebook = await _db.Notebooks.AsNoTracking().FirstOrDefaultAsync(e => e.Id == id);
         if (notebook == null) return NotFound(new { message = "Notebook not found." });
 
-        var groups = await _db.Groups
+        var groups = await _db.Groups.AsNoTracking()
             .Where(g => notebook.GroupIds.Contains(g.Id))
             .Select(g => new { id = g.Id, name = g.Name, studentCount = g.Students.Count })
             .ToListAsync();
 
-        var units = await _db.Units
+        var units = await _db.Units.AsNoTracking()
             .Where(u => notebook.UnitIds.Contains(u.Id))
             .Select(u => new { id = u.Id, name = u.Name, month = u.Month })
             .ToListAsync();
@@ -116,12 +116,12 @@ public class NotebooksController : ControllerBase
     [HttpGet("{id:int}/payments")]
     public async Task<IActionResult> GetPayments(int id)
     {
-        var payments = await _db.NotebookPayments
+        var payments = await _db.NotebookPayments.AsNoTracking()
             .Where(p => p.NotebookId == id)
             .ToListAsync();
 
         var studentIds = payments.Select(p => p.StudentId).Distinct().ToList();
-        var students = await _db.Students
+        var students = await _db.Students.AsNoTracking()
             .Where(s => studentIds.Contains(s.Id))
             .ToDictionaryAsync(s => s.Id);
         var groupNames = await _db.GetTenantGroupNamesAsync(studentIds);

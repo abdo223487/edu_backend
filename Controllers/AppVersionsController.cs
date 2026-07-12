@@ -20,7 +20,7 @@ public class AppVersionsController : ControllerBase
     [HttpGet("latest")]
     public async Task<IActionResult> GetLatest([FromQuery] string platform = "android")
     {
-        var version = await _db.AppVersions.FirstOrDefaultAsync(v => v.Platform == platform);
+        var version = await _db.AppVersions.AsNoTracking().FirstOrDefaultAsync(v => v.Platform == platform);
         if (version == null)
             return Ok(new { version = "1.0.0", downloadUrl = "" });
 

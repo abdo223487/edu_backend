@@ -81,6 +81,8 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Assignments");
                 });
 
@@ -183,6 +185,8 @@ namespace EduApi.Migrations
                     b.HasIndex("AssignmentId", "StudentId")
                         .IsUnique();
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("AssignmentSubmissions");
                 });
 
@@ -210,6 +214,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("Attendances");
                 });
@@ -258,6 +264,8 @@ namespace EduApi.Migrations
                         .HasColumnType("text");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("BankAttempts");
                 });
@@ -339,6 +347,8 @@ namespace EduApi.Migrations
 
                     b.HasIndex("LessonId");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("BankQuestions");
                 });
 
@@ -370,6 +380,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId", "StudentId");
 
                     b.ToTable("CenterQuizResults");
                 });
@@ -414,6 +426,8 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Codes");
                 });
 
@@ -436,6 +450,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("Groups");
                 });
@@ -468,6 +484,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId", "StudentId");
 
                     b.ToTable("HomeworkResults");
                 });
@@ -516,6 +534,8 @@ namespace EduApi.Migrations
                         .HasColumnType("text");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("Lectures");
                 });
@@ -588,6 +608,8 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Materials");
                 });
 
@@ -625,6 +647,8 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Notebooks");
                 });
 
@@ -655,6 +679,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("NotebookPayments");
                 });
@@ -696,6 +722,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("Notifications");
                 });
@@ -773,6 +801,8 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Quizzes");
                 });
 
@@ -831,6 +861,8 @@ namespace EduApi.Migrations
                         .HasColumnType("integer");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("TeacherId", "StudentId");
 
                     b.ToTable("QuizResults");
                 });
@@ -940,6 +972,8 @@ namespace EduApi.Migrations
 
                     b.HasIndex("StudentId");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("StudentUnitSubscriptions");
                 });
 
@@ -967,6 +1001,8 @@ namespace EduApi.Migrations
 
                     b.HasIndex("StudentId", "LectureId")
                         .IsUnique();
+
+                    b.HasIndex("TeacherId");
 
                     b.ToTable("StudentLectureUnlocks");
                 });
@@ -1041,7 +1077,129 @@ namespace EduApi.Migrations
 
                     b.HasKey("Id");
 
+                    b.HasIndex("TeacherId");
+
                     b.ToTable("Units");
+                });
+
+            modelBuilder.Entity("EduApi.Models.LectureGroupLink", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("LectureId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("GroupId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LectureId", "GroupId")
+                        .IsUnique();
+
+                    b.HasIndex("GroupId");
+
+                    b.ToTable("LectureGroupLinks");
+                });
+
+            modelBuilder.Entity("EduApi.Models.AssignmentGroupLink", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("AssignmentId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("GroupId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AssignmentId", "GroupId")
+                        .IsUnique();
+
+                    b.HasIndex("GroupId");
+
+                    b.ToTable("AssignmentGroupLinks");
+                });
+
+            modelBuilder.Entity("EduApi.Models.AssignmentUnitLink", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("AssignmentId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("UnitId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AssignmentId", "UnitId")
+                        .IsUnique();
+
+                    b.HasIndex("UnitId");
+
+                    b.ToTable("AssignmentUnitLinks");
+                });
+
+            modelBuilder.Entity("EduApi.Models.NotificationGroupLink", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("NotificationId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("GroupId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("NotificationId", "GroupId")
+                        .IsUnique();
+
+                    b.HasIndex("GroupId");
+
+                    b.ToTable("NotificationGroupLinks");
+                });
+
+            modelBuilder.Entity("EduApi.Models.QuizGroupLink", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<int>("Id"));
+
+                    b.Property<int>("QuizId")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("GroupId")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("QuizId", "GroupId")
+                        .IsUnique();
+
+                    b.HasIndex("GroupId");
+
+                    b.ToTable("QuizGroupLinks");
                 });
 
             modelBuilder.Entity("EduApi.Models.AssignmentAnswer", b =>
@@ -1171,6 +1329,51 @@ namespace EduApi.Migrations
             modelBuilder.Entity("EduApi.Models.AssignmentSubmission", b =>
                 {
                     b.Navigation("Answers");
+                });
+
+            modelBuilder.Entity("EduApi.Models.LectureGroupLink", b =>
+                {
+                    b.HasOne("EduApi.Models.Lecture", null)
+                        .WithMany()
+                        .HasForeignKey("LectureId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("EduApi.Models.AssignmentGroupLink", b =>
+                {
+                    b.HasOne("EduApi.Models.Assignment", null)
+                        .WithMany()
+                        .HasForeignKey("AssignmentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("EduApi.Models.AssignmentUnitLink", b =>
+                {
+                    b.HasOne("EduApi.Models.Assignment", null)
+                        .WithMany()
+                        .HasForeignKey("AssignmentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("EduApi.Models.NotificationGroupLink", b =>
+                {
+                    b.HasOne("EduApi.Models.Notification", null)
+                        .WithMany()
+                        .HasForeignKey("NotificationId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
+            modelBuilder.Entity("EduApi.Models.QuizGroupLink", b =>
+                {
+                    b.HasOne("EduApi.Models.Quiz", null)
+                        .WithMany()
+                        .HasForeignKey("QuizId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("EduApi.Models.Group", b =>

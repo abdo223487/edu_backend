@@ -6,6 +6,7 @@ using EduApi.Middleware;
 using EduApi.Services;
 using EduApi.Services.Interfaces;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.ResponseCompression;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -95,6 +96,24 @@ builder.Services.AddAuthentication(options =>
 
 builder.Services.AddAuthorization();
 
+// PERFORMANCE: this is a JSON API -- every list/detail endpoint we just
+// optimized still sends its response uncompressed by default. Compression
+// shrinks JSON payloads dramatically (often 70-90% for repetitive field
+// names like "groupName"/"lastQuizMarks" across many rows), which matters
+// more for mobile clients on slow connections than server-side query time
+// does. EnableForHttps is safe here: this isn't a page that reflects a
+// secret token back into the body (the classic BREACH-attack scenario),
+// it's a plain data API behind bearer-token auth.
+builder.Services.AddResponseCompression(options =>
+{
+    options.EnableForHttps = true;
+    options.Providers.Add<BrotliCompressionProvider>();
+    options.Providers.Add<GzipCompressionProvider>();
+    options.MimeTypes = ResponseCompressionDefaults.MimeTypes.Concat(new[] { "application/json" });
+});
+builder.Services.Configure<BrotliCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
+builder.Services.Configure<GzipCompressionProviderOptions>(o => o.Level = System.IO.Compression.CompressionLevel.Fastest);
+
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
@@ -182,6 +201,9 @@ using (var scope = app.Services.CreateScope())
 
 // ---------- Pipeline ----------
 app.UseMiddleware<ExceptionMiddleware>();
+
+// Must run before anything writes to the response body.
+app.UseResponseCompression();
 
 app.UseSwagger();
 app.UseSwaggerUI();

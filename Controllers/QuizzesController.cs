@@ -49,7 +49,7 @@ public class QuizzesController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? unitId, [FromQuery] int p = 1)
     {
-        var query = _db.Quizzes.AsQueryable();
+        var query = _db.Quizzes.AsNoTracking().AsQueryable();
         int? studentId = null;
 
         if (User.IsInRole(Roles.Student))
@@ -57,7 +57,7 @@ public class QuizzesController : ControllerBase
             studentId = User.GetUserId();
 
             var groupId = User.GetGroupId(_tenant.CurrentTenantId);
-            if (groupId.HasValue) query = query.Where(q => q.GroupIdsCsv.Contains(groupId.Value.ToString()));
+            if (groupId.HasValue) query = query.Where(q => _db.QuizGroupLinks.Any(x => x.QuizId == q.Id && x.GroupId == groupId.Value));
 
             // Same subscription gate as Units/Lectures/Material/Notifications.
             // Quiz.UnitId is non-nullable (every quiz belongs to a unit), so
@@ -82,14 +82,14 @@ public class QuizzesController : ControllerBase
         var unitIds = quizzes.Select(q => q.UnitId).Distinct().ToList();
         var allGroupIds = quizzes.SelectMany(q => q.GroupIds).Distinct().ToList();
 
-        var unitsById = await _db.Units.Where(u => unitIds.Contains(u.Id))
+        var unitsById = await _db.Units.AsNoTracking().Where(u => unitIds.Contains(u.Id))
             .ToDictionaryAsync(u => u.Id, u => u.Month);
 
-        var groupNamesById = await _db.Groups.Where(g => allGroupIds.Contains(g.Id))
+        var groupNamesById = await _db.Groups.AsNoTracking().Where(g => allGroupIds.Contains(g.Id))
             .ToDictionaryAsync(g => g.Id, g => g.Name);
 
         var takenQuizIds = studentId.HasValue
-            ? (await _db.QuizResults.Where(r => r.StudentId == studentId.Value && quizIds.Contains(r.QuizId))
+            ? (await _db.QuizResults.AsNoTracking().Where(r => r.StudentId == studentId.Value && quizIds.Contains(r.QuizId))
                 .Select(r => r.QuizId).ToListAsync()).ToHashSet()
             : new HashSet<int>();
 
@@ -193,7 +193,7 @@ public class QuizzesController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetAsTeacher(int quizId)
     {
-        var quiz = await _db.Quizzes.Include(q => q.Questions).FirstOrDefaultAsync(q => q.Id == quizId);
+        var quiz = await _db.Quizzes.AsNoTracking().Include(q => q.Questions).FirstOrDefaultAsync(q => q.Id == quizId);
         if (quiz == null) return NotFound(new { message = "Quiz not found." });
 
         var items = quiz.Questions.Select(q => new
@@ -330,14 +330,14 @@ public class QuizzesController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetTakers([FromQuery] int quizId)
     {
-        var quiz = await _db.Quizzes.FirstOrDefaultAsync(e => e.Id == (quizId));
+        var quiz = await _db.Quizzes.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (quizId));
         if (quiz == null) return NotFound(new { message = "Quiz not found." });
 
         var groupIds = quiz.GroupIds;
         // MULTI-TENANT: match via GroupMemberships, not the legacy single GroupId.
-        var students = await _db.Students.Include(s => s.Group)
+        var students = await _db.Students.AsNoTracking().Include(s => s.Group)
             .Where(s => s.GroupMemberships.Any(m => groupIds.Contains(m.GroupId))).ToListAsync();
-        var results = await _db.QuizResults.Where(r => r.QuizId == quizId).ToListAsync();
+        var results = await _db.QuizResults.AsNoTracking().Where(r => r.QuizId == quizId).ToListAsync();
 
         // Takers.dart's UI (score bar, pct calc) assumes every returned taker has
         // actually submitted, so only include students with a result — matches
@@ -361,10 +361,10 @@ public class QuizzesController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetStudentAnswers([FromQuery] int quizId, [FromQuery] int studentId)
     {
-        var quiz = await _db.Quizzes.Include(q => q.Questions).FirstOrDefaultAsync(q => q.Id == quizId);
+        var quiz = await _db.Quizzes.AsNoTracking().Include(q => q.Questions).FirstOrDefaultAsync(q => q.Id == quizId);
         if (quiz == null) return NotFound(new { message = "Quiz not found." });
 
-        var result = await _db.QuizResults.Include(r => r.Answers)
+        var result = await _db.QuizResults.AsNoTracking().Include(r => r.Answers)
             .FirstOrDefaultAsync(r => r.QuizId == quizId && r.StudentId == studentId);
 
         var items = quiz.Questions.Select(q =>

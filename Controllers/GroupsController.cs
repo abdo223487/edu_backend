@@ -26,7 +26,7 @@ public class GroupsController : ControllerBase
     [HttpGet]
     public async Task<IActionResult> GetAll([FromQuery] int? schoolYear)
     {
-        var query = _db.Groups.AsQueryable();
+        var query = _db.Groups.AsNoTracking().AsQueryable();
         if (schoolYear.HasValue) query = query.Where(g => g.SchoolYear == schoolYear.Value);
 
         var groups = await query

@@ -44,6 +44,15 @@ public class AppDbContext : DbContext
     public DbSet<StateHistoryEntry> StateHistoryEntries => Set<StateHistoryEntry>();
     public DbSet<AppVersion> AppVersions => Set<AppVersion>();
 
+    // Real join tables backing the *IdsCsv columns' filtering. See the
+    // SaveChangesAsync override below for how these stay in sync with
+    // Lecture/Assignment/Notification/Quiz.GroupIds (and Assignment.UnitIds).
+    public DbSet<LectureGroupLink> LectureGroupLinks => Set<LectureGroupLink>();
+    public DbSet<AssignmentGroupLink> AssignmentGroupLinks => Set<AssignmentGroupLink>();
+    public DbSet<AssignmentUnitLink> AssignmentUnitLinks => Set<AssignmentUnitLink>();
+    public DbSet<NotificationGroupLink> NotificationGroupLinks => Set<NotificationGroupLink>();
+    public DbSet<QuizGroupLink> QuizGroupLinks => Set<QuizGroupLink>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<Student>()
@@ -79,6 +88,25 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<BankQuestion>().HasQueryFilter(bq => bq.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<BankAttempt>().HasQueryFilter(ba => ba.TeacherId == _tenant.CurrentTenantId);
 
+        // PERFORMANCE: every entity above (and the three result tables + five
+        // activity tables filtered below) is scoped to the current tenant via
+        // HasQueryFilter, which means EVERY query against them carries an
+        // implicit "WHERE TeacherId = @tenant" -- with no index, Postgres has
+        // no choice but a full sequential scan on every single request. These
+        // indexes turn that into an index scan and cost is negligible on
+        // writes. See AddTeacherIdIndexesForTenantIsolation migration.
+        modelBuilder.Entity<Group>().HasIndex(g => g.TeacherId);
+        modelBuilder.Entity<Unit>().HasIndex(u => u.TeacherId);
+        modelBuilder.Entity<Lecture>().HasIndex(l => l.TeacherId);
+        modelBuilder.Entity<Material>().HasIndex(m => m.TeacherId);
+        modelBuilder.Entity<Notebook>().HasIndex(n => n.TeacherId);
+        modelBuilder.Entity<Code>().HasIndex(c => c.TeacherId);
+        modelBuilder.Entity<Notification>().HasIndex(n => n.TeacherId);
+        modelBuilder.Entity<Quiz>().HasIndex(q => q.TeacherId);
+        modelBuilder.Entity<Assignment>().HasIndex(a => a.TeacherId);
+        modelBuilder.Entity<BankQuestion>().HasIndex(bq => bq.TeacherId);
+        modelBuilder.Entity<BankAttempt>().HasIndex(ba => ba.TeacherId);
+
         // MULTI-TENANT SECURITY FIX: these three results tables are queried by
         // StudentId ALONE in StudentsController (they don't join through Quiz),
         // so without their own TeacherId + filter, a student subscribed to more
@@ -89,6 +117,17 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<QuizResult>().HasQueryFilter(qr => qr.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<CenterQuizResult>().HasQueryFilter(cr => cr.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<HomeworkResult>().HasQueryFilter(hr => hr.TeacherId == _tenant.CurrentTenantId);
+
+        // Composite (not just TeacherId alone): every read of these three
+        // tables filters by TeacherId (query filter) AND StudentId (explicit,
+        // "this student's result history") together -- see
+        // AnalyticsController/StudentsController/QuizzesController. A single
+        // composite index serves both the tenant-only filter (leftmost
+        // column) and the common TeacherId+StudentId combination, instead of
+        // needing two separate indexes.
+        modelBuilder.Entity<QuizResult>().HasIndex(qr => new { qr.TeacherId, qr.StudentId });
+        modelBuilder.Entity<CenterQuizResult>().HasIndex(cr => new { cr.TeacherId, cr.StudentId });
+        modelBuilder.Entity<HomeworkResult>().HasIndex(hr => new { hr.TeacherId, hr.StudentId });
 
         // MULTI-TENANT SECURITY HARDENING: these tables never had their own
         // TeacherId before -- every current call site happens to be safe
@@ -105,6 +144,12 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<NotebookPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentLectureUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentUnitSubscription>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
+
+        modelBuilder.Entity<Attendance>().HasIndex(a => a.TeacherId);
+        modelBuilder.Entity<AssignmentSubmission>().HasIndex(s => s.TeacherId);
+        modelBuilder.Entity<NotebookPayment>().HasIndex(p => p.TeacherId);
+        modelBuilder.Entity<StudentLectureUnlock>().HasIndex(u => u.TeacherId);
+        modelBuilder.Entity<StudentUnitSubscription>().HasIndex(s => s.TeacherId);
 
         // MULTI-TENANT MEMBERSHIP: a Student can belong to Groups under MORE THAN
         // ONE teacher now (StudentGroupMembership). A Student row is visible under
@@ -190,6 +235,104 @@ public class AppDbContext : DbContext
             .HasForeignKey(q => q.BankQuestionId)
             .OnDelete(DeleteBehavior.Restrict);
 
+        // ═══════════════════════════════════════════════════════════════
+        // CSV → real join table (see SaveChangesAsync override below).
+        // GroupIdsCsv/UnitIdsCsv stay as the source of truth for writes
+        // (every existing create/update endpoint keeps working unchanged),
+        // but reads now filter through these indexed, exact-match tables
+        // instead of a substring Contains() on the CSV string -- which was
+        // both unindexable (forced a full scan every time) and capable of
+        // false positives (group 1 matching inside "10,21").
+        // FK + Cascade means deleting the parent automatically cleans up its
+        // link rows with zero extra code.
+        // ═══════════════════════════════════════════════════════════════
+        modelBuilder.Entity<LectureGroupLink>()
+            .HasOne<Lecture>().WithMany().HasForeignKey(x => x.LectureId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<LectureGroupLink>().HasIndex(x => new { x.LectureId, x.GroupId }).IsUnique();
+        modelBuilder.Entity<LectureGroupLink>().HasIndex(x => x.GroupId);
+
+        modelBuilder.Entity<AssignmentGroupLink>()
+            .HasOne<Assignment>().WithMany().HasForeignKey(x => x.AssignmentId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<AssignmentGroupLink>().HasIndex(x => new { x.AssignmentId, x.GroupId }).IsUnique();
+        modelBuilder.Entity<AssignmentGroupLink>().HasIndex(x => x.GroupId);
+
+        modelBuilder.Entity<AssignmentUnitLink>()
+            .HasOne<Assignment>().WithMany().HasForeignKey(x => x.AssignmentId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<AssignmentUnitLink>().HasIndex(x => new { x.AssignmentId, x.UnitId }).IsUnique();
+        modelBuilder.Entity<AssignmentUnitLink>().HasIndex(x => x.UnitId);
+
+        modelBuilder.Entity<NotificationGroupLink>()
+            .HasOne<Notification>().WithMany().HasForeignKey(x => x.NotificationId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<NotificationGroupLink>().HasIndex(x => new { x.NotificationId, x.GroupId }).IsUnique();
+        modelBuilder.Entity<NotificationGroupLink>().HasIndex(x => x.GroupId);
+
+        modelBuilder.Entity<QuizGroupLink>()
+            .HasOne<Quiz>().WithMany().HasForeignKey(x => x.QuizId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<QuizGroupLink>().HasIndex(x => new { x.QuizId, x.GroupId }).IsUnique();
+        modelBuilder.Entity<QuizGroupLink>().HasIndex(x => x.GroupId);
+
         base.OnModelCreating(modelBuilder);
+    }
+
+    /// <summary>
+    /// Keeps LectureGroupLinks/AssignmentGroupLinks/AssignmentUnitLinks/
+    /// NotificationGroupLinks/QuizGroupLinks in sync with the *IdsCsv
+    /// properties every time a Lecture/Assignment/Notification/Quiz is
+    /// created or updated -- so every existing controller that sets
+    /// entity.GroupIds = [...] keeps working exactly as before, with zero
+    /// changes to any write endpoint. Two-pass: the parent entities are
+    /// saved first so newly-Added rows get their DB-generated Id, then the
+    /// link rows (which need that Id as their FK) are synced and saved.
+    /// </summary>
+    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        var touched = ChangeTracker.Entries()
+            .Where(e => e.State is EntityState.Added or EntityState.Modified)
+            .Select(e => e.Entity)
+            .Where(e => e is Lecture or Assignment or Notification or Quiz)
+            .ToList();
+
+        var result = await base.SaveChangesAsync(cancellationToken);
+
+        if (touched.Count > 0)
+        {
+            foreach (var entity in touched)
+            {
+                switch (entity)
+                {
+                    case Lecture l:
+                        await LectureGroupLinks.Where(x => x.LectureId == l.Id).ExecuteDeleteAsync(cancellationToken);
+                        if (l.GroupIds.Count > 0)
+                            LectureGroupLinks.AddRange(l.GroupIds.Distinct().Select(gid => new LectureGroupLink { LectureId = l.Id, GroupId = gid }));
+                        break;
+
+                    case Assignment a:
+                        await AssignmentGroupLinks.Where(x => x.AssignmentId == a.Id).ExecuteDeleteAsync(cancellationToken);
+                        if (a.GroupIds.Count > 0)
+                            AssignmentGroupLinks.AddRange(a.GroupIds.Distinct().Select(gid => new AssignmentGroupLink { AssignmentId = a.Id, GroupId = gid }));
+
+                        await AssignmentUnitLinks.Where(x => x.AssignmentId == a.Id).ExecuteDeleteAsync(cancellationToken);
+                        if (a.UnitIds.Count > 0)
+                            AssignmentUnitLinks.AddRange(a.UnitIds.Distinct().Select(uid => new AssignmentUnitLink { AssignmentId = a.Id, UnitId = uid }));
+                        break;
+
+                    case Notification n:
+                        await NotificationGroupLinks.Where(x => x.NotificationId == n.Id).ExecuteDeleteAsync(cancellationToken);
+                        if (n.GroupIds.Count > 0)
+                            NotificationGroupLinks.AddRange(n.GroupIds.Distinct().Select(gid => new NotificationGroupLink { NotificationId = n.Id, GroupId = gid }));
+                        break;
+
+                    case Quiz q:
+                        await QuizGroupLinks.Where(x => x.QuizId == q.Id).ExecuteDeleteAsync(cancellationToken);
+                        if (q.GroupIds.Count > 0)
+                            QuizGroupLinks.AddRange(q.GroupIds.Distinct().Select(gid => new QuizGroupLink { QuizId = q.Id, GroupId = gid }));
+                        break;
+                }
+            }
+
+            await base.SaveChangesAsync(cancellationToken);
+        }
+
+        return result;
     }
 }
