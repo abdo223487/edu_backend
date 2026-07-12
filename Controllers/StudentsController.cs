@@ -1,4 +1,5 @@
 using System.Text;
+using ClosedXML.Excel;
 using EduApi.Common;
 using EduApi.Data;
 using EduApi.DTOs;
@@ -21,10 +22,12 @@ public class StudentsController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly Common.ITenantContext _tenant;
-    public StudentsController(AppDbContext db, Common.ITenantContext tenant)
+    private readonly IHttpClientFactory _httpClientFactory;
+    public StudentsController(AppDbContext db, Common.ITenantContext tenant, IHttpClientFactory httpClientFactory)
     {
         _db = db;
         _tenant = tenant;
+        _httpClientFactory = httpClientFactory;
     }
 
     // POST Students
@@ -156,6 +159,365 @@ public class StudentsController : ControllerBase
         // membership until they log in again or hit /Auth/refresh (same
         // snapshot tradeoff already accepted for groupId/unitIds).
         return Ok(new { message = "Student linked to your account.", studentId = student.Id, studentName = student.Name });
+    }
+
+    // POST Students/import  multipart/form-data: { file, groupId }
+    // Bulk-registers students from an uploaded Excel sheet (.xlsx). Expected
+    // columns in the first sheet, header row first (order doesn't matter,
+    // matched by name, case-insensitive, and Arabic spelling variants —
+    // see NormalizeHeader):
+    //   Name | PhoneNumber | ParentPhoneNumber (optional) | UserName (optional) | Password (optional) | GroupId (optional) | GroupName (optional)
+    // The `groupId` form field is the DEFAULT group used for any row that
+    // doesn't specify its own GroupId/GroupName column — this keeps the
+    // simple single-group sheet (no Group columns at all) working exactly as
+    // before. If a row DOES have a GroupId or GroupName value, that group is
+    // used instead, so one sheet can register students into several
+    // different groups (e.g. different school-year classes) in one upload.
+    // GroupName lookups only ever match groups owned by the calling
+    // teacher's tenant (same as every other Groups query in this app), so a
+    // typo'd/foreign group name just fails that row rather than leaking or
+    // touching another teacher's group.
+    // Every row runs through the EXACT same dedupe-by-phone logic as the
+    // single-student Create endpoint above: if the phone number already
+    // belongs to a student (possibly under a different teacher), that
+    // existing account is linked into the row's group instead of creating a
+    // duplicate. Rows are processed independently — one bad row (missing
+    // phone, unknown group, suspended existing account, etc.) doesn't abort
+    // the rest of the sheet; each row gets its own status back so the
+    // teacher can see and fix just the rows that failed.
+    [HttpPost("import")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [RequestSizeLimit(10_000_000)]
+    public async Task<IActionResult> ImportFromExcel([FromForm] IFormFile file, [FromForm] int? groupId)
+    {
+        if (file == null || file.Length == 0)
+            return BadRequest(new { message = "No file uploaded." });
+
+        var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+        if (ext != ".xlsx")
+            return BadRequest(new { message = "Only .xlsx files are supported." });
+
+        using var stream = new MemoryStream();
+        await file.CopyToAsync(stream);
+        stream.Position = 0;
+        return await ImportStudentsFromWorkbookStream(stream, groupId);
+    }
+
+    // POST Students/import/google-sheet  body: { url, groupId }
+    // Same bulk-import as Students/import above, but the source is a Google
+    // Sheet instead of an uploaded file. `url` can be the normal
+    // "https://docs.google.com/spreadsheets/d/{id}/edit#gid=..." link the
+    // teacher copies straight out of their browser — the spreadsheet id is
+    // extracted from it automatically. If the teacher used a Google Form,
+    // this must be the link to the FORM'S RESPONSES SHEET (Responses tab ->
+    // create/view spreadsheet), not the form's own /viewform link. The same
+    // columns, GroupId/GroupName per-row override, and phone-number dedupe
+    // rules from Students/import apply here unchanged; this endpoint is just
+    // a different way to get the rows into the same processing logic.
+    // REQUIREMENT: the sheet must be shared as "Anyone with the link can
+    // view" (Share -> General access -> Anyone with the link), since this
+    // downloads it the same way Google's own "File > Download > .xlsx" export
+    // does, without going through OAuth / a Google account login.
+    [HttpPost("import/google-sheet")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> ImportFromGoogleSheet([FromBody] ImportFromGoogleSheetRequest request)
+    {
+        var spreadsheetId = ExtractGoogleSheetId(request.Url);
+        if (spreadsheetId == null)
+            return BadRequest(new { message = "Couldn't find a spreadsheet id in that URL. Paste the full Google Sheets link." });
+
+        var exportUrl = $"https://docs.google.com/spreadsheets/d/{spreadsheetId}/export?format=xlsx";
+
+        var http = _httpClientFactory.CreateClient("GoogleSheets");
+        HttpResponseMessage response;
+        try
+        {
+            response = await http.GetAsync(exportUrl);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { message = "Couldn't reach Google Sheets to download the file.", detail = ex.Message });
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            // Google returns a 302->login HTML page (200 after redirect) for
+            // private sheets rather than a clean 403/404, so this mostly
+            // catches sheets that don't exist / were deleted.
+            return BadRequest(new { message = "Couldn't download the sheet. Make sure the link is correct and the sheet is shared as 'Anyone with the link can view'." });
+        }
+
+        var contentType = response.Content.Headers.ContentType?.MediaType ?? "";
+        if (contentType.Contains("text/html"))
+            return BadRequest(new { message = "That sheet isn't publicly viewable. In Google Sheets, click Share -> General access -> Anyone with the link, then try again." });
+
+        using var stream = new MemoryStream();
+        await response.Content.CopyToAsync(stream);
+        stream.Position = 0;
+        return await ImportStudentsFromWorkbookStream(stream, request.GroupId);
+    }
+
+    // Shared core for Students/import and Students/import/google-sheet: both
+    // endpoints just get an .xlsx byte stream by different means and hand it
+    // here. Everything else — column mapping, per-row GroupId/GroupName
+    // resolution, and the phone-number dedupe — is identical either way.
+    private async Task<IActionResult> ImportStudentsFromWorkbookStream(Stream xlsxStream, int? groupId)
+    {
+        // Tenant-scoped by the standard Groups query filter — a teacher can
+        // only ever resolve their own groups here, by id or by name.
+        var myGroups = await _db.Groups.ToListAsync();
+        if (myGroups.Count == 0)
+            return BadRequest(new { message = "You have no groups yet. Create a group first." });
+
+        Group? defaultGroup = groupId.HasValue ? myGroups.FirstOrDefault(g => g.Id == groupId.Value) : null;
+        if (groupId.HasValue && defaultGroup == null)
+            return BadRequest(new { message = "Group not found." });
+
+        var groupsByName = myGroups
+            .GroupBy(g => NormalizeHeader(g.Name))
+            .ToDictionary(g => g.Key, g => g.First());
+
+        try
+        {
+            using var workbook = new XLWorkbook(xlsxStream);
+            var ws = workbook.Worksheets.First();
+
+            var results = new List<ImportStudentsRowResult>();
+            int created = 0, linked = 0, failed = 0;
+
+            // Map header name -> column index from row 1. Matching is done on
+            // a NORMALIZED form of the header (see NormalizeHeader) so that
+            // Arabic spelling variants of the same word — أسم / اسم / الاسم,
+            // إيميل / ايميل, رقم الهاتف / رقم الموبايل / تليفون — and
+            // stray spaces/diacritics all resolve to the same column, instead
+            // of requiring the teacher's sheet to use one exact spelling.
+            var headerRow = ws.Row(1);
+            var columns = new Dictionary<string, int>();
+            foreach (var cell in headerRow.CellsUsed())
+            {
+                var header = NormalizeHeader(cell.GetString());
+                if (!string.IsNullOrEmpty(header) && !columns.ContainsKey(header))
+                    columns[header] = cell.Address.ColumnNumber;
+            }
+
+            int GetCol(params string[] names) =>
+                names.Select(NormalizeHeader)
+                     .Select(n => columns.TryGetValue(n, out var c) ? c : 0)
+                     .FirstOrDefault(c => c != 0);
+
+            var nameCol = GetCol("Name", "StudentName", "الاسم", "اسم", "أسم", "إسم", "اسم الطالب", "الطالب");
+            var phoneCol = GetCol("PhoneNumber", "Phone", "رقم الهاتف", "رقم التليفون", "رقم الموبايل",
+                "الهاتف", "التليفون", "الموبايل", "رقم الطالب", "موبايل الطالب", "هاتف الطالب");
+            var parentPhoneCol = GetCol("ParentPhoneNumber", "ParentPhone", "رقم ولي الأمر", "رقم ولى الامر",
+                "هاتف ولي الأمر", "موبايل ولي الأمر", "تليفون ولي الأمر", "رقم الوالد", "رقم الأب");
+            var userNameCol = GetCol("UserName", "Username", "اسم المستخدم", "أسم المستخدم", "يوزر");
+            var passwordCol = GetCol("Password", "كلمة المرور", "كلمة السر", "الرقم السري", "باسورد");
+            var groupIdCol = GetCol("GroupId", "معرف المجموعة", "رقم المجموعة");
+            var groupNameCol = GetCol("GroupName", "Group", "المجموعة", "الجروب", "اسم المجموعة", "أسم المجموعة", "الفصل", "السنتر");
+
+            if (nameCol == 0 || phoneCol == 0)
+                return BadRequest(new { message = "The sheet must have 'Name' and 'PhoneNumber' columns in the header row." });
+            if (defaultGroup == null && groupIdCol == 0 && groupNameCol == 0)
+                return BadRequest(new { message = "Provide a default groupId, or add a GroupId/GroupName column to the sheet." });
+
+            var lastRow = ws.LastRowUsed()?.RowNumber() ?? 1;
+            for (var r = 2; r <= lastRow; r++)
+            {
+                var row = ws.Row(r);
+                if (row.IsEmpty()) continue;
+
+                var name = row.Cell(nameCol).GetString().Trim();
+                var phone = row.Cell(phoneCol).GetString().Trim();
+                var parentPhone = parentPhoneCol != 0 ? row.Cell(parentPhoneCol).GetString().Trim() : null;
+                var userName = userNameCol != 0 ? row.Cell(userNameCol).GetString().Trim() : null;
+                var password = passwordCol != 0 ? row.Cell(passwordCol).GetString().Trim() : null;
+                var rowGroupIdRaw = groupIdCol != 0 ? row.Cell(groupIdCol).GetString().Trim() : null;
+                var rowGroupName = groupNameCol != 0 ? row.Cell(groupNameCol).GetString().Trim() : null;
+
+                if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(phone)) continue;
+
+                if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(phone))
+                {
+                    failed++;
+                    results.Add(new ImportStudentsRowResult(r, name, phone, "Failed", "Name and PhoneNumber are both required.", null));
+                    continue;
+                }
+
+                // Resolve this row's group: explicit GroupId column wins, then
+                // GroupName column, then the sheet-wide default groupId.
+                Group? group = defaultGroup;
+                if (!string.IsNullOrEmpty(rowGroupIdRaw))
+                {
+                    if (!int.TryParse(rowGroupIdRaw, out var rowGroupId) ||
+                        (group = myGroups.FirstOrDefault(g => g.Id == rowGroupId)) == null)
+                    {
+                        failed++;
+                        results.Add(new ImportStudentsRowResult(r, name, phone, "Failed", $"GroupId '{rowGroupIdRaw}' was not found among your groups.", null));
+                        continue;
+                    }
+                }
+                else if (!string.IsNullOrEmpty(rowGroupName))
+                {
+                    var (resolvedGroup, error) = ResolveGroupByName(rowGroupName, myGroups, groupsByName);
+                    if (resolvedGroup == null)
+                    {
+                        failed++;
+                        results.Add(new ImportStudentsRowResult(r, name, phone, "Failed", error!, null));
+                        continue;
+                    }
+                    group = resolvedGroup;
+                }
+
+                if (group == null)
+                {
+                    failed++;
+                    results.Add(new ImportStudentsRowResult(r, name, phone, "Failed", "No group specified for this row and no default groupId was provided.", null));
+                    continue;
+                }
+
+                // Same cross-tenant lookup-by-phone dedupe as Create/link above.
+                var existing = await _db.Students.IgnoreQueryFilters()
+                    .FirstOrDefaultAsync(s => s.PhoneNumber == phone);
+
+                if (existing != null)
+                {
+                    if (existing.IsSuspended || existing.IsCancelled)
+                    {
+                        failed++;
+                        results.Add(new ImportStudentsRowResult(r, name, phone, "Failed", "A student with this phone number already exists and their account is suspended or cancelled.", existing.Id));
+                        continue;
+                    }
+
+                    var alreadyLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+                        .AnyAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
+                    if (!alreadyLinked)
+                        _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = existing.Id, GroupId = group.Id });
+
+                    await _db.SaveChangesAsync();
+                    linked++;
+                    results.Add(new ImportStudentsRowResult(r, name, phone, "Linked", $"A student with this phone number already existed, so they were linked to group '{group.Name}' instead of creating a duplicate.", existing.Id));
+                    continue;
+                }
+
+                var student = new Student
+                {
+                    Name = name,
+                    PhoneNumber = phone,
+                    ParentPhoneNumber = string.IsNullOrEmpty(parentPhone) ? null : parentPhone,
+                    UserName = string.IsNullOrEmpty(userName) ? null : userName,
+                    PasswordHash = BCrypt.Net.BCrypt.HashPassword(
+                        string.IsNullOrEmpty(password) ? GenerateTempPassword() : password),
+                    GroupId = group.Id,
+                    SchoolYear = group.SchoolYear
+                };
+                _db.Students.Add(student);
+                await _db.SaveChangesAsync();
+
+                _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = student.Id, GroupId = group.Id });
+                await _db.SaveChangesAsync();
+
+                created++;
+                results.Add(new ImportStudentsRowResult(r, name, phone, "Created", $"Student created in group '{group.Name}'.", student.Id));
+            }
+
+            return Ok(new ImportStudentsResponse(results.Count, created, linked, failed, results));
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { message = "Could not read the Excel file. Make sure it's a valid .xlsx sheet.", detail = ex.Message });
+        }
+    }
+
+    // Resolves a GroupName cell value against the teacher's groups:
+    //  1. Exact match (after NormalizeHeader) — e.g. "الصفوة ثلاثاء" == "الصفوة ثلاثاء".
+    //  2. Otherwise, PARTIAL match: if the sheet's text is a substring of
+    //     exactly one group's name (or vice versa) after normalization —
+    //     e.g. sheet says "الصفوة" and the teacher only has one group whose
+    //     name contains that, "الصفوة ثلاثاء" — that one group is used.
+    //  3. If the partial match is AMBIGUOUS (matches 2+ groups, e.g. teacher
+    //     has both "الصفوة ثلاثاء" and "الصفوة خميس"), this fails the row
+    //     rather than guessing, and lists the candidates so the teacher can
+    //     make the sheet's value more specific.
+    private static (Group? group, string? error) ResolveGroupByName(
+        string rowGroupName, List<Group> myGroups, Dictionary<string, Group> groupsByName)
+    {
+        var normalized = NormalizeHeader(rowGroupName);
+
+        if (groupsByName.TryGetValue(normalized, out var exact))
+            return (exact, null);
+
+        var candidates = myGroups
+            .Where(g =>
+            {
+                var gn = NormalizeHeader(g.Name);
+                return gn.Contains(normalized) || normalized.Contains(gn);
+            })
+            .ToList();
+
+        if (candidates.Count == 1)
+            return (candidates[0], null);
+
+        if (candidates.Count > 1)
+        {
+            var names = string.Join(", ", candidates.Select(g => g.Name));
+            return (null, $"GroupName '{rowGroupName}' matches more than one of your groups ({names}) — use the exact group name or GroupId to disambiguate.");
+        }
+
+        return (null, $"GroupName '{rowGroupName}' was not found among your groups.");
+    }
+
+    // Normalizes a column header or group name so different spellings of the
+    // same word match the same column, covering the variation that's common
+    // in real teacher-written sheets:
+    //  - trims/collapses whitespace and drops diacritics (tashkeel/tatweel)
+    //  - unifies hamza forms: أ/إ/آ/ٱ -> ا  (so أسم / إسم / اسم all match)
+    //  - unifies ة -> ه and ى -> ي  (trailing-letter spelling variants)
+    //  - strips a leading "ال" (so "الاسم" matches "اسم")
+    //  - lowercases Latin text and strips spaces (so "Phone Number" ==
+    //    "phonenumber" == "PHONE_NUMBER" once underscores are stripped too)
+    private static string NormalizeHeader(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        var text = s.Trim();
+
+        // Strip Arabic diacritics (tashkeel) and tatweel.
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"[\u064B-\u065F\u0670\u0640]", "");
+
+        var sb = new StringBuilder(text.Length);
+        foreach (var ch in text)
+        {
+            switch (ch)
+            {
+                case 'أ': case 'إ': case 'آ': case 'ٱ': sb.Append('ا'); break;
+                case 'ة': sb.Append('ه'); break;
+                case 'ى': sb.Append('ي'); break;
+                case ' ': case '_': case '-': case '/': case '\t': break; // drop separators entirely
+                default:
+                    sb.Append(char.ToLowerInvariant(ch));
+                    break;
+            }
+        }
+
+        var normalized = sb.ToString();
+        if (normalized.StartsWith("ال") && normalized.Length > 2)
+            normalized = normalized[2..];
+
+        return normalized;
+    }
+
+    // Pulls the spreadsheet id out of any of the URL shapes Google Sheets
+    // hands out (full edit link, /d/{id}/... with or without a trailing
+    // segment, or a bare id pasted on its own).
+    private static string? ExtractGoogleSheetId(string url)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return null;
+        var match = System.Text.RegularExpressions.Regex.Match(url, @"/d/([a-zA-Z0-9_-]{20,})");
+        if (match.Success) return match.Groups[1].Value;
+
+        // Fall back to treating the whole input as a bare id if it looks like one.
+        return System.Text.RegularExpressions.Regex.IsMatch(url.Trim(), @"^[a-zA-Z0-9_-]{20,}$")
+            ? url.Trim()
+            : null;
     }
 
     // GET Students?schoolYear=..&groupId=..&p=..&q=..

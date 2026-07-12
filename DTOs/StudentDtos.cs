@@ -47,6 +47,22 @@ public record AddHomeworkResultRequest(int StudentId, int TotalMarks, int Mark);
 
 public record QrCodeResponse(string StudentId, string QrPayload);
 
+// POST Students/import (multipart/form-data: file + groupId) and
+// POST Students/import/google-sheet (body: { url, groupId }) — bulk-register
+// students from an Excel sheet or a Google Sheet. One entry per row
+// processed, success or not, so the teacher can see exactly what happened to
+// every row (including which ones were skipped and why) instead of just a
+// total count.
+public record ImportStudentsRowResult(int Row, string? Name, string? PhoneNumber, string Status, string Message, int? StudentId);
+public record ImportStudentsResponse(int TotalRows, int Created, int Linked, int Failed, List<ImportStudentsRowResult> Results);
+
+// POST Students/import/google-sheet body: { url, groupId }
+// `url` is the normal Google Sheets share/edit link (or a Google Form's
+// RESPONSES sheet link — not the form's own /viewform link); `groupId` is
+// the optional default group (same semantics as the `groupId` form field on
+// Students/import — omit it if every row has its own GroupId/GroupName column).
+public record ImportFromGoogleSheetRequest(string Url, int? GroupId);
+
 // GET Students/attendance response item — the client reads exactly `lectureName`
 // and `isAttended` (bool), computing attended/absent counts locally by filtering
 // this array. One entry per lecture the student's group/unit is scheduled for,

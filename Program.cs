@@ -26,6 +26,12 @@ builder.Services.AddControllers()
     });
 builder.Services.AddHttpContextAccessor();
 
+// Used by Students/import/google-sheet to download the sheet's xlsx export.
+builder.Services.AddHttpClient("GoogleSheets", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
 // TENANT LAYER: resolves the current request's tenant (Teacher.Id) from the JWT
 // (staff) or the X-TenantId header (students). Consumed by AppDbContext's global
 // query filters. Scoped so it's computed fresh per-request from HttpContext.User.
