@@ -1,6 +1,7 @@
 using EduApi.Common;
 using EduApi.Data;
 using EduApi.Models;
+using EduApi.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -21,17 +22,33 @@ public record CreateGroupRequest(int SchoolYear, string Name);
 public class GroupsController : ControllerBase
 {
     private readonly AppDbContext _db;
-    public GroupsController(AppDbContext db) => _db = db;
+    private readonly ITenantContext _tenant;
+    private readonly ICacheService _cache;
+    public GroupsController(AppDbContext db, ITenantContext tenant, ICacheService cache)
+    {
+        _db = db;
+        _tenant = tenant;
+        _cache = cache;
+    }
+
+    // CACHING: prefix shared by every cached Groups list for this tenant
+    // (any schoolYear filter) — RemoveByPrefixAsync(this) wipes them all
+    // at once after a write.
+    private string GroupsCachePrefix() => $"tenant:{_tenant.CurrentTenantId}:groups:list:";
 
     [HttpGet]
     public async Task<IActionResult> GetAll([FromQuery] int? schoolYear)
     {
-        var query = _db.Groups.AsNoTracking().AsQueryable();
-        if (schoolYear.HasValue) query = query.Where(g => g.SchoolYear == schoolYear.Value);
+        var cacheKey = $"{GroupsCachePrefix()}{schoolYear}";
+        var groups = await _cache.GetOrCreateAsync(cacheKey, TimeSpan.FromSeconds(60), async () =>
+        {
+            var query = _db.Groups.AsNoTracking().AsQueryable();
+            if (schoolYear.HasValue) query = query.Where(g => g.SchoolYear == schoolYear.Value);
 
-        var groups = await query
-            .Select(g => new { groupId = g.Id, name = g.Name, schoolYear = g.SchoolYear, studentCount = g.Students.Count })
-            .ToListAsync();
+            return await query
+                .Select(g => new { groupId = g.Id, name = g.Name, schoolYear = g.SchoolYear, studentCount = g.Students.Count })
+                .ToListAsync();
+        });
 
         return Ok(groups);
     }
@@ -50,6 +67,7 @@ public class GroupsController : ControllerBase
         };
         _db.Groups.Add(group);
         await _db.SaveChangesAsync();
+        await _cache.RemoveByPrefixAsync(GroupsCachePrefix());
 
         return StatusCode(201, new { groupId = group.Id, name = group.Name, schoolYear = group.SchoolYear });
     }
@@ -62,6 +80,8 @@ public class GroupsController : ControllerBase
 
         _db.Groups.Remove(group);
         await _db.SaveChangesAsync();
+        await _cache.RemoveByPrefixAsync(GroupsCachePrefix());
+
         return Ok(new { message = "Group deleted." });
     }
 }

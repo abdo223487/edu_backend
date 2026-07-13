@@ -84,6 +84,77 @@ builder.Services.AddSingleton<Amazon.S3.IAmazonS3>(sp =>
 builder.Services.AddScoped<IFileStorageService, R2FileStorageService>();
 // builder.Services.AddScoped<IFileStorageService, FileStorageService>(); // local-disk fallback
 
+// ---------- Redis cache ----------
+// Used to cache expensive/frequently-hit GET list endpoints (Students,
+// Groups) per-tenant, so repeated requests don't re-run the same EF Core
+// query every time. Connecting lazily + abortOnConnectFail=false means a
+// Redis outage or bad connection string never crashes the app at startup —
+// RedisCacheService just falls back to "no cache" (hits the DB directly)
+// whenever the connection isn't up. Nothing here writes anything critical;
+// Redis is a pure performance layer, safe to lose entirely.
+builder.Services.Configure<RedisOptions>(builder.Configuration.GetSection(RedisOptions.SectionName));
+builder.Services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer?>(sp =>
+{
+    var redisOptions = builder.Configuration.GetSection(RedisOptions.SectionName).Get<RedisOptions>();
+    var logger = sp.GetRequiredService<ILogger<Program>>();
+
+    if (redisOptions == null || !redisOptions.Enabled || string.IsNullOrWhiteSpace(redisOptions.ConnectionString))
+    {
+        logger.LogInformation("Redis caching disabled (Redis:Enabled=false or no ConnectionString); running without a cache.");
+        return null;
+    }
+
+    try
+    {
+        var config = ParseRedisConnectionString(redisOptions.ConnectionString);
+        config.AbortOnConnectFail = false; // keep retrying in the background instead of throwing
+        config.ConnectTimeout = 5000;
+        return StackExchange.Redis.ConnectionMultiplexer.Connect(config);
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "Could not connect to Redis at startup; running without a cache.");
+        return null;
+    }
+});
+builder.Services.AddSingleton<ICacheService, RedisCacheService>();
+
+// Providers like Upstash hand out a "redis://user:pass@host:port" or
+// "rediss://..." (note the extra 's' = TLS) URI, which StackExchange.Redis's
+// own ConfigurationOptions.Parse does NOT understand (it expects its own
+// "host:port,password=..,ssl=true" syntax). Render's Key Value gives the
+// plain "host:port" form instead, which Parse handles natively. Support
+// both so whichever the person pastes in just works.
+static StackExchange.Redis.ConfigurationOptions ParseRedisConnectionString(string raw)
+{
+    if (raw.StartsWith("redis://", StringComparison.OrdinalIgnoreCase) ||
+        raw.StartsWith("rediss://", StringComparison.OrdinalIgnoreCase))
+    {
+        var uri = new Uri(raw);
+        var config = new StackExchange.Redis.ConfigurationOptions
+        {
+            Ssl = raw.StartsWith("rediss://", StringComparison.OrdinalIgnoreCase)
+        };
+        config.EndPoints.Add(uri.Host, uri.Port);
+
+        if (!string.IsNullOrEmpty(uri.UserInfo))
+        {
+            var parts = uri.UserInfo.Split(':', 2);
+            // Redis 6+ ACL username (Upstash's is literally "default") — only
+            // set it if it's not empty/"default"-as-a-no-op; StackExchange.Redis
+            // is fine either way, but skip an empty User to avoid AUTH quirks.
+            if (!string.IsNullOrEmpty(parts[0])) config.User = parts[0];
+            if (parts.Length > 1) config.Password = parts[1];
+        }
+
+        return config;
+    }
+
+    // Plain StackExchange.Redis syntax, e.g. "red-abc123:6379" (Render) or
+    // "host:port,password=xxx,ssl=true".
+    return StackExchange.Redis.ConfigurationOptions.Parse(raw);
+}
+
 var jwtSection = builder.Configuration.GetSection("Jwt");
 builder.Services.AddAuthentication(options =>
 {

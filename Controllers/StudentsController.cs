@@ -25,13 +25,15 @@ public class StudentsController : ControllerBase
     private readonly Common.ITenantContext _tenant;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IWhatsAppService _whatsApp;
+    private readonly ICacheService _cache;
     private readonly ILogger<StudentsController> _logger;
-    public StudentsController(AppDbContext db, Common.ITenantContext tenant, IHttpClientFactory httpClientFactory, IWhatsAppService whatsApp, ILogger<StudentsController> logger)
+    public StudentsController(AppDbContext db, Common.ITenantContext tenant, IHttpClientFactory httpClientFactory, IWhatsAppService whatsApp, ICacheService cache, ILogger<StudentsController> logger)
     {
         _db = db;
         _tenant = tenant;
         _httpClientFactory = httpClientFactory;
         _whatsApp = whatsApp;
+        _cache = cache;
         _logger = logger;
     }
 
@@ -78,6 +80,7 @@ public class StudentsController : ControllerBase
                     _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = group.TeacherId, StudentId = existing.Id, UnitId = unitId });
             }
             await _db.SaveChangesAsync();
+            await InvalidateStudentsCacheAsync();
 
             // NOTE: same tradeoff as Students/link — if this student is
             // already logged in elsewhere, their current access token won't
@@ -113,6 +116,7 @@ public class StudentsController : ControllerBase
         await _db.SaveChangesAsync();
 
         await SendWelcomeWhatsAppAsync(student, plainPassword);
+        await InvalidateStudentsCacheAsync();
 
         return StatusCode(201, ToListItem(student, group.Name));
     }
@@ -161,6 +165,7 @@ public class StudentsController : ControllerBase
                 _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = group.TeacherId, StudentId = student.Id, UnitId = unitId });
         }
         await _db.SaveChangesAsync();
+        await InvalidateStudentsCacheAsync();
 
         // NOTE: the student's CURRENT access token won't include this new
         // membership until they log in again or hit /Auth/refresh (same
@@ -431,6 +436,9 @@ public class StudentsController : ControllerBase
                 results.Add(new ImportStudentsRowResult(r, name, phone, "Created", $"Student created in group '{group.Name}'.", student.Id));
             }
 
+            if (created > 0 || linked > 0)
+                await InvalidateStudentsCacheAsync();
+
             return Ok(new ImportStudentsResponse(results.Count, created, linked, failed, results));
         }
         catch (Exception ex)
@@ -555,37 +563,52 @@ public class StudentsController : ControllerBase
 
     private async Task<IActionResult> ListStudents(
         System.Linq.Expressions.Expression<Func<Student, bool>> statusFilter,
-        int? schoolYear, int? groupId, int p, string? q)
+        int? schoolYear, int? groupId, int p, string? q, [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
     {
-        // MULTI-TENANT: filter/display by the Group under the CURRENT tenant, not
-        // necessarily the student's legacy single Group (which may belong to a
-        // different teacher if the student is also linked elsewhere).
-        var query = _db.Students.AsNoTracking().Where(statusFilter);
-        if (groupId.HasValue)
-            query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
-        else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
-        if (!string.IsNullOrWhiteSpace(q)) query = query.Where(s => s.Name.Contains(q) || s.PhoneNumber.Contains(q));
+        var tenantId = _tenant.CurrentTenantId;
+        var cacheKey = $"{StudentsCachePrefix(tenantId)}{caller}:{schoolYear}:{groupId}:{p}:{q}";
 
-        // ToListItem only reads Id/Name/PhoneNumber/UserName/GroupId/IsSuspended/
-        // IsCancelled -- project those columns at the SQL level so we don't pull
-        // PasswordHash, RefreshToken, ParentPhoneNumber, etc. off the wire.
-        var students = await query
-            .OrderBy(s => s.Name)
-            .Skip((p - 1) * PagingDefaults.PageSize)
-            .Take(PagingDefaults.PageSize)
-            .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, s.IsSuspended, s.IsCancelled })
-            .ToListAsync();
-
-        var tenantGroupNames = await _db.GetTenantGroupNamesAsync(students.Select(s => s.Id));
-        return Ok(students.Select(s =>
+        var result = await _cache.GetOrCreateAsync(cacheKey, TimeSpan.FromSeconds(60), async () =>
         {
-            var groupName = tenantGroupNames.GetValueOrDefault(s.Id);
-            var status = s.IsCancelled ? "Cancelled" : s.IsSuspended ? "Suspended" : "Active";
-            return new StudentListItem(
-                s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, groupName, s.IsSuspended, s.IsCancelled,
-                status, null);
-        }));
+            // MULTI-TENANT: filter/display by the Group under the CURRENT tenant, not
+            // necessarily the student's legacy single Group (which may belong to a
+            // different teacher if the student is also linked elsewhere).
+            var query = _db.Students.AsNoTracking().Where(statusFilter);
+            if (groupId.HasValue)
+                query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
+            else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
+            if (!string.IsNullOrWhiteSpace(q)) query = query.Where(s => s.Name.Contains(q) || s.PhoneNumber.Contains(q));
+
+            // ToListItem only reads Id/Name/PhoneNumber/UserName/GroupId/IsSuspended/
+            // IsCancelled -- project those columns at the SQL level so we don't pull
+            // PasswordHash, RefreshToken, ParentPhoneNumber, etc. off the wire.
+            var students = await query
+                .OrderBy(s => s.Name)
+                .Skip((p - 1) * PagingDefaults.PageSize)
+                .Take(PagingDefaults.PageSize)
+                .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, s.IsSuspended, s.IsCancelled })
+                .ToListAsync();
+
+            var tenantGroupNames = await _db.GetTenantGroupNamesAsync(students.Select(s => s.Id));
+            return students.Select(s =>
+            {
+                var groupName = tenantGroupNames.GetValueOrDefault(s.Id);
+                var status = s.IsCancelled ? "Cancelled" : s.IsSuspended ? "Suspended" : "Active";
+                return new StudentListItem(
+                    s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, groupName, s.IsSuspended, s.IsCancelled,
+                    status, null);
+            }).ToList();
+        });
+
+        return Ok(result);
     }
+
+    // CACHING: prefix shared by every cached Students list for this tenant
+    // (Active/Suspended/Cancelled, any schoolYear/groupId/page/search combo)
+    // — RemoveByPrefixAsync(this) wipes all of them at once after a write.
+    private static string StudentsCachePrefix(int? tenantId) => $"tenant:{tenantId}:students:list:";
+
+    private Task InvalidateStudentsCacheAsync() => _cache.RemoveByPrefixAsync(StudentsCachePrefix(_tenant.CurrentTenantId));
 
     // GET Students/count
     [HttpGet("count")]
@@ -674,6 +697,7 @@ public class StudentsController : ControllerBase
             membership.GroupId = request.GroupId;
 
         await _db.SaveChangesAsync();
+        await InvalidateStudentsCacheAsync();
         return Ok(new { message = "Group updated." });
     }
 
@@ -702,6 +726,7 @@ public class StudentsController : ControllerBase
 
         student.PhoneNumber = newNumber;
         await _db.SaveChangesAsync();
+        await InvalidateStudentsCacheAsync();
         return Ok(new { message = "Phone number updated." });
     }
 
@@ -728,6 +753,7 @@ public class StudentsController : ControllerBase
 
         student.Name = newName;
         await _db.SaveChangesAsync();
+        await InvalidateStudentsCacheAsync();
         return Ok(new { message = "Name updated." });
     }
 
@@ -742,6 +768,7 @@ public class StudentsController : ControllerBase
         student.IsSuspended = true;
         _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Suspended", Reason = request.Comment });
         await _db.SaveChangesAsync();
+        await InvalidateStudentsCacheAsync();
         return Ok(new { message = "Student suspended." });
     }
 
@@ -757,6 +784,7 @@ public class StudentsController : ControllerBase
         student.IsCancelled = false;
         _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Reactivated", Reason = request.Comment });
         await _db.SaveChangesAsync();
+        await InvalidateStudentsCacheAsync();
         return Ok(new { message = "Student reactivated." });
     }
 
@@ -779,6 +807,7 @@ public class StudentsController : ControllerBase
         student.IsCancelled = true;
         _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Cancelled", Reason = null });
         await _db.SaveChangesAsync();
+        await InvalidateStudentsCacheAsync();
         return Ok(new { message = "Student deleted." });
     }
 
