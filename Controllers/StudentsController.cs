@@ -752,6 +752,14 @@ public class StudentsController : ControllerBase
     }
 
     // POST Students/delete?studentId=..
+    // NOTE: was a hard `_db.Students.Remove(...)` before — that meant a
+    // "deleted" student vanished from the DB entirely and could never show
+    // up in Students/cancelled nor be brought back via Students/reactivate
+    // (that endpoint just flips flags on a row that no longer existed).
+    // Now this is a SOFT delete: same IsCancelled flag the rest of the app
+    // (GetCancelled / Reactivate) already expects, so a "cancelled" student
+    // behaves exactly like a suspended one — listed under Students/cancelled
+    // and restorable with Students/reactivate.
     [HttpPost("delete")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> Delete([FromQuery] int studentId)
@@ -759,7 +767,8 @@ public class StudentsController : ControllerBase
         var student = await _db.Students.FirstOrDefaultAsync(e => e.Id == (studentId));
         if (student == null) return NotFound(new { message = "Student not found." });
 
-        _db.Students.Remove(student);
+        student.IsCancelled = true;
+        _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Cancelled", Reason = null });
         await _db.SaveChangesAsync();
         return Ok(new { message = "Student deleted." });
     }

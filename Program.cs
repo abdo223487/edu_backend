@@ -32,6 +32,17 @@ builder.Services.AddHttpClient("GoogleSheets", client =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 
+// Used by GreenApiWhatsAppService to call Green API (green-api.com) when
+// attendance is recorded (see GreenApiOptions for config details). BaseAddress
+// isn't set here since each Green API instance has its own apiUrl host —
+// GreenApiWhatsAppService builds the full URL itself from GreenApiOptions.ApiUrl.
+builder.Services.AddHttpClient("GreenApi", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(15);
+});
+builder.Services.Configure<GreenApiOptions>(builder.Configuration.GetSection(GreenApiOptions.SectionName));
+builder.Services.AddScoped<IWhatsAppService, GreenApiWhatsAppService>();
+
 // TENANT LAYER: resolves the current request's tenant (Teacher.Id) from the JWT
 // (staff) or the X-TenantId header (students). Consumed by AppDbContext's global
 // query filters. Scoped so it's computed fresh per-request from HttpContext.User.

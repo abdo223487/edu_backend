@@ -83,13 +83,18 @@ public class BankQuestionsController : ControllerBase
     [HttpGet]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetAll([FromQuery] int? lessonId, [FromQuery] int? unitId,
-        [FromQuery] string? difficulty, [FromQuery] int p = 1)
+        [FromQuery] string? difficulty, [FromQuery] int? schoolYear, [FromQuery] int p = 1)
     {
         var query = _db.BankQuestions.AsNoTracking().Include(q => q.Lesson).ThenInclude(l => l!.Unit).AsQueryable();
 
         if (lessonId.HasValue) query = query.Where(q => q.LessonId == lessonId.Value);
         if (unitId.HasValue) query = query.Where(q => q.Lesson!.UnitId == unitId.Value);
         if (!string.IsNullOrEmpty(difficulty)) query = query.Where(q => q.Difficulty == difficulty);
+        // BUGFIX: without this, "GetAll" for a given year returned every
+        // question the teacher ever uploaded across ALL school years (as long
+        // as lessonId/unitId weren't explicitly picked) — filter by the
+        // lesson's unit's SchoolYear, same as everywhere else in the app.
+        if (schoolYear.HasValue) query = query.Where(q => q.Lesson!.Unit!.SchoolYear == schoolYear.Value);
 
         var questions = await query
             .OrderByDescending(q => q.Id)

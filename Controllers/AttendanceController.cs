@@ -80,6 +80,7 @@ public class AttendanceController : ControllerBase
         if (request.Date.HasValue) attendance.Date = request.Date.Value;
 
         _db.Attendances.Add(attendance);
+        await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
         await _db.SaveChangesAsync();
 
         return StatusCode(201, new { message = "Attendance recorded." });
@@ -105,11 +106,43 @@ public class AttendanceController : ControllerBase
                 EncodedStudentId = item.EncodedStudentId,
                 Date = item.Date
             });
+            await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
             created++;
         }
 
         await _db.SaveChangesAsync();
         return Ok(new { message = $"{created} attendance record(s) saved.", saved = created, total = items.Count });
+    }
+
+    // FEATURE: some Center lectures are named as a "subscription" lecture
+    // (the teacher puts "اشتراك"/"أشتراك" in the lecture Name) — attending
+    // one of these means the student is now subscribed to that lecture's
+    // Unit, even if they weren't enrolled in it before. We just add the
+    // pending StudentUnitSubscription row here; SaveChangesAsync at the end
+    // of the calling action persists it together with the Attendance row.
+    private async Task AutoSubscribeIfSubscriptionLectureAsync(int lectureId, int studentId)
+    {
+        var lecture = await _db.Lectures.AsNoTracking()
+            .Where(l => l.Id == lectureId)
+            .Select(l => new { l.UnitId, l.Name, l.TeacherId })
+            .FirstOrDefaultAsync();
+
+        if (lecture == null || lecture.UnitId == null) return;
+        if (lecture.Name == null ||
+            (!lecture.Name.Contains("اشتراك") && !lecture.Name.Contains("أشتراك")))
+            return;
+
+        var unitId = lecture.UnitId.Value;
+        var alreadySubscribed = await _db.StudentUnitSubscriptions
+            .AnyAsync(s => s.StudentId == studentId && s.UnitId == unitId);
+        if (alreadySubscribed) return;
+
+        _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription
+        {
+            TeacherId = lecture.TeacherId,
+            StudentId = studentId,
+            UnitId = unitId
+        });
     }
 
     private async Task<int?> ResolveStudentIdAsync(string encodedStudentId)
