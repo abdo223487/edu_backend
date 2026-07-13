@@ -14,6 +14,23 @@ public static class Roles
     public const string AssistantAdmin = "AssistantAdmin";
     public const string Assistant = "Assistant";
     public const string Student = "Student";
+
+    /// <summary>
+    /// Global, app-wide super-administrator. NOT a tenant (TenantOwnerId is
+    /// always null for a SuperAdmin account, and unlike a tenant-root Teacher
+    /// it never owns Groups/Units/etc. of its own). A SuperAdmin acts ON
+    /// BEHALF OF whichever teacher/tenant it targets, by sending that
+    /// teacher's id in the "X-TenantId" header on every request that needs
+    /// tenant-scoped data (same header students already use to pick their
+    /// active teacher) -- see HttpTenantContext.
+    ///
+    /// BOOTSTRAP: there is no separate "create a SuperAdmin" endpoint. Instead,
+    /// POST api/Teachers with UserName == "admin" AND Password == "admin"
+    /// (exact, case-insensitive on the username) always creates/promotes to a
+    /// SuperAdmin account, regardless of who's calling or what "role" was
+    /// requested in the body -- see TeachersController.Create.
+    /// </summary>
+    public const string SuperAdmin = "SuperAdmin";
 }
 
 public class Teacher

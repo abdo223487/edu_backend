@@ -40,17 +40,22 @@ public class R2FileStorageService : IFileStorageService
         _tenant = tenant;
     }
 
-    public async Task<string> SaveAsync(IFormFile file, string subFolder)
+    public Task<string> SaveAsync(IFormFile file, string subFolder)
     {
-        if (file == null || file.Length == 0)
-            throw new ArgumentException("No file was provided or the file is empty.", nameof(file));
-
         var tenantId = _tenant.CurrentTenantId;
         if (tenantId == null)
         {
             throw new InvalidOperationException(
                 "File upload rejected: no tenant could be resolved for the current request.");
         }
+
+        return SaveAsync(file, subFolder, tenantId.Value);
+    }
+
+    public async Task<string> SaveAsync(IFormFile file, string subFolder, int tenantId)
+    {
+        if (file == null || file.Length == 0)
+            throw new ArgumentException("No file was provided or the file is empty.", nameof(file));
 
         var safeSubFolder = SanitizeSegment(subFolder);
         var extension = Path.GetExtension(file.FileName);

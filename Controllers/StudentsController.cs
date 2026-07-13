@@ -52,7 +52,7 @@ public class StudentsController : ControllerBase
     // exists elsewhere; any UserName/Password passed in the request is
     // ignored in that case since the original account's login must win.
     [HttpPost]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> Create([FromBody] CreateStudentRequest request)
     {
         var group = await _db.Groups.FirstOrDefaultAsync(e => e.Id == (request.GroupId));
@@ -135,7 +135,7 @@ public class StudentsController : ControllerBase
     // flow that doesn't collect a Name/etc.) but is no longer required to
     // avoid duplicate accounts.
     [HttpPost("link")]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> LinkExistingStudent([FromBody] LinkStudentRequest request)
     {
         var group = await _db.Groups.FirstOrDefaultAsync(g => g.Id == request.GroupId);
@@ -198,7 +198,7 @@ public class StudentsController : ControllerBase
     // the rest of the sheet; each row gets its own status back so the
     // teacher can see and fix just the rows that failed.
     [HttpPost("import")]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     [RequestSizeLimit(10_000_000)]
     [Consumes("multipart/form-data")]
     public async Task<IActionResult> ImportFromExcel([FromForm] ImportFromExcelForm form)
@@ -233,7 +233,7 @@ public class StudentsController : ControllerBase
     // downloads it the same way Google's own "File > Download > .xlsx" export
     // does, without going through OAuth / a Google account login.
     [HttpPost("import/google-sheet")]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> ImportFromGoogleSheet([FromBody] ImportFromGoogleSheetRequest request)
     {
         var spreadsheetId = ExtractGoogleSheetId(request.Url);

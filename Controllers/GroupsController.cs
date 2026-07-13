@@ -18,7 +18,7 @@ public record CreateGroupRequest(int SchoolYear, string Name);
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
-[Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+[Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
 public class GroupsController : ControllerBase
 {
     private readonly AppDbContext _db;

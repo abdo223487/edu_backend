@@ -42,11 +42,8 @@ public class FileStorageService : IFileStorageService
         _tenant = tenant;
     }
 
-    public async Task<string> SaveAsync(IFormFile file, string subFolder)
+    public Task<string> SaveAsync(IFormFile file, string subFolder)
     {
-        if (file == null || file.Length == 0)
-            throw new ArgumentException("No file was provided or the file is empty.", nameof(file));
-
         var tenantId = _tenant.CurrentTenantId;
         if (tenantId == null)
         {
@@ -59,6 +56,14 @@ public class FileStorageService : IFileStorageService
                 "File upload rejected: no tenant could be resolved for the current request.");
         }
 
+        return SaveAsync(file, subFolder, tenantId.Value);
+    }
+
+    public async Task<string> SaveAsync(IFormFile file, string subFolder, int tenantId)
+    {
+        if (file == null || file.Length == 0)
+            throw new ArgumentException("No file was provided or the file is empty.", nameof(file));
+
         // Defense in depth: subFolder is always a hardcoded literal from our
         // own controllers today ("materials", "teachers", "units",
         // "quiz-questions"), but sanitize anyway so this stays safe even if
@@ -66,7 +71,7 @@ public class FileStorageService : IFileStorageService
         var safeSubFolder = SanitizeSegment(subFolder);
 
         var root = _env.WebRootPath ?? Path.Combine(_env.ContentRootPath, "wwwroot");
-        var folder = Path.Combine(root, "uploads", tenantId.Value.ToString(), safeSubFolder);
+        var folder = Path.Combine(root, "uploads", tenantId.ToString(), safeSubFolder);
         Directory.CreateDirectory(folder);
 
         // Keep the original extension (needed for content-type sniffing on the

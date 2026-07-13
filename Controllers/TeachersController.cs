@@ -19,6 +19,9 @@ namespace EduApi.Controllers;
 /// </summary>
 public record CreateTeacherRequest(string UserName, string Password, string Name, string? Role, string? Subject, string? ImageUrl);
 
+/// <summary>Body for POST Teachers/superadmin/assistants — SuperAdmin only.</summary>
+public record CreateAssistantForTeacherRequest(int TeacherId, string UserName, string Password, string Name, string? Role);
+
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
@@ -109,7 +112,20 @@ public class TeachersController : ControllerBase
         string role;
         int? tenantOwnerId;
 
-        if (User.Identity?.IsAuthenticated == true && User.IsInAnyRole(Roles.Teacher, Roles.AssistantAdmin))
+        // SUPERADMIN BOOTSTRAP: creating (or re-creating, since the username
+        // check above already rejects a duplicate) an account with the exact
+        // credentials userName == "admin" / password == "admin" always
+        // produces a SuperAdmin, no matter who is calling or what "role"/
+        // tenant the rest of the request implies. This is intentionally
+        // checked BEFORE the normal staff/anonymous branches below so it can
+        // never be shadowed by them.
+        if (string.Equals(request.UserName, "admin", StringComparison.OrdinalIgnoreCase)
+            && request.Password == "admin")
+        {
+            role = Roles.SuperAdmin;
+            tenantOwnerId = null; // SuperAdmin owns no tenant of its own — see Roles.SuperAdmin.
+        }
+        else if (User.Identity?.IsAuthenticated == true && User.IsInAnyRole(Roles.Teacher, Roles.AssistantAdmin))
         {
             tenantOwnerId = User.GetStaffTenantId();
             if (tenantOwnerId == null)
@@ -199,6 +215,161 @@ public class TeachersController : ControllerBase
             name = teacher.Name,
             subject = teacher.Subject ?? "",
             imageUrl = teacher.ImageUrl ?? PlaceholderAvatar(teacher.Name)
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // SUPERADMIN-ONLY ENDPOINTS
+    // ─────────────────────────────────────────────────────────────────────
+
+    // POST api/Teachers/superadmin/teachers  (multipart/form-data)
+    // Creates a brand-new tenant-root Teacher (TenantOwnerId = null), same as
+    // the anonymous path of POST Teachers, EXCEPT the cover photo is an
+    // uploaded FILE ("Image") instead of a plain ImageUrl string — stored the
+    // exact same way Units/Lessons/Materials/BankQuestions images are
+    // (IFileStorageService, folder "teachers"). Since the new teacher has no
+    // tenant context of its own yet at upload time, this uses the
+    // tenant-override SaveAsync(file, subFolder, tenantId) with the teacher's
+    // freshly-created Id.
+    [HttpPost("superadmin/teachers")]
+    [Consumes("multipart/form-data")]
+    [Authorize(Roles = Roles.SuperAdmin)]
+    public async Task<IActionResult> SuperAdminCreateTeacher(
+        [FromForm] string userName,
+        [FromForm] string password,
+        [FromForm] string name,
+        [FromForm] string? subject,
+        IFormFile? image)
+    {
+        if (string.IsNullOrWhiteSpace(userName) || string.IsNullOrWhiteSpace(password) || string.IsNullOrWhiteSpace(name))
+            return BadRequest(new { message = "userName, password and name are required." });
+
+        if (await _db.Teachers.AnyAsync(t => t.UserName == userName))
+            return Conflict(new { message = "Username already taken." });
+
+        var teacher = new Teacher
+        {
+            UserName = userName,
+            Name = name,
+            Role = Roles.Teacher,
+            PasswordHash = BCrypt.Net.BCrypt.HashPassword(password),
+            TenantOwnerId = null,
+            Subject = subject
+        };
+
+        _db.Teachers.Add(teacher);
+        await _db.SaveChangesAsync(); // need teacher.Id before uploading/stamping the image
+
+        if (image != null && image.Length > 0)
+        {
+            teacher.ImageUrl = await _files.SaveAsync(image, "teachers", teacher.Id);
+            await _db.SaveChangesAsync();
+        }
+
+        return StatusCode(201, new
+        {
+            id = teacher.Id,
+            userName = teacher.UserName,
+            name = teacher.Name,
+            role = teacher.Role,
+            subject = teacher.Subject ?? "",
+            imageUrl = teacher.ImageUrl ?? PlaceholderAvatar(teacher.Name),
+            tenantId = teacher.Id
+        });
+    }
+
+    // POST api/Teachers/superadmin/assistants  body: { teacherId, userName, password, name, role? }
+    // Creates staff (Assistant, or AssistantAdmin if role == "AssistantAdmin")
+    // under the GIVEN teacherId's tenant — the SuperAdmin equivalent of the
+    // authenticated-staff branch of POST Teachers, except the target tenant
+    // is picked explicitly instead of taken from the caller's own JWT (a
+    // SuperAdmin has none).
+    [HttpPost("superadmin/assistants")]
+    [Authorize(Roles = Roles.SuperAdmin)]
+    public async Task<IActionResult> SuperAdminCreateAssistant([FromBody] CreateAssistantForTeacherRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.UserName) ||
+            string.IsNullOrWhiteSpace(request.Password) ||
+            string.IsNullOrWhiteSpace(request.Name))
+            return BadRequest(new { message = "userName, password and name are required." });
+
+        if (await _db.Teachers.AnyAsync(t => t.UserName == request.UserName))
+            return Conflict(new { message = "Username already taken." });
+
+        // Must target an existing tenant-root teacher (never another staff
+        // account) — mirrors Groups/Units/etc. always being owned by a root.
+        var targetTeacher = await _db.Teachers.FirstOrDefaultAsync(t => t.Id == request.TeacherId && t.TenantOwnerId == null);
+        if (targetTeacher == null)
+            return BadRequest(new { message = "TeacherId does not refer to an existing tenant-root teacher." });
+
+        var role = request.Role == Roles.AssistantAdmin ? Roles.AssistantAdmin : Roles.Assistant;
+
+        var assistant = new Teacher
+        {
+            UserName = request.UserName,
+            Name = request.Name,
+            Role = role,
+            PasswordHash = BCrypt.Net.BCrypt.HashPassword(request.Password),
+            TenantOwnerId = targetTeacher.Id
+        };
+
+        _db.Teachers.Add(assistant);
+        await _db.SaveChangesAsync();
+
+        return StatusCode(201, new
+        {
+            id = assistant.Id,
+            userName = assistant.UserName,
+            name = assistant.Name,
+            role = assistant.Role,
+            teacherId = targetTeacher.Id,
+            teacherName = targetTeacher.Name
+        });
+    }
+
+    // GET api/Teachers/superadmin/student-counts
+    // Total student count across every teacher, PLUS a per-teacher breakdown.
+    // Only tenant-root teachers (TenantOwnerId == null) are listed — staff
+    // accounts don't own students of their own. A student counts under every
+    // teacher they actually have a group under (StudentGroupMembership),
+    // which is why "totalAcrossTeachers" (sum of the per-teacher counts) can
+    // be higher than "totalUniqueStudents" (distinct real students) when the
+    // same student is subscribed to more than one teacher.
+    [HttpGet("superadmin/student-counts")]
+    [Authorize(Roles = Roles.SuperAdmin)]
+    public async Task<IActionResult> SuperAdminStudentCounts()
+    {
+        var teachers = await _db.Teachers.AsNoTracking()
+            .Where(t => t.TenantOwnerId == null)
+            .Select(t => new { t.Id, t.Name, t.UserName })
+            .ToListAsync();
+
+        // IgnoreQueryFilters(): a SuperAdmin has no single active tenant — this
+        // report spans every tenant at once by design.
+        var membershipCounts = await _db.StudentGroupMemberships.AsNoTracking().IgnoreQueryFilters()
+            .GroupBy(m => m.Group!.TeacherId)
+            .Select(g => new { TeacherId = g.Key, Count = g.Select(m => m.StudentId).Distinct().Count() })
+            .ToDictionaryAsync(g => g.TeacherId, g => g.Count);
+
+        var perTeacher = teachers.Select(t => new
+        {
+            teacherId = t.Id,
+            teacherName = t.Name,
+            userName = t.UserName,
+            studentCount = membershipCounts.TryGetValue(t.Id, out var c) ? c : 0
+        })
+        .OrderByDescending(t => t.studentCount)
+        .ToList();
+
+        var totalUniqueStudents = await _db.Students.AsNoTracking().IgnoreQueryFilters().CountAsync();
+        var totalAcrossTeachers = perTeacher.Sum(t => t.studentCount);
+
+        return Ok(new
+        {
+            totalUniqueStudents,
+            totalAcrossTeachers,
+            teacherCount = perTeacher.Count,
+            perTeacher
         });
     }
 

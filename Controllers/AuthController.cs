@@ -44,7 +44,12 @@ public class AuthController : ControllerBase
 
             // TENANT LAYER: effective tenant = TenantOwnerId (if this account is staff
             // working for another teacher) or the account's own id (if it IS the tenant).
-            var tenantId = teacher.TenantOwnerId ?? teacher.Id;
+            // SuperAdmin is the one exception: it owns no tenant at all — it picks
+            // whichever teacher to act on behalf of per-request via the "X-TenantId"
+            // header instead (see HttpTenantContext), so no tenantId claim is embedded.
+            int? tenantId = teacher.Role == Roles.SuperAdmin
+                ? null
+                : teacher.TenantOwnerId ?? teacher.Id;
 
             var access = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roles, tenantId: tenantId);
             var refresh = _tokens.CreateRefreshToken();
@@ -111,7 +116,10 @@ public class AuthController : ControllerBase
                 ? new[] { Roles.AssistantAdmin, Roles.Teacher }
                 : new[] { teacher.Role };
 
-            var tenantId = teacher.TenantOwnerId ?? teacher.Id;
+            // See Login above: SuperAdmin never gets a tenantId claim.
+            int? tenantId = teacher.Role == Roles.SuperAdmin
+                ? null
+                : teacher.TenantOwnerId ?? teacher.Id;
 
             var access = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roles, tenantId: tenantId);
             var newRefresh = _tokens.CreateRefreshToken();

@@ -62,6 +62,17 @@ public class HttpTenantContext : ITenantContext
                 ? parsed
                 : null;
         }
+        else if (user.IsInRole(Models.Roles.SuperAdmin))
+        {
+            // SuperAdmin owns no tenant of its own (no "tenantId" claim is ever
+            // embedded for it — see AuthController). It acts ON BEHALF OF
+            // whichever teacher it's currently managing, chosen per-request via
+            // the same "X-TenantId" header students use. Unlike the student
+            // branch above, this is NOT restricted to a known set of ids —
+            // a SuperAdmin is, by definition, trusted to reach any tenant.
+            var header = httpContext!.Request.Headers["X-TenantId"].ToString();
+            _tenantId = int.TryParse(header, out var fromHeader) ? fromHeader : (int?)null;
+        }
         else
         {
             // Teacher / Assistant / AssistantAdmin: tenant is embedded in the JWT.

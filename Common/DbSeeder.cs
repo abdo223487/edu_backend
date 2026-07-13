@@ -9,10 +9,24 @@ public static class DbSeeder
     {
         if (db.Teachers.Any()) return; // already seeded
 
+        // ─── SuperAdmin bootstrap account ──────────────────────────────────
+        // Username/password "admin"/"admin" is reserved: POST Teachers with
+        // exactly these credentials always creates/promotes a SuperAdmin (see
+        // TeachersController.Create), so it's seeded directly here too rather
+        // than reusing "admin" for a demo tenant-root teacher (renamed below).
+        db.Teachers.Add(new Teacher
+        {
+            UserName = "admin",
+            Name = "Super Admin",
+            Role = Roles.SuperAdmin,
+            PasswordHash = BCrypt.Net.BCrypt.HashPassword("admin"),
+            TenantOwnerId = null
+        });
+
         // ─── Tenant #1 ──────────────────────────────────────────────────
         var teacher = new Teacher
         {
-            UserName = "admin",
+            UserName = "manager1",
             Name = "Admin Teacher",
             Role = Roles.AssistantAdmin,
             PasswordHash = BCrypt.Net.BCrypt.HashPassword("Admin@123"),
