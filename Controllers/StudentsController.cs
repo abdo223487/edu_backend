@@ -4,6 +4,7 @@ using EduApi.Common;
 using EduApi.Data;
 using EduApi.DTOs;
 using EduApi.Models;
+using EduApi.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -23,11 +24,15 @@ public class StudentsController : ControllerBase
     private readonly AppDbContext _db;
     private readonly Common.ITenantContext _tenant;
     private readonly IHttpClientFactory _httpClientFactory;
-    public StudentsController(AppDbContext db, Common.ITenantContext tenant, IHttpClientFactory httpClientFactory)
+    private readonly IWhatsAppService _whatsApp;
+    private readonly ILogger<StudentsController> _logger;
+    public StudentsController(AppDbContext db, Common.ITenantContext tenant, IHttpClientFactory httpClientFactory, IWhatsAppService whatsApp, ILogger<StudentsController> logger)
     {
         _db = db;
         _tenant = tenant;
         _httpClientFactory = httpClientFactory;
+        _whatsApp = whatsApp;
+        _logger = logger;
     }
 
     // POST Students
@@ -84,14 +89,14 @@ public class StudentsController : ControllerBase
             });
         }
 
+        var plainPassword = string.IsNullOrEmpty(request.Password) ? GenerateTempPassword() : request.Password;
         var student = new Student
         {
             Name = request.Name,
             PhoneNumber = request.PhoneNumber,
             ParentPhoneNumber = request.ParentPhoneNumber,
             UserName = request.UserName,
-            PasswordHash = BCrypt.Net.BCrypt.HashPassword(
-                string.IsNullOrEmpty(request.Password) ? GenerateTempPassword() : request.Password),
+            PasswordHash = BCrypt.Net.BCrypt.HashPassword(plainPassword),
             GroupId = request.GroupId,
             SchoolYear = group.SchoolYear
         };
@@ -106,6 +111,8 @@ public class StudentsController : ControllerBase
         foreach (var unitId in request.UnitIds ?? new())
             _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = group.TeacherId, StudentId = student.Id, UnitId = unitId });
         await _db.SaveChangesAsync();
+
+        await SendWelcomeWhatsAppAsync(student, plainPassword);
 
         return StatusCode(201, ToListItem(student, group.Name));
     }
@@ -401,14 +408,14 @@ public class StudentsController : ControllerBase
                     continue;
                 }
 
+                var plainPassword = string.IsNullOrEmpty(password) ? GenerateTempPassword() : password;
                 var student = new Student
                 {
                     Name = name,
                     PhoneNumber = phone,
                     ParentPhoneNumber = string.IsNullOrEmpty(parentPhone) ? null : parentPhone,
                     UserName = string.IsNullOrEmpty(userName) ? null : userName,
-                    PasswordHash = BCrypt.Net.BCrypt.HashPassword(
-                        string.IsNullOrEmpty(password) ? GenerateTempPassword() : password),
+                    PasswordHash = BCrypt.Net.BCrypt.HashPassword(plainPassword),
                     GroupId = group.Id,
                     SchoolYear = group.SchoolYear
                 };
@@ -417,6 +424,8 @@ public class StudentsController : ControllerBase
 
                 _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = student.Id, GroupId = group.Id });
                 await _db.SaveChangesAsync();
+
+                await SendWelcomeWhatsAppAsync(student, plainPassword);
 
                 created++;
                 results.Add(new ImportStudentsRowResult(r, name, phone, "Created", $"Student created in group '{group.Name}'.", student.Id));
@@ -1146,6 +1155,40 @@ public class StudentsController : ControllerBase
     }
 
     private static string GenerateTempPassword() => Guid.NewGuid().ToString("N")[..8];
+
+    // FEATURE: fires the "here's your AcademIQ account" WhatsApp message to
+    // the student's own phone right after their Student row is created (via
+    // Create, or a "Created" row in the Excel/Google Sheet import). Sends the
+    // effective login (UserName, falling back to PhoneNumber exactly like
+    // AuthController's login lookup does) plus the plain-text password —
+    // must be called BEFORE the password is discarded/hashed-over.
+    // Best-effort only, same as SendAttendanceWhatsAppAsync: never let a
+    // WhatsApp failure fail the student-creation request itself.
+    private async Task SendWelcomeWhatsAppAsync(Student student, string plainPassword)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(student.PhoneNumber))
+            {
+                _logger.LogInformation("Skipping WhatsApp welcome message for student {StudentId}: no phone number on file.", student.Id);
+                return;
+            }
+
+            var data = new StudentWelcomeWhatsAppNotification(
+                StudentName: student.Name,
+                UserName: student.UserName ?? student.PhoneNumber,
+                Password: plainPassword
+            );
+
+            var sent = await _whatsApp.SendWelcomeMessageAsync(student.PhoneNumber, data);
+            if (!sent)
+                _logger.LogWarning("WhatsApp welcome message not sent for student {StudentId}.", student.Id);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Unexpected error while sending WhatsApp welcome message for student {StudentId}.", student.Id);
+        }
+    }
 
     private static StudentListItem ToListItem(Student s, string? groupName)
     {

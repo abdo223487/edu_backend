@@ -37,20 +37,40 @@ public class GreenApiWhatsAppService : IWhatsAppService
             return false;
         }
 
+        return await SendTextAsync(parentPhoneNumber, BuildMessageText(data), "attendance");
+    }
+
+    public async Task<bool> SendWelcomeMessageAsync(string studentPhoneNumber, StudentWelcomeWhatsAppNotification data)
+    {
+        if (!_options.Enabled)
+        {
+            _logger.LogInformation("WhatsApp notifications disabled (GreenApi:Enabled=false); skipping.");
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(studentPhoneNumber))
+        {
+            _logger.LogWarning("Skipping WhatsApp welcome message: student has no phone number.");
+            return false;
+        }
+
+        return await SendTextAsync(studentPhoneNumber, BuildWelcomeMessageText(data), "welcome");
+    }
+
+    private async Task<bool> SendTextAsync(string phoneNumber, string messageText, string kind)
+    {
         if (string.IsNullOrWhiteSpace(_options.IdInstance) || string.IsNullOrWhiteSpace(_options.ApiTokenInstance))
         {
-            _logger.LogWarning("GreenApi:IdInstance / ApiTokenInstance not configured; skipping notification.");
+            _logger.LogWarning("GreenApi:IdInstance / ApiTokenInstance not configured; skipping {Kind} notification.", kind);
             return false;
         }
 
-        var chatId = NormalizePhoneNumber(parentPhoneNumber);
+        var chatId = NormalizePhoneNumber(phoneNumber);
         if (chatId == null)
         {
-            _logger.LogWarning("Skipping WhatsApp attendance notification: could not normalize phone number '{Phone}'.", parentPhoneNumber);
+            _logger.LogWarning("Skipping WhatsApp {Kind} notification: could not normalize phone number '{Phone}'.", kind, phoneNumber);
             return false;
         }
-
-        var messageText = BuildMessageText(data);
 
         var payload = new { chatId, message = messageText };
 
@@ -66,7 +86,7 @@ public class GreenApiWhatsAppService : IWhatsAppService
             if (!response.IsSuccessStatusCode)
             {
                 var body = await response.Content.ReadAsStringAsync();
-                _logger.LogWarning("Green API send failed ({Status}) for {ChatId}: {Body}", response.StatusCode, chatId, body);
+                _logger.LogWarning("Green API {Kind} send failed ({Status}) for {ChatId}: {Body}", kind, response.StatusCode, chatId, body);
                 return false;
             }
 
@@ -74,8 +94,8 @@ public class GreenApiWhatsAppService : IWhatsAppService
         }
         catch (Exception ex)
         {
-            // NEVER let a WhatsApp failure bubble up and break attendance recording.
-            _logger.LogWarning(ex, "Green API send threw for {ChatId}.", chatId);
+            // NEVER let a WhatsApp failure bubble up and break the caller's flow.
+            _logger.LogWarning(ex, "Green API {Kind} send threw for {ChatId}.", kind, chatId);
             return false;
         }
     }
@@ -88,6 +108,16 @@ public class GreenApiWhatsAppService : IWhatsAppService
             $"آخر درجة: {data.LastGradeText}\n" +
             $"آخر واجب: {data.LastHomeworkText}\n" +
             $"حالة المذكرة: {data.NotebookStatusText}";
+    }
+
+    private static string BuildWelcomeMessageText(StudentWelcomeWhatsAppNotification data)
+    {
+        return
+            $"السلام عليكم يا حبيبي {data.StudentName} 🌟\n\n" +
+            $"ده اكونتك على منصة AcademIQ:\n\n" +
+            $"اليوزر: /{data.UserName}/\n" +
+            $"الباسورد: /{data.Password}/\n\n" +
+            $"مع العلم إن ده هيبقى اكونتك لجميع المدرسين، وتقدر تبدل بينهم من خلال الابليكيشن.";
     }
 
     /// <summary>
