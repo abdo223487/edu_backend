@@ -5,6 +5,20 @@ using StackExchange.Redis;
 namespace EduApi.Services;
 
 /// <summary>
+/// Plain (non-nullable-typed) wrapper around the possibly-null
+/// IConnectionMultiplexer. Needed because `AddSingleton&lt;IConnectionMultiplexer?&gt;`
+/// directly doesn't compile — DI's generic constraints don't accept a
+/// nullable reference type as TService — so the nullability lives on this
+/// holder's Multiplexer property instead, and this class itself is always
+/// registered as a normal (non-null) singleton.
+/// </summary>
+public class RedisConnectionHolder
+{
+    public IConnectionMultiplexer? Multiplexer { get; }
+    public RedisConnectionHolder(IConnectionMultiplexer? multiplexer) => Multiplexer = multiplexer;
+}
+
+/// <summary>
 /// ICacheService implementation backed by Redis (via StackExchange.Redis).
 /// Used directly (instead of going through IDistributedCache) because
 /// invalidating a whole family of keys at once — "every cached Students
@@ -16,9 +30,9 @@ public class RedisCacheService : ICacheService
     private readonly IConnectionMultiplexer? _redis;
     private readonly ILogger<RedisCacheService> _logger;
 
-    public RedisCacheService(IConnectionMultiplexer? redis, ILogger<RedisCacheService> logger)
+    public RedisCacheService(RedisConnectionHolder connectionHolder, ILogger<RedisCacheService> logger)
     {
-        _redis = redis;
+        _redis = connectionHolder.Multiplexer;
         _logger = logger;
     }
 
@@ -33,7 +47,7 @@ public class RedisCacheService : ICacheService
             var cached = await db.StringGetAsync(key);
             if (cached.HasValue)
             {
-                var value = JsonSerializer.Deserialize<T>(cached!);
+                var value = JsonSerializer.Deserialize<T>((string)cached!);
                 if (value != null) return value;
             }
         }

@@ -93,7 +93,7 @@ builder.Services.AddScoped<IFileStorageService, R2FileStorageService>();
 // whenever the connection isn't up. Nothing here writes anything critical;
 // Redis is a pure performance layer, safe to lose entirely.
 builder.Services.Configure<RedisOptions>(builder.Configuration.GetSection(RedisOptions.SectionName));
-builder.Services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer?>(sp =>
+builder.Services.AddSingleton(sp =>
 {
     var redisOptions = builder.Configuration.GetSection(RedisOptions.SectionName).Get<RedisOptions>();
     var logger = sp.GetRequiredService<ILogger<Program>>();
@@ -101,7 +101,7 @@ builder.Services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer?>(sp =>
     if (redisOptions == null || !redisOptions.Enabled || string.IsNullOrWhiteSpace(redisOptions.ConnectionString))
     {
         logger.LogInformation("Redis caching disabled (Redis:Enabled=false or no ConnectionString); running without a cache.");
-        return null;
+        return new RedisConnectionHolder(null);
     }
 
     try
@@ -109,12 +109,13 @@ builder.Services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer?>(sp =>
         var config = ParseRedisConnectionString(redisOptions.ConnectionString);
         config.AbortOnConnectFail = false; // keep retrying in the background instead of throwing
         config.ConnectTimeout = 5000;
-        return StackExchange.Redis.ConnectionMultiplexer.Connect(config);
+        var multiplexer = StackExchange.Redis.ConnectionMultiplexer.Connect(config);
+        return new RedisConnectionHolder(multiplexer);
     }
     catch (Exception ex)
     {
         logger.LogWarning(ex, "Could not connect to Redis at startup; running without a cache.");
-        return null;
+        return new RedisConnectionHolder(null);
     }
 });
 builder.Services.AddSingleton<ICacheService, RedisCacheService>();
