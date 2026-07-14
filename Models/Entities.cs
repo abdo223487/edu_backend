@@ -92,8 +92,15 @@ public class Student
     public int GroupId { get; set; }
     [ForeignKey(nameof(GroupId))] public Group? Group { get; set; }
     public int SchoolYear { get; set; }
-    public bool IsSuspended { get; set; }
-    public bool IsCancelled { get; set; }
+
+    /// <summary>
+    /// PER-TENANT FIX: suspend/cancel used to live here as a single flag on the
+    /// Student itself, which meant a student suspended/cancelled by ONE teacher
+    /// (e.g. their original/legacy group) came back suspended/cancelled for
+    /// EVERY OTHER teacher they're also linked to, even though teachers are
+    /// otherwise fully isolated tenants. That status now lives per-relationship
+    /// on StudentGroupMembership.IsSuspended/IsCancelled instead -- see there.
+    /// </summary>
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public string? RefreshToken { get; set; }
     public DateTime? RefreshTokenExpiry { get; set; }
@@ -128,6 +135,17 @@ public class StudentGroupMembership
     public int GroupId { get; set; }
     [ForeignKey(nameof(GroupId))] public Group? Group { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// PER-TENANT STATUS: suspend/cancel is a decision made by ONE teacher about
+    /// their own relationship with this student, so it lives on the membership
+    /// row (scoped to Group -> TeacherId) instead of on Student itself. A
+    /// student suspended/cancelled by Teacher A stays perfectly normal/active
+    /// for Teacher B -- teachers are separate tenants and one's decision about
+    /// a shared student must never affect the other.
+    /// </summary>
+    public bool IsSuspended { get; set; }
+    public bool IsCancelled { get; set; }
 }
 
 /// <summary>History log for suspend/reactivate/cancel/delete actions on a student.</summary>

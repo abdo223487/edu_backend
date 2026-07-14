@@ -69,7 +69,14 @@ public class AuthController : ControllerBase
 
         if (student != null && BCryptVerify(request.Password, student.PasswordHash))
         {
-            if (student.IsSuspended || student.IsCancelled)
+            // PER-TENANT FIX: suspend/cancel is now a per-teacher relationship
+            // (StudentGroupMembership.IsSuspended/IsCancelled), not a single
+            // flag on the student. A student suspended by ONE teacher must
+            // still be able to log in and use their OTHER teachers normally —
+            // only block login entirely if every single relationship they
+            // have is suspended/cancelled (or they have none at all).
+            var groupMemberships = await GetGroupMembershipsAsync(student.Id);
+            if (groupMemberships.Count == 0)
                 return Unauthorized(new { message = "Account is suspended or cancelled." });
 
             // IgnoreQueryFilters(): same reasoning as the Students.IgnoreQueryFilters()
@@ -79,8 +86,6 @@ public class AuthController : ControllerBase
                 .Where(s => s.StudentId == student.Id)
                 .Select(s => s.UnitId)
                 .ToListAsync();
-
-            var groupMemberships = await GetGroupMembershipsAsync(student.Id);
 
             var access = _tokens.CreateAccessToken(
                 student.Id.ToString(),
@@ -182,7 +187,7 @@ public class AuthController : ControllerBase
     private async Task<List<(int TeacherId, int GroupId)>> GetGroupMembershipsAsync(int studentId)
     {
         var memberships = await _db.StudentGroupMemberships.IgnoreQueryFilters()
-            .Where(m => m.StudentId == studentId)
+            .Where(m => m.StudentId == studentId && !m.IsSuspended && !m.IsCancelled)
             .Select(m => new { m.GroupId, TeacherId = m.Group!.TeacherId })
             .ToListAsync();
 

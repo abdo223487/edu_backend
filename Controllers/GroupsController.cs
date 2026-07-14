@@ -45,8 +45,13 @@ public class GroupsController : ControllerBase
             var query = _db.Groups.AsNoTracking().AsQueryable();
             if (schoolYear.HasValue) query = query.Where(g => g.SchoolYear == schoolYear.Value);
 
+            // COUNT FIX: g.Students is the LEGACY FK-only collection (Student.GroupId),
+            // which misses anyone linked to this group only via StudentGroupMembership
+            // (e.g. a student added while already belonging to another teacher). Count
+            // distinct StudentIds in the membership table instead, which is the source
+            // of truth for "who's actually in this group" post multi-tenant-membership.
             return await query
-                .Select(g => new { groupId = g.Id, name = g.Name, schoolYear = g.SchoolYear, studentCount = g.Students.Count })
+                .Select(g => new { groupId = g.Id, name = g.Name, schoolYear = g.SchoolYear, studentCount = _db.StudentGroupMemberships.Count(m => m.GroupId == g.Id) })
                 .ToListAsync();
         });
 

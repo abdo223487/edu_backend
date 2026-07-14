@@ -65,9 +65,6 @@ public class StudentsController : ControllerBase
 
         if (existing != null)
         {
-            if (existing.IsSuspended || existing.IsCancelled)
-                return BadRequest(new { message = "A student with this phone number already exists and their account is suspended or cancelled." });
-
             var alreadyLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
                 .AnyAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
             if (!alreadyLinked)
@@ -147,8 +144,6 @@ public class StudentsController : ControllerBase
             .FirstOrDefaultAsync(s => s.PhoneNumber == request.PhoneNumber);
         if (student == null)
             return NotFound(new { message = "No student with this phone number exists yet. Use Create instead." });
-        if (student.IsSuspended || student.IsCancelled)
-            return BadRequest(new { message = "This student's account is suspended or cancelled." });
 
         var alreadyLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
             .AnyAsync(m => m.StudentId == student.Id && m.Group!.TeacherId == group.TeacherId);
@@ -395,13 +390,6 @@ public class StudentsController : ControllerBase
 
                 if (existing != null)
                 {
-                    if (existing.IsSuspended || existing.IsCancelled)
-                    {
-                        failed++;
-                        results.Add(new ImportStudentsRowResult(r, name, phone, "Failed", "A student with this phone number already exists and their account is suspended or cancelled.", existing.Id));
-                        continue;
-                    }
-
                     var alreadyLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
                         .AnyAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
                     if (!alreadyLinked)
@@ -545,24 +533,32 @@ public class StudentsController : ControllerBase
     public async Task<IActionResult> GetAll(
         [FromQuery] int? schoolYear, [FromQuery] int? groupId,
         [FromQuery] int p = 1, [FromQuery] string? q = null)
-        => await ListStudents(s => !s.IsSuspended && !s.IsCancelled, schoolYear, groupId, p, q);
+        => await ListStudents(StudentStatusFilter.Active, schoolYear, groupId, p, q);
 
     // GET Students/suspended?schoolYear=..&p=..&q=..
     [HttpGet("suspended")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetSuspended(
         [FromQuery] int? schoolYear, [FromQuery] int p = 1, [FromQuery] string? q = null)
-        => await ListStudents(s => s.IsSuspended, schoolYear, null, p, q);
+        => await ListStudents(StudentStatusFilter.Suspended, schoolYear, null, p, q);
 
     // GET Students/cancelled?schoolYear=..&p=..&q=..
     [HttpGet("cancelled")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetCancelled(
         [FromQuery] int? schoolYear, [FromQuery] int p = 1, [FromQuery] string? q = null)
-        => await ListStudents(s => s.IsCancelled, schoolYear, null, p, q);
+        => await ListStudents(StudentStatusFilter.Cancelled, schoolYear, null, p, q);
 
+    private enum StudentStatusFilter { Active, Suspended, Cancelled }
+
+    // PER-TENANT FIX: statusFilter now runs against StudentGroupMembership
+    // (IsSuspended/IsCancelled per teacher-relationship), not against a global
+    // flag on Student -- StudentGroupMemberships is already tenant-scoped via
+    // its own query filter (Group.TeacherId == current tenant), so ".Any(...)"
+    // here only ever looks at THIS teacher's relationship with the student,
+    // never a status set by some other teacher.
     private async Task<IActionResult> ListStudents(
-        System.Linq.Expressions.Expression<Func<Student, bool>> statusFilter,
+        StudentStatusFilter statusFilter,
         int? schoolYear, int? groupId, int p, string? q, [System.Runtime.CompilerServices.CallerMemberName] string caller = "")
     {
         var tenantId = _tenant.CurrentTenantId;
@@ -573,29 +569,42 @@ public class StudentsController : ControllerBase
             // MULTI-TENANT: filter/display by the Group under the CURRENT tenant, not
             // necessarily the student's legacy single Group (which may belong to a
             // different teacher if the student is also linked elsewhere).
-            var query = _db.Students.AsNoTracking().Where(statusFilter);
+            IQueryable<Student> query = statusFilter switch
+            {
+                StudentStatusFilter.Suspended => _db.Students.AsNoTracking().Where(s => s.GroupMemberships.Any(m => m.IsSuspended)),
+                StudentStatusFilter.Cancelled => _db.Students.AsNoTracking().Where(s => s.GroupMemberships.Any(m => m.IsCancelled)),
+                _ => _db.Students.AsNoTracking().Where(s => s.GroupMemberships.Any(m => !m.IsSuspended && !m.IsCancelled)),
+            };
             if (groupId.HasValue)
                 query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
             else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
             if (!string.IsNullOrWhiteSpace(q)) query = query.Where(s => s.Name.Contains(q) || s.PhoneNumber.Contains(q));
 
-            // ToListItem only reads Id/Name/PhoneNumber/UserName/GroupId/IsSuspended/
-            // IsCancelled -- project those columns at the SQL level so we don't pull
-            // PasswordHash, RefreshToken, ParentPhoneNumber, etc. off the wire.
             var students = await query
                 .OrderBy(s => s.Name)
                 .Skip((p - 1) * PagingDefaults.PageSize)
                 .Take(PagingDefaults.PageSize)
-                .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, s.IsSuspended, s.IsCancelled })
+                .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId })
                 .ToListAsync();
 
-            var tenantGroupNames = await _db.GetTenantGroupNamesAsync(students.Select(s => s.Id));
+            var studentIds = students.Select(s => s.Id).ToList();
+            var tenantGroupNames = await _db.GetTenantGroupNamesAsync(studentIds);
+            // A student has at most one membership per tenant (enforced in code --
+            // see StudentGroupMembership docs), so this is a safe 1:1 lookup.
+            var tenantMemberships = await _db.StudentGroupMemberships.AsNoTracking()
+                .Where(m => studentIds.Contains(m.StudentId))
+                .Select(m => new { m.StudentId, m.IsSuspended, m.IsCancelled })
+                .ToDictionaryAsync(m => m.StudentId);
+
             return students.Select(s =>
             {
                 var groupName = tenantGroupNames.GetValueOrDefault(s.Id);
-                var status = s.IsCancelled ? "Cancelled" : s.IsSuspended ? "Suspended" : "Active";
+                tenantMemberships.TryGetValue(s.Id, out var membership);
+                var isSuspended = membership?.IsSuspended ?? false;
+                var isCancelled = membership?.IsCancelled ?? false;
+                var status = isCancelled ? "Cancelled" : isSuspended ? "Suspended" : "Active";
                 return new StudentListItem(
-                    s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, groupName, s.IsSuspended, s.IsCancelled,
+                    s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, groupName, isSuspended, isCancelled,
                     status, null);
             }).ToList();
         });
@@ -614,7 +623,10 @@ public class StudentsController : ControllerBase
     [HttpGet("count")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> Count()
-        => Ok(await _db.Students.CountAsync(s => !s.IsCancelled));
+        // PER-TENANT FIX: "cancelled" is per teacher-membership now, so count only
+        // students whose membership under THIS tenant isn't cancelled -- a student
+        // cancelled by a different teacher must still count here.
+        => Ok(await _db.Students.CountAsync(s => s.GroupMemberships.Any(m => !m.IsCancelled)));
 
     // GET Students/{id}
     [HttpGet("{id:int}")]
@@ -628,9 +640,12 @@ public class StudentsController : ControllerBase
 
         // MULTI-TENANT: this student's Group/GroupId under the CALLER's own
         // tenant specifically, not necessarily their legacy single Group.
+        // isSuspended/isCancelled also come from THIS membership row -- see
+        // StudentGroupMembership -- so a status set by a different teacher
+        // never leaks into this teacher's view of the student.
         var tenantMembership = await _db.StudentGroupMemberships.AsNoTracking()
             .Where(m => m.StudentId == id)
-            .Select(m => new { m.GroupId, GroupName = m.Group!.Name })
+            .Select(m => new { m.GroupId, GroupName = m.Group!.Name, m.IsSuspended, m.IsCancelled })
             .FirstOrDefaultAsync();
 
         return Ok(new
@@ -645,8 +660,8 @@ public class StudentsController : ControllerBase
             groupId = tenantMembership?.GroupId ?? student.GroupId,
             groupName = tenantMembership?.GroupName,
             schoolYear = student.SchoolYear,
-            isSuspended = student.IsSuspended,
-            isCancelled = student.IsCancelled,
+            isSuspended = tenantMembership?.IsSuspended ?? false,
+            isCancelled = tenantMembership?.IsCancelled ?? false,
             createdAt = student.CreatedAt,
             // Client reads this as `data['subscribedUnits'] as List` then `unit['id']` per item.
             subscribedUnits = subs.Select(unitId => new { id = unitId })
@@ -765,7 +780,14 @@ public class StudentsController : ControllerBase
         var student = await _db.Students.FirstOrDefaultAsync(e => e.Id == (request.StudentId));
         if (student == null) return NotFound(new { message = "Student not found." });
 
-        student.IsSuspended = true;
+        // PER-TENANT FIX: suspend THIS teacher's membership row only -- already
+        // tenant-scoped via StudentGroupMembership's query filter (Group.TeacherId
+        // == current tenant), so this can never touch another teacher's relationship
+        // with the same student.
+        var membership = await _db.StudentGroupMemberships.FirstOrDefaultAsync(m => m.StudentId == request.StudentId);
+        if (membership == null) return NotFound(new { message = "This student isn't linked to one of your groups." });
+
+        membership.IsSuspended = true;
         _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Suspended", Reason = request.Comment });
         await _db.SaveChangesAsync();
         await InvalidateStudentsCacheAsync();
@@ -780,8 +802,11 @@ public class StudentsController : ControllerBase
         var student = await _db.Students.FirstOrDefaultAsync(e => e.Id == (request.StudentId));
         if (student == null) return NotFound(new { message = "Student not found." });
 
-        student.IsSuspended = false;
-        student.IsCancelled = false;
+        var membership = await _db.StudentGroupMemberships.FirstOrDefaultAsync(m => m.StudentId == request.StudentId);
+        if (membership == null) return NotFound(new { message = "This student isn't linked to one of your groups." });
+
+        membership.IsSuspended = false;
+        membership.IsCancelled = false;
         _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Reactivated", Reason = request.Comment });
         await _db.SaveChangesAsync();
         await InvalidateStudentsCacheAsync();
@@ -796,7 +821,9 @@ public class StudentsController : ControllerBase
     // Now this is a SOFT delete: same IsCancelled flag the rest of the app
     // (GetCancelled / Reactivate) already expects, so a "cancelled" student
     // behaves exactly like a suspended one — listed under Students/cancelled
-    // and restorable with Students/reactivate.
+    // and restorable with Students/reactivate. PER-TENANT: only cancels THIS
+    // teacher's own membership -- the student stays completely normal for any
+    // other teacher they're linked to.
     [HttpPost("delete")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> Delete([FromQuery] int studentId)
@@ -804,7 +831,10 @@ public class StudentsController : ControllerBase
         var student = await _db.Students.FirstOrDefaultAsync(e => e.Id == (studentId));
         if (student == null) return NotFound(new { message = "Student not found." });
 
-        student.IsCancelled = true;
+        var membership = await _db.StudentGroupMemberships.FirstOrDefaultAsync(m => m.StudentId == studentId);
+        if (membership == null) return NotFound(new { message = "This student isn't linked to one of your groups." });
+
+        membership.IsCancelled = true;
         _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Cancelled", Reason = null });
         await _db.SaveChangesAsync();
         await InvalidateStudentsCacheAsync();
@@ -1219,11 +1249,11 @@ public class StudentsController : ControllerBase
         }
     }
 
-    private static StudentListItem ToListItem(Student s, string? groupName)
+    private static StudentListItem ToListItem(Student s, string? groupName, bool isSuspended = false, bool isCancelled = false)
     {
-        var status = s.IsCancelled ? "Cancelled" : s.IsSuspended ? "Suspended" : "Active";
+        var status = isCancelled ? "Cancelled" : isSuspended ? "Suspended" : "Active";
         return new(
-            s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, groupName, s.IsSuspended, s.IsCancelled,
+            s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId, groupName, isSuspended, isCancelled,
             status, null);
     }
 }

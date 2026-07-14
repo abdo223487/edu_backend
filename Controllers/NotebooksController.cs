@@ -94,7 +94,10 @@ public class NotebooksController : ControllerBase
 
         var groups = await _db.Groups.AsNoTracking()
             .Where(g => notebook.GroupIds.Contains(g.Id))
-            .Select(g => new { id = g.Id, name = g.Name, studentCount = g.Students.Count })
+            // COUNT FIX: see GroupsController -- use the membership join table, not the
+            // legacy Group.Students FK-only collection, so students linked to this group
+            // only via StudentGroupMembership are actually counted.
+            .Select(g => new { id = g.Id, name = g.Name, studentCount = _db.StudentGroupMemberships.Count(m => m.GroupId == g.Id) })
             .ToListAsync();
 
         var units = await _db.Units.AsNoTracking()
@@ -124,13 +127,21 @@ public class NotebooksController : ControllerBase
         var studentIds = payments.Select(p => p.StudentId).Distinct().ToList();
         var students = await _db.Students.AsNoTracking()
             .Where(s => studentIds.Contains(s.Id))
-            .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.IsCancelled, s.IsSuspended })
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber })
             .ToDictionaryAsync(s => s.Id);
         var groupNames = await _db.GetTenantGroupNamesAsync(studentIds);
+        // PER-TENANT FIX: status (suspended/cancelled) is now per teacher-group
+        // membership, not a global flag on Student -- look it up scoped to the
+        // caller's own tenant (StudentGroupMemberships is already tenant-filtered).
+        var statusByStudent = await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => studentIds.Contains(m.StudentId))
+            .Select(m => new { m.StudentId, m.IsSuspended, m.IsCancelled })
+            .ToDictionaryAsync(m => m.StudentId);
 
         var result = payments.Select(p =>
         {
             students.TryGetValue(p.StudentId, out var s);
+            statusByStudent.TryGetValue(p.StudentId, out var st);
             var totalPaid = p.DiscountedPrice ?? p.Price;
 
             return new
@@ -147,7 +158,7 @@ public class NotebooksController : ControllerBase
                     name = s.Name,
                     groupName = groupNames.GetValueOrDefault(s.Id),
                     phoneNumber = s.PhoneNumber,
-                    status = s.IsCancelled ? "ملغي" : (s.IsSuspended ? "موقوف" : "نشط")
+                    status = st?.IsCancelled == true ? "ملغي" : (st?.IsSuspended == true ? "موقوف" : "نشط")
                 }
             };
         });
