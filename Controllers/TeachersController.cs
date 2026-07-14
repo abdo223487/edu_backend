@@ -451,6 +451,15 @@ public class TeachersController : ControllerBase
         var teacher = await _db.Teachers.IgnoreQueryFilters().FirstOrDefaultAsync(t => t.Id == id && t.TenantOwnerId == null);
         if (teacher == null) return NotFound(new { message = "Tenant-root teacher not found." });
 
+        // SAFETY GUARD: this endpoint deletes any tenant-root teacher (TenantOwnerId
+        // == null), and a SuperAdmin also has TenantOwnerId == null, so without this
+        // check a SuperAdmin (even themselves) could delete the account -- including
+        // the last remaining one -- with zero recovery path other than manual DB/SQL
+        // surgery, since DbSeeder only (re)creates "admin" when the Teachers table is
+        // completely empty (see DbSeeder.Seed).
+        if (teacher.Role == Roles.SuperAdmin)
+            return BadRequest(new { message = "Cannot delete a SuperAdmin account." });
+
         await using var tx = await _db.Database.BeginTransactionAsync();
         try
         {
