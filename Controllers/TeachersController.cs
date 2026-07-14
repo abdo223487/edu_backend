@@ -437,6 +437,7 @@ public class TeachersController : ControllerBase
     // This is irreversible -- unlike /suspend, there is no undo.
     [HttpDelete("superadmin/teachers/{id:int}")]
     [Authorize(Roles = Roles.SuperAdmin)]
+<<<<<<< HEAD
     public Task<IActionResult> SuperAdminDeleteTeacher(int id) => DeleteTeacherCore(id);
 
     // POST api/Teachers/superadmin/teachers/{id}/delete
@@ -447,6 +448,9 @@ public class TeachersController : ControllerBase
     public Task<IActionResult> SuperAdminDeleteTeacherPost(int id) => DeleteTeacherCore(id);
 
     private async Task<IActionResult> DeleteTeacherCore(int id)
+=======
+    public async Task<IActionResult> SuperAdminDeleteTeacher(int id)
+>>>>>>> db9e947ada99501609d4fa1514c925ae630489e0
     {
         var teacher = await _db.Teachers.IgnoreQueryFilters().FirstOrDefaultAsync(t => t.Id == id && t.TenantOwnerId == null);
         if (teacher == null) return NotFound(new { message = "Tenant-root teacher not found." });
