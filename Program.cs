@@ -302,6 +302,12 @@ app.UseStaticFiles(); // no longer serves /uploads/** (now on Cloudflare R2) —
 app.UseCors();
 
 app.UseAuthentication();
+
+// SUPERADMIN CONTROL: must run after UseAuthentication (needs context.User) and
+// before UseAuthorization, so a suspended tenant's request is rejected before
+// it ever reaches a controller action -- see TenantSuspensionMiddleware.
+app.UseMiddleware<TenantSuspensionMiddleware>();
+
 app.UseAuthorization();
 
 app.MapControllers();

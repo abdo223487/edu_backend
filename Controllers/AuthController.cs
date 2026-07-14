@@ -38,6 +38,19 @@ public class AuthController : ControllerBase
         var teacher = await _db.Teachers.FirstOrDefaultAsync(t => t.UserName == request.Username);
         if (teacher != null && BCryptVerify(request.Password, teacher.PasswordHash))
         {
+            // SUPERADMIN CONTROL: suspension always lives on the tenant-root
+            // teacher row -- staff (Assistant/AssistantAdmin) share their
+            // root's suspension automatically since they act on its tenant.
+            if (teacher.Role != Roles.SuperAdmin)
+            {
+                var rootSuspended = teacher.TenantOwnerId.HasValue
+                    ? await _db.Teachers.Where(t => t.Id == teacher.TenantOwnerId.Value).Select(t => t.IsSuspended).FirstOrDefaultAsync()
+                    : teacher.IsSuspended;
+
+                if (rootSuspended)
+                    return Unauthorized(new { message = "This account has been suspended by the administrator." });
+            }
+
             var roles = teacher.Role == Roles.AssistantAdmin
                 ? new[] { Roles.AssistantAdmin, Roles.Teacher }
                 : new[] { teacher.Role };
@@ -186,19 +199,35 @@ public class AuthController : ControllerBase
     /// </summary>
     private async Task<List<(int TeacherId, int GroupId)>> GetGroupMembershipsAsync(int studentId)
     {
+        // SUPERADMIN CONTROL: a membership under a teacher the SuperAdmin has
+        // suspended is left out of the snapshot entirely -- same effect as
+        // TenantSuspensionMiddleware blocking that tenant mid-session, but
+        // applied up front so a suspended teacher's students don't even get a
+        // "groupIds" entry for them at login/refresh.
         var memberships = await _db.StudentGroupMemberships.IgnoreQueryFilters()
             .Where(m => m.StudentId == studentId && !m.IsSuspended && !m.IsCancelled)
             .Select(m => new { m.GroupId, TeacherId = m.Group!.TeacherId })
             .ToListAsync();
-
-        var result = memberships.Select(m => (m.TeacherId, m.GroupId)).ToList();
 
         var legacy = await _db.Students.IgnoreQueryFilters()
             .Where(s => s.Id == studentId)
             .Select(s => new { s.GroupId, TeacherId = s.Group!.TeacherId })
             .FirstOrDefaultAsync();
 
-        if (legacy != null && !result.Any(r => r.TeacherId == legacy.TeacherId))
+        var candidateTeacherIds = memberships.Select(m => m.TeacherId)
+            .Concat(legacy != null ? new[] { legacy.TeacherId } : Array.Empty<int>())
+            .Distinct().ToList();
+
+        var suspendedTeacherIds = (await _db.Teachers
+            .Where(t => candidateTeacherIds.Contains(t.Id) && t.IsSuspended)
+            .Select(t => t.Id)
+            .ToListAsync()).ToHashSet();
+
+        var result = memberships
+            .Where(m => !suspendedTeacherIds.Contains(m.TeacherId))
+            .Select(m => (m.TeacherId, m.GroupId)).ToList();
+
+        if (legacy != null && !suspendedTeacherIds.Contains(legacy.TeacherId) && !result.Any(r => r.TeacherId == legacy.TeacherId))
             result.Add((legacy.TeacherId, legacy.GroupId));
 
         return result;

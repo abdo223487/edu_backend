@@ -67,6 +67,24 @@ public class Teacher
     /// screen client-side. Always send a non-null value for root teachers.
     /// </summary>
     public string? ImageUrl { get; set; }
+
+    /// <summary>
+    /// SUPERADMIN CONTROL: when true, this teacher (tenant root OR staff, since
+    /// staff act on behalf of TenantOwnerId's tenant) is blocked from doing
+    /// anything -- login fails, and any still-valid JWT/X-TenantId request for
+    /// this tenant is rejected by TenantSuspensionMiddleware -- WITHOUT deleting
+    /// any of their data. Toggled via SuperAdminSetTeacherSuspension. Only ever
+    /// meaningful on a tenant-root account (TenantOwnerId == null); the
+    /// suspension check always resolves to the ROOT teacher's flag, so
+    /// suspending a root teacher also blocks all of their staff automatically.
+    /// </summary>
+    public bool IsSuspended { get; set; }
+
+    /// <summary>When IsSuspended was last set to true; null while active.</summary>
+    public DateTime? SuspendedAt { get; set; }
+
+    /// <summary>Optional note from the SuperAdmin explaining the suspension.</summary>
+    public string? SuspensionReason { get; set; }
 }
 
 public class Group

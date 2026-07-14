@@ -66,6 +66,35 @@ public class ImportFromExcelForm
 public record ImportStudentsRowResult(int Row, string? Name, string? PhoneNumber, string Status, string Message, int? StudentId);
 public record ImportStudentsResponse(int TotalRows, int Created, int Linked, int Failed, List<ImportStudentsRowResult> Results);
 
+// POST Students/import/preview (multipart/form-data: file) — returns the
+// sheet's ACTUAL columns (1-based index, raw header text, a few sample
+// values) plus a best-effort suggested field mapping, so a caller (e.g. a
+// SuperAdmin's admin panel) can show the sheet to a person and let them
+// confirm/correct which column means what BEFORE importing — instead of the
+// backend guessing silently and failing if the sheet's layout/labels don't
+// match what's expected.
+public record ImportColumnPreview(int Index, string Header, List<string> SampleValues);
+public record ImportPreviewResponse(List<ImportColumnPreview> Columns, Dictionary<string, int> SuggestedMapping, string[] AvailableFields);
+
+// POST Students/import/mapped (multipart/form-data: file, groupId?, mapping,
+// hasHeaderRow?) — same bulk-import as Students/import, but column meaning
+// comes ENTIRELY from `mapping` (a JSON object of fieldName -> 1-based column
+// number, e.g. {"Name":2,"PhoneNumber":1,"GroupName":3}) instead of matching
+// header text. This makes the import fully dynamic: it works no matter what
+// order the sheet's columns are in, what language/wording the headers use, or
+// even if there's no usable header row at all (set hasHeaderRow=false and the
+// mapping still applies — row 1 is then treated as real data, not a header).
+// Valid field names: Name, PhoneNumber, ParentPhoneNumber, UserName,
+// Password, GroupId, GroupName (same set Students/import/preview reports via
+// AvailableFields). Name and PhoneNumber are required in the mapping.
+public class ImportMappedForm
+{
+    public Microsoft.AspNetCore.Http.IFormFile File { get; set; } = default!;
+    public int? GroupId { get; set; }
+    public string Mapping { get; set; } = "{}";
+    public bool? HasHeaderRow { get; set; }
+}
+
 // POST Students/import/google-sheet body: { url, groupId }
 // `url` is the normal Google Sheets share/edit link (or a Google Form's
 // RESPONSES sheet link — not the form's own /viewform link); `groupId` is

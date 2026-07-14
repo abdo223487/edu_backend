@@ -266,11 +266,158 @@ public class StudentsController : ControllerBase
         return await ImportStudentsFromWorkbookStream(stream, request.GroupId);
     }
 
+    // POST Students/import/preview  multipart/form-data: { file }
+    // DYNAMIC SHEET MAPPING (step 1/2): reads the uploaded sheet's ACTUAL
+    // columns — 1-based index, raw header text, up to 5 sample values per
+    // column — plus a best-effort suggested mapping using the exact same
+    // header-matching rules as Students/import, WITHOUT importing anything
+    // yet. Meant for a UI (e.g. the SuperAdmin panel) that shows the sheet to
+    // a person and lets them confirm or fix which column means what — since
+    // a sheet the person is handed may use column order or headers the
+    // built-in auto-detection doesn't recognize. Feed the confirmed mapping
+    // into Students/import/mapped to actually run the import.
+    [HttpPost("import/preview")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
+    [RequestSizeLimit(10_000_000)]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> PreviewImportSheet([FromForm] ImportFromExcelForm form)
+    {
+        var file = form.File;
+        if (file == null || file.Length == 0)
+            return BadRequest(new { message = "No file uploaded." });
+
+        var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+        if (ext != ".xlsx")
+            return BadRequest(new { message = "Only .xlsx files are supported." });
+
+        using var stream = new MemoryStream();
+        await file.CopyToAsync(stream);
+        stream.Position = 0;
+
+        try
+        {
+            using var workbook = new XLWorkbook(stream);
+            var ws = workbook.Worksheets.First();
+            var lastCol = ws.LastColumnUsed()?.ColumnNumber() ?? 0;
+            var lastRow = ws.LastRowUsed()?.RowNumber() ?? 0;
+            if (lastCol == 0 || lastRow == 0)
+                return BadRequest(new { message = "The sheet appears to be empty." });
+
+            var headerRow = ws.Row(1);
+            var columns = new List<ImportColumnPreview>();
+            var normalizedHeaders = new Dictionary<string, int>();
+
+            for (var c = 1; c <= lastCol; c++)
+            {
+                var headerText = headerRow.Cell(c).GetString().Trim();
+                var normalized = NormalizeHeader(headerText);
+                if (!string.IsNullOrEmpty(normalized) && !normalizedHeaders.ContainsKey(normalized))
+                    normalizedHeaders[normalized] = c;
+
+                var sample = new List<string>();
+                for (var r = 2; r <= Math.Min(lastRow, 6); r++)
+                {
+                    var v = ws.Row(r).Cell(c).GetString().Trim();
+                    if (!string.IsNullOrEmpty(v)) sample.Add(v);
+                }
+
+                columns.Add(new ImportColumnPreview(c, headerText, sample));
+            }
+
+            int GetCol(params string[] names) =>
+                names.Select(NormalizeHeader)
+                     .Select(n => normalizedHeaders.TryGetValue(n, out var c) ? c : 0)
+                     .FirstOrDefault(c => c != 0);
+
+            var suggested = new Dictionary<string, int>();
+            void Suggest(string field, params string[] names)
+            {
+                var c = GetCol(names);
+                if (c != 0) suggested[field] = c;
+            }
+            Suggest("Name", "Name", "StudentName", "الاسم", "اسم", "أسم", "إسم", "اسم الطالب", "الطالب");
+            Suggest("PhoneNumber", "PhoneNumber", "Phone", "رقم الهاتف", "رقم التليفون", "رقم الموبايل",
+                "الهاتف", "التليفون", "الموبايل", "رقم الطالب", "موبايل الطالب", "هاتف الطالب");
+            Suggest("ParentPhoneNumber", "ParentPhoneNumber", "ParentPhone", "رقم ولي الأمر", "رقم ولى الامر",
+                "هاتف ولي الأمر", "موبايل ولي الأمر", "تليفون ولي الأمر", "رقم الوالد", "رقم الأب");
+            Suggest("UserName", "UserName", "Username", "اسم المستخدم", "أسم المستخدم", "يوزر");
+            Suggest("Password", "Password", "كلمة المرور", "كلمة السر", "الرقم السري", "باسورد");
+            Suggest("GroupId", "GroupId", "معرف المجموعة", "رقم المجموعة");
+            Suggest("GroupName", "GroupName", "Group", "المجموعة", "الجروب", "اسم المجموعة", "أسم المجموعة", "الفصل", "السنتر");
+
+            return Ok(new ImportPreviewResponse(
+                columns,
+                suggested,
+                new[] { "Name", "PhoneNumber", "ParentPhoneNumber", "UserName", "Password", "GroupId", "GroupName" }));
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { message = "Could not read the Excel file. Make sure it's a valid .xlsx sheet.", detail = ex.Message });
+        }
+    }
+
+    // POST Students/import/mapped  multipart/form-data: { file, groupId?, mapping, hasHeaderRow? }
+    // DYNAMIC SHEET MAPPING (step 2/2): identical import logic to
+    // Students/import, except column meaning comes entirely from `mapping` —
+    // a JSON object of fieldName -> 1-based column number (e.g.
+    // {"Name":2,"PhoneNumber":1}) — instead of matching header text. This
+    // makes the backend fully dynamic with respect to the sheet: it adapts to
+    // whatever column order/labels the sheet actually has (even the exact
+    // opposite of what's normally expected), because the caller is telling it
+    // explicitly what each column is rather than asking it to guess. Set
+    // hasHeaderRow=false if row 1 is real data (no header row at all) — the
+    // mapping still applies either way. See Students/import/preview to get
+    // the sheet's columns/suggested mapping first.
+    [HttpPost("import/mapped")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
+    [RequestSizeLimit(10_000_000)]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> ImportFromExcelMapped([FromForm] ImportMappedForm form)
+    {
+        var file = form.File;
+        if (file == null || file.Length == 0)
+            return BadRequest(new { message = "No file uploaded." });
+
+        var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+        if (ext != ".xlsx")
+            return BadRequest(new { message = "Only .xlsx files are supported." });
+
+        Dictionary<string, int> mapping;
+        try
+        {
+            mapping = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, int>>(form.Mapping) ?? new();
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { message = "mapping must be a JSON object of fieldName -> columnNumber, e.g. {\"Name\":2,\"PhoneNumber\":1}.", detail = ex.Message });
+        }
+
+        if (mapping.Count == 0)
+            return BadRequest(new { message = "mapping is required — call Students/import/preview first to see the sheet's actual columns." });
+
+        using var stream = new MemoryStream();
+        await file.CopyToAsync(stream);
+        stream.Position = 0;
+        return await ImportStudentsFromWorkbookStream(stream, form.GroupId, mapping, form.HasHeaderRow ?? true);
+    }
+
     // Shared core for Students/import and Students/import/google-sheet: both
     // endpoints just get an .xlsx byte stream by different means and hand it
     // here. Everything else — column mapping, per-row GroupId/GroupName
     // resolution, and the phone-number dedupe — is identical either way.
-    private async Task<IActionResult> ImportStudentsFromWorkbookStream(Stream xlsxStream, int? groupId)
+    //
+    // DYNAMIC MAPPING: `explicitColumnMap` (field name -> 1-based column
+    // number) lets a caller (see Students/import/mapped) tell the backend
+    // exactly what each column means, instead of relying on header-text
+    // auto-detection. Used when the SuperAdmin (or teacher) previews a sheet
+    // whose columns are in an unexpected order or use headers the built-in
+    // Arabic/English synonym list doesn't recognize — the backend adapts to
+    // WHATEVER layout the sheet actually has, rather than requiring the sheet
+    // to match a fixed expected layout. When null (the normal case), header
+    // auto-detection runs exactly as before.
+    private async Task<IActionResult> ImportStudentsFromWorkbookStream(
+        Stream xlsxStream, int? groupId,
+        Dictionary<string, int>? explicitColumnMap = null, bool hasHeaderRow = true)
     {
         // Tenant-scoped by the standard Groups query filter — a teacher can
         // only ever resolve their own groups here, by id or by name.
@@ -294,43 +441,66 @@ public class StudentsController : ControllerBase
             var results = new List<ImportStudentsRowResult>();
             int created = 0, linked = 0, failed = 0;
 
-            // Map header name -> column index from row 1. Matching is done on
-            // a NORMALIZED form of the header (see NormalizeHeader) so that
-            // Arabic spelling variants of the same word — أسم / اسم / الاسم,
-            // إيميل / ايميل, رقم الهاتف / رقم الموبايل / تليفون — and
-            // stray spaces/diacritics all resolve to the same column, instead
-            // of requiring the teacher's sheet to use one exact spelling.
-            var headerRow = ws.Row(1);
-            var columns = new Dictionary<string, int>();
-            foreach (var cell in headerRow.CellsUsed())
+            int nameCol, phoneCol, parentPhoneCol, userNameCol, passwordCol, groupIdCol, groupNameCol;
+
+            if (explicitColumnMap != null)
             {
-                var header = NormalizeHeader(cell.GetString());
-                if (!string.IsNullOrEmpty(header) && !columns.ContainsKey(header))
-                    columns[header] = cell.Address.ColumnNumber;
+                // DYNAMIC MAPPING: columns are whatever the caller says they are —
+                // no header text is inspected at all, so a reversed/relabeled/
+                // language-mismatched sheet still imports correctly as long as the
+                // mapping itself is right.
+                int Col(string field) => explicitColumnMap.TryGetValue(field, out var c) ? c : 0;
+                nameCol = Col("Name");
+                phoneCol = Col("PhoneNumber");
+                parentPhoneCol = Col("ParentPhoneNumber");
+                userNameCol = Col("UserName");
+                passwordCol = Col("Password");
+                groupIdCol = Col("GroupId");
+                groupNameCol = Col("GroupName");
+            }
+            else
+            {
+                // Map header name -> column index from row 1. Matching is done on
+                // a NORMALIZED form of the header (see NormalizeHeader) so that
+                // Arabic spelling variants of the same word — أسم / اسم / الاسم,
+                // إيميل / ايميل, رقم الهاتف / رقم الموبايل / تليفون — and
+                // stray spaces/diacritics all resolve to the same column, instead
+                // of requiring the teacher's sheet to use one exact spelling.
+                var headerRow = ws.Row(1);
+                var columns = new Dictionary<string, int>();
+                foreach (var cell in headerRow.CellsUsed())
+                {
+                    var header = NormalizeHeader(cell.GetString());
+                    if (!string.IsNullOrEmpty(header) && !columns.ContainsKey(header))
+                        columns[header] = cell.Address.ColumnNumber;
+                }
+
+                int GetCol(params string[] names) =>
+                    names.Select(NormalizeHeader)
+                         .Select(n => columns.TryGetValue(n, out var c) ? c : 0)
+                         .FirstOrDefault(c => c != 0);
+
+                nameCol = GetCol("Name", "StudentName", "الاسم", "اسم", "أسم", "إسم", "اسم الطالب", "الطالب");
+                phoneCol = GetCol("PhoneNumber", "Phone", "رقم الهاتف", "رقم التليفون", "رقم الموبايل",
+                    "الهاتف", "التليفون", "الموبايل", "رقم الطالب", "موبايل الطالب", "هاتف الطالب");
+                parentPhoneCol = GetCol("ParentPhoneNumber", "ParentPhone", "رقم ولي الأمر", "رقم ولى الامر",
+                    "هاتف ولي الأمر", "موبايل ولي الأمر", "تليفون ولي الأمر", "رقم الوالد", "رقم الأب");
+                userNameCol = GetCol("UserName", "Username", "اسم المستخدم", "أسم المستخدم", "يوزر");
+                passwordCol = GetCol("Password", "كلمة المرور", "كلمة السر", "الرقم السري", "باسورد");
+                groupIdCol = GetCol("GroupId", "معرف المجموعة", "رقم المجموعة");
+                groupNameCol = GetCol("GroupName", "Group", "المجموعة", "الجروب", "اسم المجموعة", "أسم المجموعة", "الفصل", "السنتر");
             }
 
-            int GetCol(params string[] names) =>
-                names.Select(NormalizeHeader)
-                     .Select(n => columns.TryGetValue(n, out var c) ? c : 0)
-                     .FirstOrDefault(c => c != 0);
-
-            var nameCol = GetCol("Name", "StudentName", "الاسم", "اسم", "أسم", "إسم", "اسم الطالب", "الطالب");
-            var phoneCol = GetCol("PhoneNumber", "Phone", "رقم الهاتف", "رقم التليفون", "رقم الموبايل",
-                "الهاتف", "التليفون", "الموبايل", "رقم الطالب", "موبايل الطالب", "هاتف الطالب");
-            var parentPhoneCol = GetCol("ParentPhoneNumber", "ParentPhone", "رقم ولي الأمر", "رقم ولى الامر",
-                "هاتف ولي الأمر", "موبايل ولي الأمر", "تليفون ولي الأمر", "رقم الوالد", "رقم الأب");
-            var userNameCol = GetCol("UserName", "Username", "اسم المستخدم", "أسم المستخدم", "يوزر");
-            var passwordCol = GetCol("Password", "كلمة المرور", "كلمة السر", "الرقم السري", "باسورد");
-            var groupIdCol = GetCol("GroupId", "معرف المجموعة", "رقم المجموعة");
-            var groupNameCol = GetCol("GroupName", "Group", "المجموعة", "الجروب", "اسم المجموعة", "أسم المجموعة", "الفصل", "السنتر");
-
             if (nameCol == 0 || phoneCol == 0)
-                return BadRequest(new { message = "The sheet must have 'Name' and 'PhoneNumber' columns in the header row." });
+                return BadRequest(new { message = explicitColumnMap != null
+                    ? "The mapping must assign a column to both 'Name' and 'PhoneNumber'."
+                    : "The sheet must have 'Name' and 'PhoneNumber' columns in the header row." });
             if (defaultGroup == null && groupIdCol == 0 && groupNameCol == 0)
                 return BadRequest(new { message = "Provide a default groupId, or add a GroupId/GroupName column to the sheet." });
 
             var lastRow = ws.LastRowUsed()?.RowNumber() ?? 1;
-            for (var r = 2; r <= lastRow; r++)
+            var firstDataRow = hasHeaderRow ? 2 : 1;
+            for (var r = firstDataRow; r <= lastRow; r++)
             {
                 var row = ws.Row(r);
                 if (row.IsEmpty()) continue;
