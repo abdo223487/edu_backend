@@ -306,11 +306,7 @@ app.UseAuthentication();
 // SUPERADMIN CONTROL: must run after UseAuthentication (needs context.User) and
 // before UseAuthorization, so a suspended tenant's request is rejected before
 // it ever reaches a controller action -- see TenantSuspensionMiddleware.
-<<<<<<< HEAD
 app.UseMiddleware<TenantSuspensionMiddleware>();
-=======
-app.UseMiddleware<Middleware.TenantSuspensionMiddleware>();
->>>>>>> db9e947ada99501609d4fa1514c925ae630489e0
 
 app.UseAuthorization();
 
