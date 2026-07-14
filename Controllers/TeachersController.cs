@@ -22,6 +22,9 @@ public record CreateTeacherRequest(string UserName, string Password, string Name
 /// <summary>Body for POST Teachers/superadmin/assistants — SuperAdmin only.</summary>
 public record CreateAssistantForTeacherRequest(int TeacherId, string UserName, string Password, string Name, string? Role);
 
+/// <summary>Body for POST Teachers/superadmin/teachers/{id}/suspend — SuperAdmin only.</summary>
+public record SuspendTeacherRequest(string? Reason);
+
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
@@ -341,7 +344,7 @@ public class TeachersController : ControllerBase
     {
         var teachers = await _db.Teachers.AsNoTracking()
             .Where(t => t.TenantOwnerId == null)
-            .Select(t => new { t.Id, t.Name, t.UserName })
+            .Select(t => new { t.Id, t.Name, t.UserName, t.IsSuspended })
             .ToListAsync();
 
         // IgnoreQueryFilters(): a SuperAdmin has no single active tenant — this
@@ -356,6 +359,7 @@ public class TeachersController : ControllerBase
             teacherId = t.Id,
             teacherName = t.Name,
             userName = t.UserName,
+            isSuspended = t.IsSuspended,
             studentCount = membershipCounts.TryGetValue(t.Id, out var c) ? c : 0
         })
         .OrderByDescending(t => t.studentCount)
@@ -371,6 +375,177 @@ public class TeachersController : ControllerBase
             teacherCount = perTeacher.Count,
             perTeacher
         });
+    }
+
+    // POST api/Teachers/superadmin/teachers/{id}/suspend  body: { reason? }
+    // Blocks this tenant-root teacher (and all of their staff, since staff act
+    // on the root's tenant) from doing ANYTHING -- login fails from this point
+    // on, and TenantSuspensionMiddleware rejects every request against a still
+    // -valid JWT/X-TenantId for this tenant, for both staff AND students of
+    // this teacher, with a 403. None of the teacher's data is touched -- this
+    // is fully reversible via .../reactivate.
+    [HttpPost("superadmin/teachers/{id:int}/suspend")]
+    [Authorize(Roles = Roles.SuperAdmin)]
+    public async Task<IActionResult> SuperAdminSuspendTeacher(int id, [FromBody] SuspendTeacherRequest? request)
+    {
+        var teacher = await _db.Teachers.FirstOrDefaultAsync(t => t.Id == id && t.TenantOwnerId == null);
+        if (teacher == null) return NotFound(new { message = "Tenant-root teacher not found." });
+
+        teacher.IsSuspended = true;
+        teacher.SuspendedAt = DateTime.UtcNow;
+        teacher.SuspensionReason = request?.Reason;
+        await _db.SaveChangesAsync();
+
+        return Ok(new { id = teacher.Id, name = teacher.Name, isSuspended = teacher.IsSuspended, suspendedAt = teacher.SuspendedAt, suspensionReason = teacher.SuspensionReason });
+    }
+
+    // POST api/Teachers/superadmin/teachers/{id}/reactivate
+    [HttpPost("superadmin/teachers/{id:int}/reactivate")]
+    [Authorize(Roles = Roles.SuperAdmin)]
+    public async Task<IActionResult> SuperAdminReactivateTeacher(int id)
+    {
+        var teacher = await _db.Teachers.FirstOrDefaultAsync(t => t.Id == id && t.TenantOwnerId == null);
+        if (teacher == null) return NotFound(new { message = "Tenant-root teacher not found." });
+
+        teacher.IsSuspended = false;
+        teacher.SuspendedAt = null;
+        teacher.SuspensionReason = null;
+        await _db.SaveChangesAsync();
+
+        return Ok(new { id = teacher.Id, name = teacher.Name, isSuspended = teacher.IsSuspended });
+    }
+
+    // DELETE api/Teachers/superadmin/teachers/{id}
+    // Permanently deletes a tenant-root teacher AND everything that belongs to
+    // their tenant: staff (Assistant/AssistantAdmin) accounts, Groups, Units/
+    // Lessons, Lectures, Materials, Notebooks, Codes, Notifications, Quizzes/
+    // Questions/Results, Assignments, BankQuestions/Attempts, Attendance, and
+    // every per-student activity row tied to this teacher (quiz/homework/
+    // center results, submissions, unlocks, subscriptions, payments).
+    //
+    // STUDENTS need special handling because of MULTI-TENANT MEMBERSHIP: a
+    // student can be subscribed to several teachers at once. For each student
+    // touched by this teacher:
+    //   - if they have NO other teacher relationship left afterwards, the
+    //     whole student (and their remaining activity/history rows) is deleted
+    //     too, since nothing else legitimately owns that account;
+    //   - otherwise they're kept, only this teacher's membership is removed,
+    //     and their legacy GroupId is re-pointed at one of their remaining
+    //     groups if it used to point at this teacher's group (Student.GroupId
+    //     has a Restrict FK to Group, so a dangling reference would otherwise
+    //     block deleting this teacher's Groups).
+    // This is irreversible -- unlike /suspend, there is no undo.
+    [HttpDelete("superadmin/teachers/{id:int}")]
+    [Authorize(Roles = Roles.SuperAdmin)]
+    public async Task<IActionResult> SuperAdminDeleteTeacher(int id)
+    {
+        var teacher = await _db.Teachers.IgnoreQueryFilters().FirstOrDefaultAsync(t => t.Id == id && t.TenantOwnerId == null);
+        if (teacher == null) return NotFound(new { message = "Tenant-root teacher not found." });
+
+        await using var tx = await _db.Database.BeginTransactionAsync();
+        try
+        {
+            // 1) Staff (Assistant/AssistantAdmin) accounts under this tenant.
+            await _db.Teachers.IgnoreQueryFilters().Where(t => t.TenantOwnerId == id).ExecuteDeleteAsync();
+
+            // 2) Which groups this teacher owns.
+            var groupIds = await _db.Groups.IgnoreQueryFilters().Where(g => g.TeacherId == id).Select(g => g.Id).ToListAsync();
+
+            // 3) Students tied to this teacher (legacy GroupId or a membership row).
+            var affectedStudentIds = await _db.Students.IgnoreQueryFilters()
+                .Where(s => groupIds.Contains(s.GroupId) || s.GroupMemberships.Any(m => groupIds.Contains(m.GroupId)))
+                .Select(s => s.Id)
+                .Distinct()
+                .ToListAsync();
+
+            var deletedStudentIds = new List<int>();
+
+            foreach (var studentId in affectedStudentIds)
+            {
+                var student = await _db.Students.IgnoreQueryFilters()
+                    .Include(s => s.GroupMemberships)
+                    .FirstAsync(s => s.Id == studentId);
+
+                var thisTeacherMemberships = student.GroupMemberships.Where(m => groupIds.Contains(m.GroupId)).ToList();
+                var remainingMemberships = student.GroupMemberships.Where(m => !groupIds.Contains(m.GroupId)).ToList();
+
+                _db.StudentGroupMemberships.RemoveRange(thisTeacherMemberships);
+
+                if (remainingMemberships.Count == 0)
+                {
+                    // No ties left to any other teacher -- delete the account entirely.
+                    deletedStudentIds.Add(student.Id);
+                    _db.Students.Remove(student);
+                }
+                else if (groupIds.Contains(student.GroupId))
+                {
+                    // Legacy GroupId pointed at a group we're about to delete --
+                    // re-point it at one of the student's remaining groups so the
+                    // Student.GroupId -> Group Restrict FK doesn't block us later.
+                    student.GroupId = remainingMemberships[0].GroupId;
+                }
+            }
+            await _db.SaveChangesAsync();
+
+            // 4) Orphaned history rows for students that got deleted above
+            //    (StateHistoryEntry has no TeacherId column of its own).
+            if (deletedStudentIds.Count > 0)
+                await _db.StateHistoryEntries.Where(h => deletedStudentIds.Contains(h.StudentId)).ExecuteDeleteAsync();
+
+            // 5) Every per-student activity row scoped to this teacher, regardless
+            //    of whether the student themselves survived (their marks/attendance
+            //    from a now-deleted teacher are meaningless either way).
+            await _db.QuizResults.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.CenterQuizResults.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.HomeworkResults.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.Attendances.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.AssignmentSubmissions.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.NotebookPayments.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.StudentLectureUnlocks.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.StudentUnitSubscriptions.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+
+            // 6) BankAttempts before BankQuestions: BankAttemptQuestion has a
+            //    Restrict FK to BankQuestion, but a Cascade FK to BankAttempt --
+            //    deleting the attempts first clears those rows automatically.
+            await _db.BankAttempts.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.BankQuestions.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+
+            // 7) Content the teacher owns. Each of these cascades its own
+            //    children (Questions/AssignmentQuestions/*GroupLink tables/etc.)
+            //    via the FK Cascade rules already configured in AppDbContext.
+            await _db.Quizzes.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.Assignments.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.Notifications.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.Codes.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.Notebooks.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.Lectures.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.Materials.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.Units.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+
+            // 8) Groups last -- every student that referenced them via legacy
+            //    GroupId was either deleted or re-pointed in step 3 above, so
+            //    the Restrict FK on Student.GroupId no longer blocks this.
+            await _db.Groups.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+
+            // 9) The teacher row itself.
+            _db.Teachers.Remove(teacher);
+            await _db.SaveChangesAsync();
+
+            await tx.CommitAsync();
+
+            return Ok(new
+            {
+                message = $"Teacher '{teacher.Name}' and all of their data were permanently deleted.",
+                deletedTeacherId = id,
+                studentsFullyDeleted = deletedStudentIds.Count,
+                studentsUnlinkedOnly = affectedStudentIds.Count - deletedStudentIds.Count
+            });
+        }
+        catch (Exception ex)
+        {
+            await tx.RollbackAsync();
+            return StatusCode(500, new { message = "Failed to delete teacher and their data.", detail = ex.Message });
+        }
     }
 
     private static string PlaceholderAvatar(string name) =>
