@@ -65,10 +65,30 @@ public class StudentsController : ControllerBase
 
         if (existing != null)
         {
-            var alreadyLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
-                .AnyAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
-            if (!alreadyLinked)
+            // RE-ADD FIX: this used to only check whether ANY membership row
+            // existed for this teacher and, if so, no-op — but a row can
+            // exist and be IsCancelled/IsSuspended (e.g. this same teacher
+            // deleted this exact student earlier). Treating that as
+            // "already linked" silently kept the student cancelled forever:
+            // the teacher's Create call looked like it succeeded (and even
+            // added unit subscriptions / bumped counts) but the student
+            // never came back in Students/GetAll for that teacher. Now we
+            // fetch the actual row and reactivate it if it was
+            // cancelled/suspended, so re-adding a student really does bring
+            // them back for this teacher.
+            var membership = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
+            if (membership == null)
+            {
                 _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = existing.Id, GroupId = group.Id });
+            }
+            else if (membership.IsCancelled || membership.IsSuspended)
+            {
+                membership.GroupId = group.Id;
+                membership.IsCancelled = false;
+                membership.IsSuspended = false;
+                _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = existing.Id, Action = "Reactivated", Reason = "Re-added by teacher" });
+            }
 
             foreach (var unitId in request.UnitIds ?? new())
             {
@@ -145,11 +165,25 @@ public class StudentsController : ControllerBase
         if (student == null)
             return NotFound(new { message = "No student with this phone number exists yet. Use Create instead." });
 
-        var alreadyLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
-            .AnyAsync(m => m.StudentId == student.Id && m.Group!.TeacherId == group.TeacherId);
-        if (!alreadyLinked)
+        // RE-ADD FIX: same reasoning as Students/Create above -- a membership
+        // row can already exist for this teacher but be cancelled/suspended
+        // (e.g. this teacher deleted this student before). Previously that
+        // counted as "already linked" and was left untouched, so re-linking
+        // never actually brought the student back for this teacher. Now we
+        // reactivate it.
+        var membership = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(m => m.StudentId == student.Id && m.Group!.TeacherId == group.TeacherId);
+        if (membership == null)
         {
             _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = student.Id, GroupId = group.Id });
+            await _db.SaveChangesAsync();
+        }
+        else if (membership.IsCancelled || membership.IsSuspended)
+        {
+            membership.GroupId = group.Id;
+            membership.IsCancelled = false;
+            membership.IsSuspended = false;
+            _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Reactivated", Reason = "Re-linked by teacher" });
             await _db.SaveChangesAsync();
         }
 
@@ -560,10 +594,23 @@ public class StudentsController : ControllerBase
 
                 if (existing != null)
                 {
-                    var alreadyLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
-                        .AnyAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
-                    if (!alreadyLinked)
+                    // RE-ADD FIX: same reasoning as Students/Create -- reactivate a
+                    // cancelled/suspended membership instead of treating it as a
+                    // no-op "already linked" row, otherwise a re-imported student
+                    // never actually comes back for this teacher.
+                    var membership = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+                        .FirstOrDefaultAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
+                    if (membership == null)
+                    {
                         _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = existing.Id, GroupId = group.Id });
+                    }
+                    else if (membership.IsCancelled || membership.IsSuspended)
+                    {
+                        membership.GroupId = group.Id;
+                        membership.IsCancelled = false;
+                        membership.IsSuspended = false;
+                        _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = existing.Id, Action = "Reactivated", Reason = "Re-added via import" });
+                    }
 
                     await _db.SaveChangesAsync();
                     linked++;
@@ -747,7 +794,19 @@ public class StudentsController : ControllerBase
             };
             if (groupId.HasValue)
                 query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
-            else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
+            else if (schoolYear.HasValue)
+                // PER-TENANT FIX: filter on THIS tenant's Group.SchoolYear via the
+                // membership row, not the legacy Student.SchoolYear field. That field
+                // is stamped once from whichever teacher created the Student FIRST and
+                // is never updated when a second teacher later links the same existing
+                // student to their own group (Students/Create's "existing" branch,
+                // Students/link) -- so a student added for the first time under
+                // teacher B can fail this filter even when teacher B's own group is
+                // "the same year", if the legacy value differs. The membership row
+                // itself was correct all along (counts driven off
+                // StudentGroupMemberships already reflected it), only this filter was
+                // reading the wrong field.
+                query = query.Where(s => s.GroupMemberships.Any(m => m.Group!.SchoolYear == schoolYear.Value));
             if (!string.IsNullOrWhiteSpace(q)) query = query.Where(s => s.Name.Contains(q) || s.PhoneNumber.Contains(q));
 
             var students = await query
@@ -815,7 +874,7 @@ public class StudentsController : ControllerBase
         // never leaks into this teacher's view of the student.
         var tenantMembership = await _db.StudentGroupMemberships.AsNoTracking()
             .Where(m => m.StudentId == id)
-            .Select(m => new { m.GroupId, GroupName = m.Group!.Name, m.IsSuspended, m.IsCancelled })
+            .Select(m => new { m.GroupId, GroupName = m.Group!.Name, GroupSchoolYear = m.Group!.SchoolYear, m.IsSuspended, m.IsCancelled })
             .FirstOrDefaultAsync();
 
         return Ok(new
@@ -829,7 +888,11 @@ public class StudentsController : ControllerBase
             username = student.UserName,
             groupId = tenantMembership?.GroupId ?? student.GroupId,
             groupName = tenantMembership?.GroupName,
-            schoolYear = student.SchoolYear,
+            // PER-TENANT FIX: same issue as the GetAll schoolYear filter -- the
+            // legacy student.SchoolYear field is stamped once by whichever teacher
+            // created the Student FIRST and never updated for a second teacher's
+            // own group/year. Report THIS tenant's group SchoolYear instead.
+            schoolYear = tenantMembership?.GroupSchoolYear ?? student.SchoolYear,
             isSuspended = tenantMembership?.IsSuspended ?? false,
             isCancelled = tenantMembership?.IsCancelled ?? false,
             createdAt = student.CreatedAt,

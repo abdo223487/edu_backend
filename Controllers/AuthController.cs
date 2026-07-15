@@ -214,8 +214,25 @@ public class AuthController : ControllerBase
             .Select(s => new { s.GroupId, TeacherId = s.Group!.TeacherId })
             .FirstOrDefaultAsync();
 
+        // DELETE FIX: the legacy single-Group fallback below used to ignore
+        // suspend/cancel state entirely, so a teacher who deleted this student
+        // (StudentGroupMembership.IsCancelled = true on THEIR row) still saw
+        // that teacher resurrected in the "groupIds" snapshot -- the student
+        // could still pick that teacher on SelectTeacherPage and access their
+        // data after being deleted, which defeats the whole point of delete.
+        // Fix: only fall back to the legacy Group for a teacher if there is NO
+        // StudentGroupMembership row AT ALL for that (student, teacher) pair
+        // (i.e. genuinely pre-dates the membership table and was never
+        // explicitly suspended/cancelled/deleted by that teacher). If a row
+        // exists but was filtered out above for being suspended/cancelled,
+        // that is an explicit "this teacher removed/paused this student"
+        // decision and must NOT be overridden by the legacy fallback.
+        var hasAnyMembershipForLegacyTeacher = legacy != null &&
+            await _db.StudentGroupMemberships.IgnoreQueryFilters()
+                .AnyAsync(m => m.StudentId == studentId && m.Group!.TeacherId == legacy.TeacherId);
+
         var candidateTeacherIds = memberships.Select(m => m.TeacherId)
-            .Concat(legacy != null ? new[] { legacy.TeacherId } : Array.Empty<int>())
+            .Concat(legacy != null && !hasAnyMembershipForLegacyTeacher ? new[] { legacy.TeacherId } : Array.Empty<int>())
             .Distinct().ToList();
 
         var suspendedTeacherIds = (await _db.Teachers
@@ -227,7 +244,8 @@ public class AuthController : ControllerBase
             .Where(m => !suspendedTeacherIds.Contains(m.TeacherId))
             .Select(m => (m.TeacherId, m.GroupId)).ToList();
 
-        if (legacy != null && !suspendedTeacherIds.Contains(legacy.TeacherId) && !result.Any(r => r.TeacherId == legacy.TeacherId))
+        if (legacy != null && !hasAnyMembershipForLegacyTeacher
+            && !suspendedTeacherIds.Contains(legacy.TeacherId) && !result.Any(r => r.TeacherId == legacy.TeacherId))
             result.Add((legacy.TeacherId, legacy.GroupId));
 
         return result;
