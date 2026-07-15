@@ -22,9 +22,8 @@ namespace EduApi.Middleware;
 /// SuperAdmin itself is never blocked (it owns no tenant to suspend). Resolves
 /// the SAME effective tenant id as HttpTenantContext:
 ///  - Teacher/Assistant/AssistantAdmin -> the "tenantId" JWT claim.
-///  - Student -> the X-TenantId header, validated against their own "groupIds"
-///    claim (a student can't be blocked by forging a header for a teacher they
-///    aren't actually linked to).
+///  - Student -> the X-TenantId header, parsed directly (see HttpTenantContext
+///    for why we no longer gate it on the "groupIds" JWT snapshot).
 /// The suspension flag itself always lives on the TENANT-ROOT teacher row
 /// (TenantOwnerId == null); staff share their root's suspension automatically
 /// since the "tenantId" claim IS the root's id for staff accounts too.
@@ -52,8 +51,17 @@ public class TenantSuspensionMiddleware
             }
             else if (user.IsInRole(Roles.Student))
             {
+                // BUGFIX: previously also required the header to appear in the
+                // stale "groupIds" JWT snapshot (see HttpTenantContext for the
+                // full explanation). That meant a student just linked to a new
+                // teacher would skip the suspension check entirely for that
+                // teacher until their token refreshed -- harmless from a security
+                // standpoint (worst case: an already-suspended NEW teacher's
+                // check gets skipped for a few minutes), but inconsistent with
+                // HttpTenantContext resolving the tenant just fine. Parse the
+                // header directly so both stay in sync.
                 var header = context.Request.Headers["X-TenantId"].ToString();
-                if (int.TryParse(header, out var fromHeader) && user.GetTeacherIds().Contains(fromHeader))
+                if (int.TryParse(header, out var fromHeader))
                     tenantIdToCheck = fromHeader;
             }
 

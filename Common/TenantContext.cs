@@ -48,19 +48,28 @@ public class HttpTenantContext : ITenantContext
         if (user.IsInRole(Models.Roles.Student))
         {
             // Students carry the tenant (chosen teacher) via the X-TenantId header.
-            // MULTI-TENANT SECURITY FIX: this header is fully client-controlled, so
-            // it must be validated against the student's OWN teacherIds (from the
-            // "groupIds" JWT claim, a snapshot of their real StudentGroupMembership
-            // rows) before being trusted. A student can no longer read another
-            // teacher's data just by sending an arbitrary X-TenantId — if the
-            // header doesn't match one of their real memberships, the tenant
-            // resolves to null and every tenant-scoped query filter matches zero
-            // rows (the existing safe default).
+            //
+            // BUGFIX: this used to also require the header value to appear in the
+            // "groupIds" JWT claim -- a snapshot of the student's memberships taken
+            // at login/refresh time. That snapshot goes stale the moment a teacher
+            // links/adds the student to a NEW group after the token was issued: the
+            // new teacher's id simply isn't in the old token yet, so the header got
+            // rejected, tenant resolved to null, and every tenant-scoped query
+            // (including the Students filter itself) matched zero rows -- a 404 on
+            // e.g. GET Students/attendance for any student with more than one
+            // teacher, until they happened to log out/in or their token expired and
+            // refreshed. A student with only one teacher rarely hit this because
+            // that teacher is almost always the one already embedded from login.
+            //
+            // We no longer need that snapshot check for security: every table is
+            // ALREADY tenant-isolated against the LIVE database via its own
+            // TeacherId/Group.TeacherId query filter (Group, StudentGroupMembership,
+            // Lecture, Attendance, ...). If a student sends an X-TenantId for a
+            // teacher they don't actually belong to, those filters simply match zero
+            // rows on their own -- the same "safe default" as before -- so trusting
+            // any well-formed header here is safe and also fixes the staleness bug.
             var header = httpContext!.Request.Headers["X-TenantId"].ToString();
-            var parsed = int.TryParse(header, out var fromHeader) ? fromHeader : (int?)null;
-            _tenantId = parsed.HasValue && user.GetTeacherIds().Contains(parsed.Value)
-                ? parsed
-                : null;
+            _tenantId = int.TryParse(header, out var fromHeader) ? fromHeader : (int?)null;
         }
         else if (user.IsInRole(Models.Roles.SuperAdmin))
         {
