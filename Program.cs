@@ -32,16 +32,25 @@ builder.Services.AddHttpClient("GoogleSheets", client =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 
-// Used by GreenApiWhatsAppService to call Green API (green-api.com) when
-// attendance is recorded (see GreenApiOptions for config details). BaseAddress
-// isn't set here since each Green API instance has its own apiUrl host —
-// GreenApiWhatsAppService builds the full URL itself from GreenApiOptions.ApiUrl.
-builder.Services.AddHttpClient("GreenApi", client =>
+// ACTIVE PROVIDER: Meta WhatsApp Cloud API (now approved/verified — see
+// WhatsAppOptions for the approved "attendance_notification" template shape).
+builder.Services.AddHttpClient("WhatsApp", client =>
 {
+    client.BaseAddress = new Uri("https://graph.facebook.com/");
     client.Timeout = TimeSpan.FromSeconds(15);
 });
-builder.Services.Configure<GreenApiOptions>(builder.Configuration.GetSection(GreenApiOptions.SectionName));
-builder.Services.AddScoped<IWhatsAppService, GreenApiWhatsAppService>();
+builder.Services.Configure<WhatsAppOptions>(builder.Configuration.GetSection(WhatsAppOptions.SectionName));
+builder.Services.AddScoped<IWhatsAppService, MetaWhatsAppService>();
+
+// ALTERNATE PROVIDER (currently unused — kept here in case Meta ever gets
+// re-restricted and we need to fall back to Green API again). To switch back:
+// comment the "ACTIVE PROVIDER" block above and uncomment this one instead.
+// builder.Services.AddHttpClient("GreenApi", client =>
+// {
+//     client.Timeout = TimeSpan.FromSeconds(15);
+// });
+// builder.Services.Configure<GreenApiOptions>(builder.Configuration.GetSection(GreenApiOptions.SectionName));
+// builder.Services.AddScoped<IWhatsAppService, GreenApiWhatsAppService>();
 
 // TENANT LAYER: resolves the current request's tenant (Teacher.Id) from the JWT
 // (staff) or the X-TenantId header (students). Consumed by AppDbContext's global
