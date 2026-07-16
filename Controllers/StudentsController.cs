@@ -1142,7 +1142,19 @@ public class StudentsController : ControllerBase
         var tenantGroupId = await _db.StudentGroupMemberships.AsNoTracking()
             .Where(m => m.StudentId == sid.Value)
             .Select(m => (int?)m.GroupId)
-            .FirstOrDefaultAsync() ?? student.GroupId;
+            .FirstOrDefaultAsync();
+
+        // Only trust the legacy single GroupId as a fallback when it actually
+        // belongs to the CURRENT tenant — otherwise a subscription-only student
+        // (linked to this teacher via a redeemed code, with no GroupMembership
+        // row at all) would silently pull in a completely different teacher's
+        // group here, instead of correctly resolving to "no Center lectures for
+        // this tenant" (an empty result, not a leak of another tenant's group).
+        if (tenantGroupId == null)
+            tenantGroupId = await _db.Groups.AsNoTracking()
+                .Where(g => g.Id == student.GroupId && g.TeacherId == _tenant.CurrentTenantId)
+                .Select(g => (int?)g.Id)
+                .FirstOrDefaultAsync();
 
         var lecturesQuery = _db.Lectures.AsNoTracking()
             .Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == tenantGroupId)

@@ -160,10 +160,27 @@ public class AppDbContext : DbContext
         // to result tables (QuizResult/CenterQuizResult/HomeworkResult) queried
         // directly off their own DbSet by StudentId — those need their own
         // TeacherId + filter, added below.
+        //
+        // BUGFIX: a student can also be tied to a SECOND teacher purely through
+        // Students/codes (code redemption) — that flow only ever wrote
+        // StudentUnitSubscription / StudentLectureUnlock rows for the redeeming
+        // teacher, it never created a StudentGroupMembership row. Such a student
+        // was fully functional for that teacher everywhere else (units, lectures,
+        // quizzes...) but was INVISIBLE to this filter for that tenant, because
+        // neither the legacy Group nor GroupMemberships matched — so any endpoint
+        // that first does `_db.Students...FirstOrDefaultAsync(s => s.Id == id)`
+        // for that teacher (e.g. GET Students/attendance, or scanning the
+        // student's QR for POST Attendance) 404'd with "Student not found",
+        // while the teacher who originally added them via Students/Create or
+        // Students/link (and so does have a GroupMembership row) worked fine.
+        // Now a student redeemed into a tenant via a unit subscription or a
+        // lecture unlock also counts as "visible" under that tenant.
         modelBuilder.Entity<Student>()
             .HasQueryFilter(s =>
                 (s.Group != null && s.Group.TeacherId == _tenant.CurrentTenantId) ||
-                s.GroupMemberships.Any(m => m.Group != null && m.Group.TeacherId == _tenant.CurrentTenantId));
+                s.GroupMemberships.Any(m => m.Group != null && m.Group.TeacherId == _tenant.CurrentTenantId) ||
+                s.UnitSubscriptions.Any(u => u.TeacherId == _tenant.CurrentTenantId) ||
+                Set<StudentLectureUnlock>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId));
 
         modelBuilder.Entity<StudentGroupMembership>()
             .HasIndex(m => new { m.StudentId, m.GroupId }).IsUnique();
