@@ -43,7 +43,7 @@ public class WhatsAppOptions
     /// </summary>
     public string TemplateName { get; set; } = "attendance_notification";
 
-    public string TemplateLanguageCode { get; set; } = "ar";
+    public string TemplateLanguageCode { get; set; } = "ar_EG";
 
     /// <summary>
     /// Second approved template — sent once, right after a Student row is
