@@ -6,6 +6,7 @@ using EduApi.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using System.Diagnostics;
 
 namespace EduApi.Controllers;
 
@@ -64,6 +65,7 @@ public class LecturesController : ControllerBase
             return BadRequest(new { message = "Provide either a video file or a YouTube link, not both." });
 
         string? storageFileUrl = null;
+        string? thumbnailUrl = null;
         if (videoFile != null)
         {
             var ext = Path.GetExtension(videoFile.FileName);
@@ -71,6 +73,13 @@ public class LecturesController : ControllerBase
                 return BadRequest(new { message = "Only .mp4 video files are supported." });
 
             storageFileUrl = await _files.SaveAsync(videoFile, "lectures");
+
+            // Best-effort: grab a real frame from the video (via ffmpeg) to use
+            // as its thumbnail, since a recorded upload has no YouTube-style
+            // thumbnail API to fall back on. Never fails the whole request —
+            // a lecture with a working video but no thumbnail is fine; the
+            // reverse would not be.
+            thumbnailUrl = await TryGenerateThumbnailAsync(videoFile);
         }
 
         var groupIds = new List<int>();
@@ -108,6 +117,7 @@ public class LecturesController : ControllerBase
             AttendanceMethod = method,
             YoutubeLink = youtubeLink,
             StorageFileKey = storageFileUrl,
+            ThumbnailUrl = thumbnailUrl,
             GroupIds = groupIds,
             UnitId = unitId,
             LessonIndex = lessonIndex,
@@ -143,10 +153,12 @@ public class LecturesController : ControllerBase
         var lecture = await _db.Lectures.FirstOrDefaultAsync(e => e.Id == (lectureId));
         if (lecture == null) return NotFound(new { message = "Lecture not found." });
 
-        // Best-effort: remove the recorded video from R2 too, so deleting a
-        // lecture doesn't leave an orphaned file sitting in the bucket
-        // forever. Does nothing if the lecture only had a YoutubeLink.
+        // Best-effort: remove the recorded video AND its generated thumbnail
+        // from R2 too, so deleting a lecture doesn't leave orphaned files
+        // sitting in the bucket forever. Does nothing for a YoutubeLink-only
+        // lecture (both fields are null there).
         await _files.DeleteAsync(lecture.StorageFileKey);
+        await _files.DeleteAsync(lecture.ThumbnailUrl);
 
         _db.Lectures.Remove(lecture);
         await _db.SaveChangesAsync();
@@ -195,13 +207,13 @@ public class LecturesController : ControllerBase
         // the SQL level instead of materializing the full Lecture row
         // (TeacherId/Months/SchoolYear are never used here).
         var items = await query.OrderBy(l => l.Id)
-            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt })
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt })
             .ToListAsync();
         return Ok(items.Select(l =>
         {
             var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
             return new LectureListItem(
-                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.UnitId, l.LessonIndex,
+                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
                 l.CreatedAt);
         }));
@@ -263,14 +275,14 @@ public class LecturesController : ControllerBase
             .OrderBy(l => l.Id)
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
-            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt })
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt })
             .ToListAsync();
 
         return Ok(items.Select(l =>
         {
             var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
             return new LectureListItem(
-                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.UnitId, l.LessonIndex,
+                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
                 l.CreatedAt);
         }));
@@ -343,7 +355,7 @@ public class LecturesController : ControllerBase
     private static LectureListItem ToDto(Lecture l)
     {
         var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
-        return new(l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.UnitId, l.LessonIndex, l.GroupIds, l.CreatedAt);
+        return new(l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIds, l.CreatedAt);
     }
 
     /// <summary>
@@ -358,5 +370,72 @@ public class LecturesController : ControllerBase
         if (!string.IsNullOrWhiteSpace(storageFileUrl)) return (storageFileUrl, "File");
         if (!string.IsNullOrWhiteSpace(youtubeLink)) return (youtubeLink, "Youtube");
         return (null, null);
+    }
+
+    /// <summary>
+    /// Extracts a single frame (1 second in, so it's rarely a black
+    /// intro/fade frame) from an uploaded .mp4 via ffmpeg, uploads it to R2
+    /// as a JPEG, and returns its public URL. Requires ffmpeg to be
+    /// installed and on PATH on the server — if it's missing, the frame
+    /// extraction fails, or anything else goes wrong, this returns null
+    /// rather than throwing, since a lecture is still perfectly usable
+    /// without a thumbnail.
+    /// </summary>
+    private async Task<string?> TryGenerateThumbnailAsync(IFormFile videoFile)
+    {
+        var tempVideoPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.mp4");
+        var tempThumbPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.jpg");
+
+        try
+        {
+            await using (var fileStream = System.IO.File.Create(tempVideoPath))
+            await using (var videoStream = videoFile.OpenReadStream())
+            {
+                await videoStream.CopyToAsync(fileStream);
+            }
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = "ffmpeg",
+                // -y overwrite, -ss seek to 1s, -frames:v 1 grab exactly one frame.
+                Arguments = $"-y -ss 00:00:01 -i \"{tempVideoPath}\" -frames:v 1 -q:v 3 \"{tempThumbPath}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            using var process = Process.Start(psi);
+            if (process == null) return null;
+            await process.WaitForExitAsync();
+
+            if (!System.IO.File.Exists(tempThumbPath)) return null;
+
+            await using var thumbStream = System.IO.File.OpenRead(tempThumbPath);
+            var thumbFormFile = new FormFile(thumbStream, 0, thumbStream.Length, "thumbnail", "thumbnail.jpg")
+            {
+                Headers = new HeaderDictionary(),
+                ContentType = "image/jpeg",
+            };
+
+            return await _files.SaveAsync(thumbFormFile, "lecture-thumbnails");
+        }
+        catch
+        {
+            // ffmpeg not installed, corrupt video, etc. — never let a
+            // thumbnail failure block creating the lecture itself.
+            return null;
+        }
+        finally
+        {
+            TryDeleteTempFile(tempVideoPath);
+            TryDeleteTempFile(tempThumbPath);
+        }
+    }
+
+    private static void TryDeleteTempFile(string path)
+    {
+        try { if (System.IO.File.Exists(path)) System.IO.File.Delete(path); }
+        catch { /* best-effort cleanup only */ }
     }
 }

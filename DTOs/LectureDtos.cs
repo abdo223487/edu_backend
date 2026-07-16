@@ -23,12 +23,17 @@ public record UpdateLectureRequest(string? Name, string? AttendanceMethod, int? 
 // file's public URL if the lecture has one, otherwise the YoutubeLink.
 // "VideoSourceType" tells the client which player to use: "File" or
 // "Youtube" (null for Center lectures, which have no video at all).
+// "ThumbnailUrl" is only set for "File" lectures (a frame auto-extracted via
+// ffmpeg at upload time, stored in R2). For "Youtube" lectures the client
+// should keep building the thumbnail itself from the YouTube video id
+// (img.youtube.com/vi/{id}/0.jpg) exactly like before — this field is null there.
 public record LectureListItem(
     int Id,
     string Name,
     string AttendanceMethod,
     string? Link,
     string? VideoSourceType,
+    string? ThumbnailUrl,
     int? UnitId,
     int? LessonIndex,
     List<int> GroupIds,

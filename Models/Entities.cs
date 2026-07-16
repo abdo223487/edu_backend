@@ -247,6 +247,13 @@ public class Lecture
     public AttendanceMethod AttendanceMethod { get; set; }
     public string? YoutubeLink { get; set; }
     public string? StorageFileKey { get; set; }
+    /// <summary>
+    /// Public R2 URL of a thumbnail frame auto-extracted (via ffmpeg) from an
+    /// uploaded recorded video at upload time. Null for YouTube lectures —
+    /// those use YouTube's own thumbnail API (img.youtube.com/vi/{id}/0.jpg)
+    /// client-side instead, same as before.
+    /// </summary>
+    public string? ThumbnailUrl { get; set; }
     /// <summary>Groups (as a joined string of ids) that this lecture is visible to.</summary>
     public string GroupIdsCsv { get; set; } = string.Empty;
     [NotMapped] public List<int> GroupIds
