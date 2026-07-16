@@ -22,6 +22,7 @@ namespace EduApi.Controllers;
 ///  Student side:
 ///   GET  BankQuestions/scope                     (their subscribed units → lessons → question counts per difficulty)
 ///   POST BankQuestions/start                     body: { unitIds, lessonIds?, difficulty?, count, durationMinutes }
+///   GET  BankQuestions/my-attempts?p=..           (their own practice-attempt history)
 ///   GET  BankQuestions/attempt/{attemptId}        (solve before deadline / review after submit or deadline)
 ///   POST BankQuestions/submit                     body: { attemptId, answers:[{questionId, answer}] }
 /// </summary>
@@ -264,6 +265,37 @@ public class BankQuestionsController : ControllerBase
         ));
 
         return Ok(result);
+    }
+
+    [HttpGet("my-attempts")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> GetMyAttempts([FromQuery] int p = 1)
+    {
+        var studentId = User.GetUserId();
+
+        var attempts = await _db.BankAttempts.AsNoTracking().Include(a => a.Questions)
+            .Where(a => a.StudentId == studentId)
+            .OrderByDescending(a => a.Id)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
+            .ToListAsync();
+
+        var now = DateTime.UtcNow;
+
+        // Same reveal rule as GetAttempt below: score is only shown once the
+        // student has submitted, or the attempt's own Deadline has passed —
+        // never expose the score for a still-in-progress attempt.
+        var items = attempts.Select(a =>
+        {
+            var revealed = a.SubmittedAt != null || now > a.Deadline;
+            return new MyBankAttemptListItemDto(
+                a.Id, a.StartedAt, a.Deadline, a.SubmittedAt != null,
+                revealed ? a.Score : null,
+                revealed ? a.TotalMarks : null,
+                a.Difficulty, a.Questions.Count);
+        });
+
+        return Ok(items);
     }
 
     [HttpPost("start")]

@@ -34,6 +34,13 @@ public record BankAttemptListItemDto(
     DateTime StartedAt, DateTime Deadline, bool IsSubmitted,
     int? Score, int? TotalMarks, string? Difficulty, int QuestionCount);
 
+// GET BankQuestions/my-attempts (student's own practice-attempt history).
+// Score/TotalMarks are null until the attempt is either submitted or its
+// Deadline has passed — same reveal rule as GET BankQuestions/attempt/{id}.
+public record MyBankAttemptListItemDto(
+    int Id, DateTime StartedAt, DateTime Deadline, bool IsSubmitted,
+    int? Score, int? TotalMarks, string? Difficulty, int QuestionCount);
+
 // GET BankQuestions/stats (teacher — usage analytics per question)
 public record BankQuestionStatsDto(
     int QuestionId, string Text, string Difficulty, string LessonName,

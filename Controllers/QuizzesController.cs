@@ -40,10 +40,29 @@ public class QuizzesController : ControllerBase
         _tenant = tenant;
     }
 
-    private static string FormatDuration(int minutes)
+    private static string FormatDuration(int minutes) => FormatDuration(TimeSpan.FromMinutes(minutes));
+
+    private static string FormatDuration(TimeSpan ts)
     {
-        var ts = TimeSpan.FromMinutes(minutes);
+        if (ts < TimeSpan.Zero) ts = TimeSpan.Zero;
         return $"{(int)ts.TotalHours:D2}:{ts.Minutes:D2}:{ts.Seconds:D2}";
+    }
+
+    // BUGFIX: a student who opens the exam late used to still get the FULL
+    // DurationInMinutes as their countdown (e.g. 10 minutes), even if only
+    // 5 minutes were actually left before the Deadline — because the client
+    // reads "duration"/"durationInMinutes" straight from this list endpoint
+    // and starts its own timer from that value. Fix: for students, return
+    // the ACTUAL remaining time (whichever is smaller — the full exam
+    // duration, or however long is left until the Deadline) instead of the
+    // fixed original duration. Teachers still see the exam's real configured
+    // duration, since they're not taking a timed countdown.
+    private static TimeSpan EffectiveRemaining(Quiz q, DateTime nowUtc)
+    {
+        var full = TimeSpan.FromMinutes(q.DurationInMinutes);
+        var untilDeadline = q.Deadline - nowUtc;
+        if (untilDeadline < TimeSpan.Zero) return TimeSpan.Zero;
+        return untilDeadline < full ? untilDeadline : full;
     }
 
     [HttpGet]
@@ -93,22 +112,33 @@ public class QuizzesController : ControllerBase
                 .Select(r => r.QuizId).ToListAsync()).ToHashSet()
             : new HashSet<int>();
 
-        var items = quizzes.Select(q => new
+        var nowUtc = DateTime.UtcNow;
+
+        var items = quizzes.Select(q =>
         {
-            id = q.Id,
-            title = q.Title,
-            unitId = q.UnitId,
-            durationInMinutes = q.DurationInMinutes,
-            // Flutter's ExamDetailPage expects duration as "HH:MM:SS" (it does
-            // widget.duration.split(":")), so format it here instead of sending
-            // a raw minutes count.
-            duration = FormatDuration(q.DurationInMinutes),
-            deadline = q.Deadline,
-            groupIds = q.GroupIds,
-            groups = q.GroupIds.Select(gid => groupNamesById.TryGetValue(gid, out var n) ? n : gid.ToString()).ToList(),
-            unit = new { month = unitsById.TryGetValue(q.UnitId, out var m) ? m : (int?)null },
-            grade = q.SchoolYear,
-            isTaken = studentId.HasValue && takenQuizIds.Contains(q.Id)
+            // Students get the real remaining time (capped by the Deadline);
+            // teachers/admins keep seeing the exam's actual configured duration.
+            var effectiveDuration = studentId.HasValue
+                ? EffectiveRemaining(q, nowUtc)
+                : TimeSpan.FromMinutes(q.DurationInMinutes);
+
+            return new
+            {
+                id = q.Id,
+                title = q.Title,
+                unitId = q.UnitId,
+                durationInMinutes = (int)effectiveDuration.TotalMinutes,
+                // Flutter's ExamDetailPage expects duration as "HH:MM:SS" (it does
+                // widget.duration.split(":")), so format it here instead of sending
+                // a raw minutes count.
+                duration = FormatDuration(effectiveDuration),
+                deadline = q.Deadline,
+                groupIds = q.GroupIds,
+                groups = q.GroupIds.Select(gid => groupNamesById.TryGetValue(gid, out var n) ? n : gid.ToString()).ToList(),
+                unit = new { month = unitsById.TryGetValue(q.UnitId, out var m) ? m : (int?)null },
+                grade = q.SchoolYear,
+                isTaken = studentId.HasValue && takenQuizIds.Contains(q.Id)
+            };
         });
 
         return Ok(items);
