@@ -37,6 +37,49 @@ public class StudentsController : ControllerBase
         _logger = logger;
     }
 
+    // POST Students/recover-credentials  (public — no auth required, used from
+    // the login screen before the student has any token). Body:
+    // { phoneNumber, parentPhoneNumber } -> both must match the SAME student
+    // row exactly. On match: generates a brand-new random password (the old
+    // one can never be recovered since only its BCrypt hash is stored),
+    // saves it, and returns { userName, newPassword } so the Flutter login
+    // screen can show it to the student immediately.
+    //
+    // Uses IgnoreQueryFilters() deliberately: a student's login identity is
+    // global across all teachers (same account, multiple teachers), so this
+    // must NOT be scoped to any one tenant.
+    public record RecoverCredentialsRequest(string PhoneNumber, string ParentPhoneNumber);
+
+    [HttpPost("recover-credentials")]
+    [AllowAnonymous]
+    public async Task<IActionResult> RecoverCredentials([FromBody] RecoverCredentialsRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.PhoneNumber) || string.IsNullOrWhiteSpace(request.ParentPhoneNumber))
+            return BadRequest(new { message = "رقم الطالب ورقم ولي الأمر مطلوبان." });
+
+        var student = await _db.Students.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(s =>
+                s.PhoneNumber == request.PhoneNumber &&
+                s.ParentPhoneNumber == request.ParentPhoneNumber);
+
+        // Deliberately vague error: never reveal whether the phone number
+        // exists at all, or whether it was the phone/parent-phone pair that
+        // didn't match — that would let someone enumerate valid numbers.
+        if (student == null)
+            return NotFound(new { message = "لا يوجد طالب مطابق لهذا الرقم ورقم ولي الأمر." });
+
+        var newPassword = GenerateTempPassword();
+        student.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
+        await _db.SaveChangesAsync();
+        await InvalidateStudentsCacheAsync();
+
+        return Ok(new
+        {
+            userName = student.UserName,
+            newPassword
+        });
+    }
+
     // POST Students
     // MULTI-TENANT DEDUPE FIX: previously this always inserted a brand new
     // Student row with zero regard for whether the phone number already
