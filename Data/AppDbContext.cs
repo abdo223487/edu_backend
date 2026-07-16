@@ -175,11 +175,23 @@ public class AppDbContext : DbContext
         // Students/link (and so does have a GroupMembership row) worked fine.
         // Now a student redeemed into a tenant via a unit subscription or a
         // lecture unlock also counts as "visible" under that tenant.
+        // NOTE: every branch below is written as an explicit Set<T>() correlated
+        // subquery (rather than mixing in s.GroupMemberships.Any(...) /
+        // s.UnitSubscriptions.Any(...) navigation calls) on purpose. Navigation
+        // collections that themselves carry a HasQueryFilter (StudentGroupMembership,
+        // StudentUnitSubscription) can interact unpredictably with EF Core's
+        // automatic filter-cascading when referenced from *inside* another
+        // entity's own global query filter combined with OR — in practice this
+        // silently dropped the GroupMemberships branch for some tenants while the
+        // legacy Group branch kept working, which is exactly the "works for the
+        // first teacher, 404s for the second" symptom this fixes. Using
+        // Set<T>().Any(x => x.StudentId == s.Id && ...) everywhere sidesteps that
+        // by never touching the Student-side navigation property at all.
         modelBuilder.Entity<Student>()
             .HasQueryFilter(s =>
                 (s.Group != null && s.Group.TeacherId == _tenant.CurrentTenantId) ||
-                s.GroupMemberships.Any(m => m.Group != null && m.Group.TeacherId == _tenant.CurrentTenantId) ||
-                s.UnitSubscriptions.Any(u => u.TeacherId == _tenant.CurrentTenantId) ||
+                Set<StudentGroupMembership>().Any(m => m.StudentId == s.Id && m.Group != null && m.Group.TeacherId == _tenant.CurrentTenantId) ||
+                Set<StudentUnitSubscription>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId) ||
                 Set<StudentLectureUnlock>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId));
 
         modelBuilder.Entity<StudentGroupMembership>()
