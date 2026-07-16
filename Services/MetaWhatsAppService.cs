@@ -39,12 +39,14 @@ public class MetaWhatsAppService : IWhatsAppService
             return false;
         }
 
+        var egyptTime = ToEgyptTime(data.AttendanceLocalTime);
+
         var parameters = new object[]
         {
             new { type = "text", parameter_name = "student_name", text = data.StudentName },
             new { type = "text", parameter_name = "teacher_name", text = data.TeacherName },
-            new { type = "text", parameter_name = "date", text = data.AttendanceLocalTime.ToString("dd/MM/yyyy") },
-            new { type = "text", parameter_name = "time", text = data.AttendanceLocalTime.ToString("HH:mm:ss") },
+            new { type = "text", parameter_name = "date", text = egyptTime.ToString("dd/MM/yyyy") },
+            new { type = "text", parameter_name = "time", text = egyptTime.ToString("HH:mm:ss") },
             new { type = "text", parameter_name = "last_grade", text = data.LastGradeText },
             new { type = "text", parameter_name = "last_homework", text = data.LastHomeworkText },
             new { type = "text", parameter_name = "notebook_status", text = data.NotebookStatusText },
@@ -141,6 +143,34 @@ public class MetaWhatsAppService : IWhatsAppService
     /// "20" + the number without the leading 0. Numbers already given with a
     /// country code are passed through (digits only).
     /// </summary>
+    /// <summary>
+    /// Converts a UTC (or unspecified-but-actually-UTC) DateTime coming from
+    /// the Flutter client into Egypt local time (UTC+2, or UTC+3 during any
+    /// future DST rules) for display in the WhatsApp message. Falls back to
+    /// a fixed +2h offset if the "Africa/Cairo" IANA zone isn't available on
+    /// the host (e.g. minimal Linux containers without tzdata).
+    /// </summary>
+    private static DateTime ToEgyptTime(DateTime value)
+    {
+        var utcValue = value.Kind == DateTimeKind.Utc
+            ? value
+            : DateTime.SpecifyKind(value, DateTimeKind.Utc);
+
+        try
+        {
+            var cairoZone = TimeZoneInfo.FindSystemTimeZoneById("Africa/Cairo");
+            return TimeZoneInfo.ConvertTimeFromUtc(utcValue, cairoZone);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            return utcValue.AddHours(2);
+        }
+        catch (InvalidTimeZoneException)
+        {
+            return utcValue.AddHours(2);
+        }
+    }
+
     private static string? NormalizePhoneNumber(string raw)
     {
         var digits = new string(raw.Where(char.IsDigit).ToArray());
