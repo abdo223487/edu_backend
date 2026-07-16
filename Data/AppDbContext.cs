@@ -176,20 +176,27 @@ public class AppDbContext : DbContext
         // Now a student redeemed into a tenant via a unit subscription or a
         // lecture unlock also counts as "visible" under that tenant.
         // NOTE: every branch below is written as an explicit Set<T>() correlated
-        // subquery (rather than mixing in s.GroupMemberships.Any(...) /
-        // s.UnitSubscriptions.Any(...) navigation calls) on purpose. Navigation
-        // collections that themselves carry a HasQueryFilter (StudentGroupMembership,
-        // StudentUnitSubscription) can interact unpredictably with EF Core's
-        // automatic filter-cascading when referenced from *inside* another
-        // entity's own global query filter combined with OR — in practice this
-        // silently dropped the GroupMemberships branch for some tenants while the
-        // legacy Group branch kept working, which is exactly the "works for the
-        // first teacher, 404s for the second" symptom this fixes. Using
-        // Set<T>().Any(x => x.StudentId == s.Id && ...) everywhere sidesteps that
-        // by never touching the Student-side navigation property at all.
+        // EXISTS subquery — including the legacy Group branch — and NONE of them
+        // touch a Student navigation property. This is not a style choice: it was
+        // the actual root cause of "works for the first teacher, 404s for every
+        // other teacher". `s.Group != null && s.Group.TeacherId == tenant` gets
+        // translated by EF Core into an INNER JOIN against Groups (itself already
+        // filtered to the current tenant) on s.GroupId == g.Id. Because it's an
+        // INNER JOIN — not a LEFT JOIN — a student whose LEGACY GroupId belongs to
+        // a DIFFERENT tenant gets dropped from the result set by the JOIN itself,
+        // before the OR'd EXISTS clauses (GroupMemberships / UnitSubscriptions /
+        // LectureUnlocks) ever get a chance to run. Confirmed from the generated
+        // SQL:
+        //   FROM "Students" AS s
+        //   INNER JOIN (SELECT ... FROM "Groups" WHERE "TeacherId" = @tenant) AS g0
+        //       ON s."GroupId" = g0."Id"
+        //   WHERE (g0."TeacherId" = @tenant OR EXISTS(...) OR EXISTS(...) OR EXISTS(...))
+        // Rewriting the legacy check as its own Set<Group>().Any(...) EXISTS
+        // subquery (instead of s.Group.TeacherId) keeps it a plain OR'd EXISTS,
+        // same as the other three branches, with no JOIN involved at all.
         modelBuilder.Entity<Student>()
             .HasQueryFilter(s =>
-                (s.Group != null && s.Group.TeacherId == _tenant.CurrentTenantId) ||
+                Set<Group>().Any(g => g.Id == s.GroupId && g.TeacherId == _tenant.CurrentTenantId) ||
                 Set<StudentGroupMembership>().Any(m => m.StudentId == s.Id && m.Group != null && m.Group.TeacherId == _tenant.CurrentTenantId) ||
                 Set<StudentUnitSubscription>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId) ||
                 Set<StudentLectureUnlock>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId));
