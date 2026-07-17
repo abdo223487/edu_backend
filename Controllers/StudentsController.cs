@@ -1123,7 +1123,7 @@ public class StudentsController : ControllerBase
     public async Task<IActionResult> RedeemCode([FromBody] RedeemCodeRequest request)
     {
         var code = await _db.Codes.FirstOrDefaultAsync(c => c.Value == request.Code);
-        if (code == null) return NotFound(new { message = "Invalid code." });
+        if (code == null || code.IsTemplate) return NotFound(new { message = "Invalid code." });
         if (code.IsUsed) return Conflict(new { message = "Code already used." });
 
         var studentId = User.GetUserId();
@@ -1152,6 +1152,44 @@ public class StudentsController : ControllerBase
 
         await _db.SaveChangesAsync();
         return Ok(new { message = "Code redeemed successfully.", unitIds = code.UnitIds, lectureIds = code.LectureIds });
+    }
+
+    // GET Students/codes  (student, own codes — manually redeemed AND
+    // auto-issued via attending a code-triggering Center lecture, see
+    // AttendanceController.IssueTriggeredCodesAsync). Never returns other
+    // students' codes or unissued templates — only rows already assigned to
+    // the calling student (UsedByStudentId == them).
+    [HttpGet("codes")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> GetStudentCodes()
+    {
+        var studentId = User.GetUserId();
+        var codes = await _db.Codes.AsNoTracking()
+            .Where(c => c.UsedByStudentId == studentId)
+            .OrderByDescending(c => c.UsedAt)
+            .ToListAsync();
+
+        var unitIdsFlat = codes.SelectMany(c => c.UnitIds).Distinct().ToList();
+        var lectureIdsFlat = codes.SelectMany(c => c.LectureIds).Distinct().ToList();
+        var unitNames = await _db.Units.AsNoTracking().Where(u => unitIdsFlat.Contains(u.Id))
+            .ToDictionaryAsync(u => u.Id, u => u.Name);
+        var lectureNames = await _db.Lectures.AsNoTracking().Where(l => lectureIdsFlat.Contains(l.Id))
+            .ToDictionaryAsync(l => l.Id, l => l.Name);
+
+        var dtos = codes.Select(c => new
+        {
+            id = c.Id,
+            code = c.Value,
+            schoolYear = c.SchoolYear,
+            units = c.UnitIds.Select(id => new { id, name = unitNames.GetValueOrDefault(id, "") }).ToList(),
+            lectures = c.LectureIds.Select(id => new { id, name = lectureNames.GetValueOrDefault(id, "") }).ToList(),
+            redeemedAt = c.UsedAt?.ToString("O"),
+            // true when this code was earned automatically by attendance
+            // rather than typed in manually.
+            fromAttendance = c.SourceCodeTemplateId != null
+        });
+
+        return Ok(dtos);
     }
 
     // GET Students/attendance?studentId=..&unitId=..  (teacher, for a specific student)

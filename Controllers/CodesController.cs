@@ -7,7 +7,10 @@ using Microsoft.EntityFrameworkCore;
 
 namespace EduApi.Controllers;
 
-public record GenerateCodeRequest(int SchoolYear, List<int> UnitIds, List<int> LectureIds);
+// GenerateCodeRequest.TriggerLectureId is optional: when set, the teacher is
+// creating a TEMPLATE tied to a Center lecture instead of a one-off code —
+// see CodesController.Generate and AttendanceController.IssueTriggeredCodesAsync.
+public record GenerateCodeRequest(int SchoolYear, List<int> UnitIds, List<int> LectureIds, int? TriggerLectureId);
 
 /// <summary>
 /// Route: api/Codes
@@ -186,10 +189,12 @@ public class CodesController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetAll([FromQuery] int? schoolYear)
+    public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? triggerLectureId, [FromQuery] int? sourceCodeTemplateId)
     {
         var query = _db.Codes.AsQueryable();
         if (schoolYear.HasValue) query = query.Where(c => c.SchoolYear == schoolYear.Value);
+        if (triggerLectureId.HasValue) query = query.Where(c => c.TriggerLectureId == triggerLectureId.Value);
+        if (sourceCodeTemplateId.HasValue) query = query.Where(c => c.SourceCodeTemplateId == sourceCodeTemplateId.Value);
 
         var codes = await query.ToListAsync();
         var dtos = new List<object>();
@@ -225,15 +230,32 @@ public class CodesController : ControllerBase
     // Client success check is `res.statusCode == 200` (see _GenerateSheet._generate),
     // so this MUST return 200, not 201, or the client silently does nothing on a
     // successful create (no navigator pop, no onGenerated callback).
+    //
+    // When request.TriggerLectureId is set, this creates a TEMPLATE instead of a
+    // normal redeemable code: its Value is never shown for manual redemption,
+    // IsUsed stays false forever, and instead a fresh personal clone gets
+    // auto-issued (already used/assigned) to every student who attends that
+    // Center lecture — see AttendanceController.IssueTriggeredCodesAsync.
     [HttpPost]
     public async Task<IActionResult> Generate([FromBody] GenerateCodeRequest request)
     {
+        if (request.TriggerLectureId.HasValue)
+        {
+            var lecture = await _db.Lectures.AsNoTracking()
+                .FirstOrDefaultAsync(l => l.Id == request.TriggerLectureId.Value);
+            if (lecture == null) return NotFound(new { message = "Lecture not found." });
+            if (lecture.AttendanceMethod != AttendanceMethod.Center)
+                return BadRequest(new { message = "TriggerLectureId must be a Center lecture." });
+        }
+
         var code = new Code
         {
             Value = GenerateRandomCode(),
             SchoolYear = request.SchoolYear,
             UnitIds = request.UnitIds ?? new(),
             LectureIds = request.LectureIds ?? new(),
+            IsTemplate = request.TriggerLectureId.HasValue,
+            TriggerLectureId = request.TriggerLectureId,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
         };
         _db.Codes.Add(code);
@@ -242,12 +264,7 @@ public class CodesController : ControllerBase
         return Ok(await ToDto(code));
     }
 
-    private static string GenerateRandomCode()
-    {
-        const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-        var random = Random.Shared;
-        return new string(Enumerable.Range(0, 8).Select(_ => chars[random.Next(chars.Length)]).ToArray());
-    }
+    private static string GenerateRandomCode() => Common.CodeGenerator.GenerateRandom();
 
     private async Task<object> ToDto(Code c)
     {
@@ -289,7 +306,10 @@ public class CodesController : ControllerBase
             isUsed = c.IsUsed,
             isRedeemed = c.IsUsed, // client's list item reads "isRedeemed" specifically
             redeemedBy,
-            redeemedAt = c.UsedAt?.ToString("O")
+            redeemedAt = c.UsedAt?.ToString("O"),
+            isTemplate = c.IsTemplate,
+            triggerLectureId = c.TriggerLectureId,
+            sourceCodeTemplateId = c.SourceCodeTemplateId
         };
     }
 }

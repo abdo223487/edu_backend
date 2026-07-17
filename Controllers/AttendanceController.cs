@@ -87,6 +87,7 @@ public class AttendanceController : ControllerBase
 
         _db.Attendances.Add(attendance);
         await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
+        await IssueTriggeredCodesAsync(lectureId, studentId.Value);
         await _db.SaveChangesAsync();
 
         await SendAttendanceWhatsAppAsync(studentId.Value, attendance.Date);
@@ -116,6 +117,7 @@ public class AttendanceController : ControllerBase
                 Date = item.Date
             });
             await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
+            await IssueTriggeredCodesAsync(lectureId, studentId.Value);
             notifyList.Add((studentId.Value, item.Date));
             created++;
         }
@@ -128,23 +130,22 @@ public class AttendanceController : ControllerBase
         return Ok(new { message = $"{created} attendance record(s) saved.", saved = created, total = items.Count });
     }
 
-    // FEATURE: some Center lectures are named as a "subscription" lecture
-    // (the teacher puts "اشتراك"/"أشتراك" in the lecture Name) — attending
-    // one of these means the student is now subscribed to that lecture's
-    // Unit, even if they weren't enrolled in it before. We just add the
-    // pending StudentUnitSubscription row here; SaveChangesAsync at the end
-    // of the calling action persists it together with the Attendance row.
+    // FEATURE: a lecture can be flagged with AutoSubscribe = true (teacher
+    // sets this explicitly on the lecture, no more name-based heuristic).
+    // Attending such a lecture means the student is now subscribed to that
+    // lecture's Unit, even if they weren't enrolled in it before. We just
+    // add the pending StudentUnitSubscription row here; SaveChangesAsync at
+    // the end of the calling action persists it together with the
+    // Attendance row.
     private async Task AutoSubscribeIfSubscriptionLectureAsync(int lectureId, int studentId)
     {
         var lecture = await _db.Lectures.AsNoTracking()
             .Where(l => l.Id == lectureId)
-            .Select(l => new { l.UnitId, l.Name, l.TeacherId })
+            .Select(l => new { l.UnitId, l.AutoSubscribe, l.TeacherId })
             .FirstOrDefaultAsync();
 
         if (lecture == null || lecture.UnitId == null) return;
-        if (lecture.Name == null ||
-            (!lecture.Name.Contains("اشتراك") && !lecture.Name.Contains("أشتراك")))
-            return;
+        if (!lecture.AutoSubscribe) return;
 
         var unitId = lecture.UnitId.Value;
         var alreadySubscribed = await _db.StudentUnitSubscriptions
@@ -157,6 +158,61 @@ public class AttendanceController : ControllerBase
             StudentId = studentId,
             UnitId = unitId
         });
+    }
+
+    // FEATURE: a Code can be created as a TEMPLATE tied to a Center lecture
+    // (Code.IsTemplate + Code.TriggerLectureId — see CodesController.Generate).
+    // Every time a student attends that lecture, we clone the template into a
+    // brand-new, already-assigned Code row just for them (unique Value,
+    // IsUsed = true, UsedByStudentId = them from the start) — so it behaves
+    // exactly as if they'd redeemed a one-off code themselves, without ever
+    // exposing a shared code string another student could grab. Visible to
+    // the student via Students/codes (GetStudentCodes); never to anyone else.
+    private async Task IssueTriggeredCodesAsync(int lectureId, int studentId)
+    {
+        var templates = await _db.Codes
+            .Where(c => c.IsTemplate && c.TriggerLectureId == lectureId)
+            .ToListAsync();
+
+        foreach (var template in templates)
+        {
+            // One clone per student per template, ever — re-attending (not
+            // that duplicate Attendance rows are even possible, see the 400
+            // check above) or attending a re-created lecture with the same
+            // template must never mint a second code for the same student.
+            var alreadyIssued = await _db.Codes.AnyAsync(c =>
+                c.SourceCodeTemplateId == template.Id && c.UsedByStudentId == studentId);
+            if (alreadyIssued) continue;
+
+            var issued = new Code
+            {
+                Value = await CodeGenerator.GenerateUniqueAsync(_db),
+                SchoolYear = template.SchoolYear,
+                UnitIds = template.UnitIds,
+                LectureIds = template.LectureIds,
+                TeacherId = template.TeacherId,
+                SourceCodeTemplateId = template.Id,
+                IsUsed = true,
+                UsedByStudentId = studentId,
+                UsedAt = DateTime.UtcNow
+            };
+            _db.Codes.Add(issued);
+
+            // Same unlock-granting behavior as StudentsController.RedeemCode —
+            // the code is issued already "redeemed", so apply its effects
+            // immediately instead of waiting for a redeem call that will
+            // never come.
+            foreach (var unitId in issued.UnitIds)
+            {
+                if (!await _db.StudentUnitSubscriptions.AnyAsync(s => s.StudentId == studentId && s.UnitId == unitId))
+                    _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = template.TeacherId, StudentId = studentId, UnitId = unitId });
+            }
+            foreach (var lecId in issued.LectureIds)
+            {
+                if (!await _db.StudentLectureUnlocks.AnyAsync(u => u.StudentId == studentId && u.LectureId == lecId))
+                    _db.StudentLectureUnlocks.Add(new StudentLectureUnlock { TeacherId = template.TeacherId, StudentId = studentId, LectureId = lecId });
+            }
+        }
     }
 
     private async Task<int?> ResolveStudentIdAsync(string encodedStudentId)

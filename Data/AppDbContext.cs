@@ -101,6 +101,10 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Material>().HasIndex(m => m.TeacherId);
         modelBuilder.Entity<Notebook>().HasIndex(n => n.TeacherId);
         modelBuilder.Entity<Code>().HasIndex(c => c.TeacherId);
+        // Every attendance record now looks up Codes by TriggerLectureId
+        // (IssueTriggeredCodesAsync) — same performance reasoning as the
+        // TeacherId indexes above.
+        modelBuilder.Entity<Code>().HasIndex(c => c.TriggerLectureId);
         modelBuilder.Entity<Notification>().HasIndex(n => n.TeacherId);
         modelBuilder.Entity<Quiz>().HasIndex(q => q.TeacherId);
         modelBuilder.Entity<Assignment>().HasIndex(a => a.TeacherId);

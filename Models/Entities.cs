@@ -267,6 +267,14 @@ public class Lecture
     public int? SchoolYear { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+    /// <summary>
+    /// When true and this lecture has a UnitId, attending it auto-subscribes
+    /// the student to that Unit (via StudentUnitSubscriptions) if they
+    /// weren't subscribed already. Replaces the old name-based
+    /// ("اشتراك"/"أشتراك" in Name) heuristic.
+    /// </summary>
+    public bool AutoSubscribe { get; set; } = false;
+
     /// <summary>TENANT LAYER: which teacher (tenant) this lecture belongs to.</summary>
     public int TeacherId { get; set; }
 }
@@ -374,6 +382,31 @@ public class Code
     }
     public bool IsUsed { get; set; }
     public int? UsedByStudentId { get; set; }
+
+    /// <summary>
+    /// When true, this row is a TEMPLATE, not a real redeemable code: the
+    /// teacher created it with a TriggerLectureId instead of handing out its
+    /// Value. It is never itself redeemable (RedeemCode rejects it) and never
+    /// becomes IsUsed. Every time a student attends TriggerLectureId, a
+    /// fresh, unique, already-assigned Code row is cloned from this template
+    /// (see AttendanceController.IssueTriggeredCodesAsync) — SourceCodeTemplateId
+    /// on that clone points back here.
+    /// </summary>
+    public bool IsTemplate { get; set; } = false;
+
+    /// <summary>
+    /// Set only on a template (IsTemplate = true): the Center lecture whose
+    /// attendance auto-issues a personal code clone to whoever attends it.
+    /// </summary>
+    public int? TriggerLectureId { get; set; }
+
+    /// <summary>
+    /// Set only on an auto-issued clone (IsTemplate = false, IsUsed = true
+    /// from creation): the template Code.Id it was cloned from. Used to
+    /// avoid issuing a second code to the same student from the same
+    /// template, and to let a teacher trace clones back to their template.
+    /// </summary>
+    public int? SourceCodeTemplateId { get; set; }
 
     /// <summary>
     /// When the code was redeemed. The Flutter details sheet reads this as
