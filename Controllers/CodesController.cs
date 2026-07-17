@@ -70,15 +70,20 @@ public class CodesController : ControllerBase
 
         // A lecture is only "codeable" (redeemable via a Code) when a student
         // has no other way to reach it: it must be an Online lecture with an
-        // actual YouTube link (a Center-only lecture, or an Online lecture
-        // still missing its link, isn't watchable yet), and it must belong to
-        // this school year (directly or via its group) and carry at least
-        // one Group. Without this filter, codes could be generated for
-        // lectures that either aren't playable or aren't scoped to any
-        // year/group at all.
+        // actual playable video source — either a YouTube link OR an
+        // uploaded file stored in R2 (StorageFileKey) — since a lecture can
+        // have either one but never both (a Center-only lecture, or an
+        // Online lecture still missing both, isn't watchable yet). It must
+        // also belong to this school year (directly or via its group) and
+        // carry at least one Group. Without this filter, codes could be
+        // generated for lectures that either aren't playable or aren't
+        // scoped to any year/group at all.
+        bool HasVideoSource(Lecture l) =>
+            !string.IsNullOrWhiteSpace(l.YoutubeLink) || !string.IsNullOrWhiteSpace(l.StorageFileKey);
+
         bool IsCodeable(Lecture l) =>
             l.AttendanceMethod == AttendanceMethod.Online &&
-            !string.IsNullOrWhiteSpace(l.YoutubeLink) &&
+            HasVideoSource(l) &&
             !string.IsNullOrEmpty(l.GroupIdsCsv) &&
             EffectiveYear(l) == schoolYear;
 
@@ -99,13 +104,13 @@ public class CodesController : ControllerBase
                     .Select(l => new { id = l.Id, name = l.Name })
                     .ToList()
             })
-            // Drop lessons that end up with zero codeable lectures — nothing
-            // in them could actually be granted by a code.
-            .Where(lesson => lesson.lectures.Count > 0)
+            // Keep every lesson, even ones with zero codeable lectures right
+            // now — the teacher may add codeable lectures to it later, and
+            // it should stay visible in the tree either way.
             .ToList()
         })
-        // Likewise drop units left with no codeable lessons at all.
-        .Where(u => u.lessons.Count > 0)
+        // Likewise keep every unit for this school year, even ones with no
+        // codeable lessons yet.
         .ToList();
 
         // Fetch all no-unit lectures (not just ones with SchoolYear already
@@ -158,6 +163,7 @@ public class CodesController : ControllerBase
             lessonIndex = l.LessonIndex,
             attendanceMethod = l.AttendanceMethod.ToString(),
             youtubeLink = l.YoutubeLink,
+            storageFileKey = l.StorageFileKey,
             rawSchoolYear = l.SchoolYear,
             effectiveSchoolYear = EffectiveYear(l),
             groupIdsCsv = l.GroupIdsCsv,
@@ -165,7 +171,7 @@ public class CodesController : ControllerBase
             failsBecause = new
             {
                 notOnline = l.AttendanceMethod != AttendanceMethod.Online,
-                noYoutubeLink = string.IsNullOrWhiteSpace(l.YoutubeLink),
+                noVideoSource = string.IsNullOrWhiteSpace(l.YoutubeLink) && string.IsNullOrWhiteSpace(l.StorageFileKey),
                 noGroup = string.IsNullOrEmpty(l.GroupIdsCsv),
                 effectiveYearDoesNotMatchRequested = EffectiveYear(l) != schoolYear
             }
