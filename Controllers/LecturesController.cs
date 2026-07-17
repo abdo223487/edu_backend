@@ -42,7 +42,10 @@ public class LecturesController : ControllerBase
     // Cloudflare R2, same as quiz-question images and lecture materials) in
     // addition to a plain YouTube link.
     // fields: Name, AttendanceMethod, GroupIds[i], UnitId?, LessonIndex?,
-    //         SchoolYear?, YoutubeLink? (text)
+    //         SchoolYear?, YoutubeLink? (text — see IsYoutubeUrl below: this
+    //         field also accepts a direct video URL the teacher already
+    //         uploaded to R2/elsewhere by hand, so the app doesn't need any
+    //         separate field or UI for that case)
     // file:   VideoFile (optional, .mp4)
     [HttpPost]
     [Consumes("multipart/form-data")]
@@ -55,16 +58,32 @@ public class LecturesController : ControllerBase
         if (!Enum.TryParse<AttendanceMethod>(attendanceMethodRaw, true, out var method))
             return BadRequest(new { message = "attendanceMethod must be 'Center' or 'Online'." });
 
-        var youtubeLink = form["YoutubeLink"].ToString();
-        if (string.IsNullOrWhiteSpace(youtubeLink)) youtubeLink = null;
+        var youtubeLinkRaw = form["YoutubeLink"].ToString();
+        if (string.IsNullOrWhiteSpace(youtubeLinkRaw)) youtubeLinkRaw = null;
 
         var videoFile = form.Files["VideoFile"];
 
-        // A recorded upload and a YouTube link both describing "the video for
-        // this lecture" don't make sense together — pick exactly one so the
-        // client never has to guess which one is actually meant to play.
-        if (videoFile != null && youtubeLink != null)
-            return BadRequest(new { message = "Provide either a video file or a YouTube link, not both." });
+        // The client only ever sends one text field for "the video link"
+        // (still called YoutubeLink for backward compatibility with the
+        // existing app — no frontend change needed). It's flexible on
+        // purpose: if what's in there is an actual YouTube URL, treat it as
+        // one; otherwise assume it's a direct video URL the teacher already
+        // uploaded to R2 (or anywhere else) by hand, and treat it exactly
+        // like an uploaded video file — same as VideoFile, just skipping the
+        // upload step since it's already hosted somewhere.
+        string? youtubeLink = null;
+        string? manualVideoLink = null;
+        if (youtubeLinkRaw != null)
+        {
+            if (IsYoutubeUrl(youtubeLinkRaw)) youtubeLink = youtubeLinkRaw;
+            else manualVideoLink = youtubeLinkRaw;
+        }
+
+        // A recorded upload and a YouTube/manual-link video both describing
+        // "the video for this lecture" don't make sense together — pick
+        // exactly one so the client never has to guess which one plays.
+        if (videoFile != null && youtubeLinkRaw != null)
+            return BadRequest(new { message = "Provide either a video file or a video/YouTube link, not both." });
 
         string? storageFileUrl = null;
         string? thumbnailUrl = null;
@@ -82,6 +101,14 @@ public class LecturesController : ControllerBase
             // a lecture with a working video but no thumbnail is fine; the
             // reverse would not be.
             thumbnailUrl = await TryGenerateThumbnailAsync(videoFile);
+        }
+        else if (manualVideoLink != null)
+        {
+            // Nothing to upload — the video is already hosted at this URL.
+            // ffmpeg can read directly from an http(s) URL, so we point it
+            // there instead of downloading the file ourselves first.
+            storageFileUrl = manualVideoLink;
+            thumbnailUrl = await TryGenerateThumbnailFromUrlAsync(manualVideoLink);
         }
 
         var groupIds = new List<int>();
@@ -383,6 +410,46 @@ public class LecturesController : ControllerBase
     /// rather than throwing, since a lecture is still perfectly usable
     /// without a thumbnail.
     /// </summary>
+    /// <summary>True for youtube.com/youtu.be links; false for anything else (including a manually-hosted R2/other video URL).</summary>
+    private static bool IsYoutubeUrl(string url) =>
+        url.Contains("youtube.com", StringComparison.OrdinalIgnoreCase) ||
+        url.Contains("youtu.be", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Same as TryGenerateThumbnailAsync, but for a video that's already
+    /// hosted somewhere (manually uploaded to R2 by the teacher) rather than
+    /// one just received in this request. ffmpeg can read straight from an
+    /// http(s) URL, so there's no local file to save/clean up here.
+    /// </summary>
+    private async Task<string?> TryGenerateThumbnailFromUrlAsync(string videoUrl)
+    {
+        var tempThumbPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.jpg");
+        try
+        {
+            var ok = await RunFfmpegAsync($"-y -ss 00:00:01 -i \"{videoUrl}\" -frames:v 1 -q:v 3 \"{tempThumbPath}\"");
+            if (!ok || !System.IO.File.Exists(tempThumbPath))
+                ok = await RunFfmpegAsync($"-y -i \"{videoUrl}\" -frames:v 1 -q:v 3 \"{tempThumbPath}\"");
+            if (!ok || !System.IO.File.Exists(tempThumbPath)) return null;
+
+            await using var thumbStream = System.IO.File.OpenRead(tempThumbPath);
+            var thumbFormFile = new FormFile(thumbStream, 0, thumbStream.Length, "thumbnail", "thumbnail.jpg")
+            {
+                Headers = new HeaderDictionary(),
+                ContentType = "image/jpeg",
+            };
+            return await _files.SaveAsync(thumbFormFile, "lecture-thumbnails");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Lecture thumbnail generation (from manual video URL) failed.");
+            return null;
+        }
+        finally
+        {
+            TryDeleteTempFile(tempThumbPath);
+        }
+    }
+
     /// <summary>Runs ffmpeg with the given arguments; returns true on exit code 0, logging a warning (with stderr) otherwise.</summary>
     private async Task<bool> RunFfmpegAsync(string arguments)
     {
