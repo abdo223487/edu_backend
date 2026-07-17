@@ -1285,12 +1285,43 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetNotebookPaymentsForStudent(int notebookId, [FromQuery] int studentId)
     {
+        // BUGFIX: previously selected straight off NotebookPayments with no
+        // lecture info at all, so the Flutter payments screen always fell
+        // back to a generic "محاضرة" label with no unit — now that
+        // NotebookPayment.LectureId is actually persisted (see PayNotebook
+        // below), include the Lecture so each row can report which lecture
+        // the payment was actually made for.
         var payments = await _db.NotebookPayments.AsNoTracking()
             .Where(p => p.NotebookId == notebookId && p.StudentId == studentId)
-            .Select(p => new { id = p.Id, price = p.Price, discountedPrice = p.DiscountedPrice, date = p.Date })
+            .Include(p => p.Lecture)
             .ToListAsync();
 
-        return Ok(payments);
+        // Lecture doesn't have a Unit navigation property (just a raw
+        // UnitId), so batch-load the handful of Units these lectures point
+        // to in one extra query instead of shaping this in SQL.
+        var unitIds = payments.Where(p => p.Lecture?.UnitId != null)
+            .Select(p => p.Lecture!.UnitId!.Value).Distinct().ToList();
+        var unitsById = await _db.Units.AsNoTracking()
+            .Where(u => unitIds.Contains(u.Id))
+            .ToDictionaryAsync(u => u.Id, u => u.Name);
+
+        var result = payments.Select(p => new
+        {
+            id = p.Id,
+            amount = p.Price,
+            discountedPrice = p.DiscountedPrice,
+            date = p.Date,
+            lecture = p.Lecture == null ? null : new
+            {
+                id = p.Lecture.Id,
+                name = p.Lecture.Name,
+                unit = p.Lecture.UnitId != null && unitsById.TryGetValue(p.Lecture.UnitId.Value, out var uName)
+                    ? new { id = p.Lecture.UnitId.Value, name = uName }
+                    : null
+            }
+        });
+
+        return Ok(result);
     }
 
     // POST Students/{notebookId}/pay  body: { studentId, amount, lectureId }
@@ -1306,7 +1337,8 @@ public class StudentsController : ControllerBase
             TeacherId = notebook.TeacherId,
             NotebookId = notebookId,
             StudentId = request.StudentId,
-            Price = request.Amount
+            Price = request.Amount,
+            LectureId = request.LectureId,
         };
         _db.NotebookPayments.Add(payment);
         await _db.SaveChangesAsync();

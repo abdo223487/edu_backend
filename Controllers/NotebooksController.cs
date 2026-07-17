@@ -8,13 +8,15 @@ using Microsoft.EntityFrameworkCore;
 namespace EduApi.Controllers;
 
 public record CreateNotebookRequest(string Name, int SchoolYear, List<int> GroupIds, int Price, List<int>? UnitIds);
+public record RenameNotebookRequest(string Name);
 
 /// <summary>
 /// Route: api/Notebooks
-///  GET  Notebooks?schoolYear=..            -> list, includes aggregated "paid" and "createdAt"
-///  POST Notebooks
-///  GET  Notebooks/{id}                     -> details, "groups"/"units" hydrated with names
-///  GET  Notebooks/{id}/payments            -> each payment includes "student" + "totalPaid"
+///  GET   Notebooks?schoolYear=..            -> list, includes aggregated "paid" and "createdAt"
+///  POST  Notebooks
+///  PATCH Notebooks/{id}                     -> rename
+///  GET   Notebooks/{id}                     -> details, "groups"/"units" hydrated with names
+///  GET   Notebooks/{id}/payments            -> each payment includes "student" + "totalPaid"
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -84,6 +86,22 @@ public class NotebooksController : ControllerBase
             createdAt = notebook.CreatedAt,
             paid = 0
         });
+    }
+
+    // PATCH Notebooks/{id}  body: { name }
+    [HttpPatch("{id:int}")]
+    public async Task<IActionResult> Rename(int id, [FromBody] RenameNotebookRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Name))
+            return BadRequest(new { message = "Name is required." });
+
+        var notebook = await _db.Notebooks.FirstOrDefaultAsync(e => e.Id == id);
+        if (notebook == null) return NotFound(new { message = "Notebook not found." });
+
+        notebook.Name = request.Name.Trim();
+        await _db.SaveChangesAsync();
+
+        return Ok(new { id = notebook.Id, name = notebook.Name });
     }
 
     [HttpGet("{id:int}")]

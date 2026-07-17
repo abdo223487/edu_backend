@@ -343,7 +343,17 @@ public class NotebookPayment
     public int Price { get; set; }
     public int? DiscountedPrice { get; set; }
     public DateTime Date { get; set; } = DateTime.UtcNow;
+    // BUGFIX: PayNotebookRequest already carried LectureId from the client
+    // (the Flutter payment flow asks "which lecture is this payment for"),
+    // but nothing on this entity ever stored it, so the payments list could
+    // never say which lecture a payment belonged to — the Flutter payments
+    // screen showed the generic "محاضرة" fallback and no unit name for
+    // every single row. Nullable because ApplyDiscount() creates a
+    // NotebookPayment row too, and a discount isn't tied to any one lecture.
+    public int? LectureId { get; set; }
+    public Lecture? Lecture { get; set; }
 }
+
 
 public class Code
 {
