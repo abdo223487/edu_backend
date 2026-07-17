@@ -7,12 +7,13 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace EduApi.Controllers;
 
 /// <summary>
 /// Route: api/Lectures. Mirrors:
-///  POST   Lectures                                (multipart/form-data — video file OR YoutubeLink)
+///  POST   Lectures                                (multipart/form-data if a video file is attached, else plain JSON — e.g. Center lectures)
 ///  PATCH  Lectures/{id}
 ///  POST   Lectures/delete?lectureId=..
 ///  GET    Lectures/by-group?groupId=..&attendanceMethod=..&unitId=..&lessonIndex=..&noUnitOnly=..&p=..
@@ -48,20 +49,78 @@ public class LecturesController : ControllerBase
     //         separate field or UI for that case)
     // file:   VideoFile (optional, .mp4)
     [HttpPost]
-    [Consumes("multipart/form-data")]
     public async Task<IActionResult> Create()
     {
-        var form = await Request.ReadFormAsync();
+        // BUGFIX: this endpoint used to be hard-locked to
+        // [Consumes("multipart/form-data")], which made ASP.NET Core reject
+        // any request with a different content type — including plain JSON
+        // — with a 415 before the action even ran. That's fine for Online
+        // lectures (which may carry a video file and need multipart), but
+        // broke Center lecture creation, whose client still POSTs a normal
+        // JSON body (no video to attach). Now both are accepted: read the
+        // multipart form when there's actually a form, otherwise fall back
+        // to parsing a JSON body with the same field names.
+        string name, attendanceMethodRaw;
+        string? youtubeLinkRaw;
+        IFormFile? videoFile;
+        var groupIds = new List<int>();
+        int? unitId, lessonIndex, requestSchoolYear;
 
-        var name = form["Name"].ToString();
-        var attendanceMethodRaw = form["AttendanceMethod"].ToString();
+        if (Request.HasFormContentType)
+        {
+            var form = await Request.ReadFormAsync();
+
+            name = form["Name"].ToString();
+            attendanceMethodRaw = form["AttendanceMethod"].ToString();
+            youtubeLinkRaw = form["YoutubeLink"].ToString();
+            if (string.IsNullOrWhiteSpace(youtubeLinkRaw)) youtubeLinkRaw = null;
+            videoFile = form.Files["VideoFile"];
+
+            for (var i = 0; form.ContainsKey($"GroupIds[{i}]"); i++)
+                groupIds.Add(int.Parse(form[$"GroupIds[{i}]"].ToString()));
+
+            unitId = int.TryParse(form["UnitId"].ToString(), out var uid) ? uid : null;
+            lessonIndex = int.TryParse(form["LessonIndex"].ToString(), out var li) ? li : null;
+            requestSchoolYear = int.TryParse(form["SchoolYear"].ToString(), out var sy) ? sy : null;
+        }
+        else
+        {
+            using var reader = new StreamReader(Request.Body);
+            var bodyText = await reader.ReadToEndAsync();
+            using var json = JsonDocument.Parse(string.IsNullOrWhiteSpace(bodyText) ? "{}" : bodyText);
+            var root = json.RootElement;
+
+            // Accepts either camelCase (typical System.Text.Json client output)
+            // or PascalCase property names, whichever the caller sends.
+            string? GetString(string camel, string pascal) =>
+                root.TryGetProperty(camel, out var v1) && v1.ValueKind == JsonValueKind.String ? v1.GetString() :
+                root.TryGetProperty(pascal, out var v2) && v2.ValueKind == JsonValueKind.String ? v2.GetString() : null;
+
+            int? GetInt(string camel, string pascal)
+            {
+                if (root.TryGetProperty(camel, out var v1) && v1.ValueKind == JsonValueKind.Number) return v1.GetInt32();
+                if (root.TryGetProperty(pascal, out var v2) && v2.ValueKind == JsonValueKind.Number) return v2.GetInt32();
+                return null;
+            }
+
+            name = GetString("name", "Name") ?? "";
+            attendanceMethodRaw = GetString("attendanceMethod", "AttendanceMethod") ?? "";
+            youtubeLinkRaw = GetString("youtubeLink", "YoutubeLink");
+            videoFile = null; // JSON bodies never carry a file.
+
+            if (root.TryGetProperty("groupIds", out var gArr) || root.TryGetProperty("GroupIds", out gArr))
+            {
+                foreach (var el in gArr.EnumerateArray())
+                    if (el.ValueKind == JsonValueKind.Number) groupIds.Add(el.GetInt32());
+            }
+
+            unitId = GetInt("unitId", "UnitId");
+            lessonIndex = GetInt("lessonIndex", "LessonIndex");
+            requestSchoolYear = GetInt("schoolYear", "SchoolYear");
+        }
+
         if (!Enum.TryParse<AttendanceMethod>(attendanceMethodRaw, true, out var method))
             return BadRequest(new { message = "attendanceMethod must be 'Center' or 'Online'." });
-
-        var youtubeLinkRaw = form["YoutubeLink"].ToString();
-        if (string.IsNullOrWhiteSpace(youtubeLinkRaw)) youtubeLinkRaw = null;
-
-        var videoFile = form.Files["VideoFile"];
 
         // The client only ever sends one text field for "the video link"
         // (still called YoutubeLink for backward compatibility with the
@@ -110,14 +169,6 @@ public class LecturesController : ControllerBase
             storageFileUrl = manualVideoLink;
             thumbnailUrl = await TryGenerateThumbnailFromUrlAsync(manualVideoLink);
         }
-
-        var groupIds = new List<int>();
-        for (var i = 0; form.ContainsKey($"GroupIds[{i}]"); i++)
-            groupIds.Add(int.Parse(form[$"GroupIds[{i}]"].ToString()));
-
-        int? unitId = int.TryParse(form["UnitId"].ToString(), out var uid) ? uid : null;
-        int? lessonIndex = int.TryParse(form["LessonIndex"].ToString(), out var li) ? li : null;
-        int? requestSchoolYear = int.TryParse(form["SchoolYear"].ToString(), out var sy) ? sy : null;
 
         // Same SchoolYear-derivation rule as before: prefer the Unit's year,
         // fall back to an explicitly-sent SchoolYear, then to the first
