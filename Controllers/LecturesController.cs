@@ -26,14 +26,16 @@ public class LecturesController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IFileStorageService _files;
+    private readonly ILogger<LecturesController> _logger;
 
     private readonly Common.ITenantContext _tenant;
 
-    public LecturesController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant)
+    public LecturesController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, ILogger<LecturesController> logger)
     {
         _db = db;
         _files = files;
         _tenant = tenant;
+        _logger = logger;
     }
 
     // Multipart create — supports an actual recorded-video upload (stored in
@@ -381,6 +383,40 @@ public class LecturesController : ControllerBase
     /// rather than throwing, since a lecture is still perfectly usable
     /// without a thumbnail.
     /// </summary>
+    /// <summary>Runs ffmpeg with the given arguments; returns true on exit code 0, logging a warning (with stderr) otherwise.</summary>
+    private async Task<bool> RunFfmpegAsync(string arguments)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = "ffmpeg",
+            Arguments = arguments,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        using var process = Process.Start(psi);
+        if (process == null)
+        {
+            _logger.LogWarning("Lecture thumbnail: ffmpeg Process.Start returned null (couldn't launch process — is ffmpeg installed and on PATH?).");
+            return false;
+        }
+
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        var stderr = await stderrTask;
+
+        if (process.ExitCode != 0)
+        {
+            _logger.LogWarning("Lecture thumbnail: ffmpeg exited with code {ExitCode}. Args: {Args}. stderr: {Stderr}",
+                process.ExitCode, arguments, stderr);
+            return false;
+        }
+
+        return true;
+    }
+
     private async Task<string?> TryGenerateThumbnailAsync(IFormFile videoFile)
     {
         var tempVideoPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.mp4");
@@ -394,22 +430,15 @@ public class LecturesController : ControllerBase
                 await videoStream.CopyToAsync(fileStream);
             }
 
-            var psi = new ProcessStartInfo
+            var ok = await RunFfmpegAsync($"-y -ss 00:00:01 -i \"{tempVideoPath}\" -frames:v 1 -q:v 3 \"{tempThumbPath}\"");
+            if (!ok || !System.IO.File.Exists(tempThumbPath))
             {
-                FileName = "ffmpeg",
-                // -y overwrite, -ss seek to 1s, -frames:v 1 grab exactly one frame.
-                Arguments = $"-y -ss 00:00:01 -i \"{tempVideoPath}\" -frames:v 1 -q:v 3 \"{tempThumbPath}\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-
-            using var process = Process.Start(psi);
-            if (process == null) return null;
-            await process.WaitForExitAsync();
-
-            if (!System.IO.File.Exists(tempThumbPath)) return null;
+                // Falls back to the very first frame — the 1s seek above
+                // fails on videos shorter than 1 second (common with short
+                // test clips), since there's nothing at that timestamp.
+                ok = await RunFfmpegAsync($"-y -i \"{tempVideoPath}\" -frames:v 1 -q:v 3 \"{tempThumbPath}\"");
+            }
+            if (!ok || !System.IO.File.Exists(tempThumbPath)) return null;
 
             await using var thumbStream = System.IO.File.OpenRead(tempThumbPath);
             var thumbFormFile = new FormFile(thumbStream, 0, thumbStream.Length, "thumbnail", "thumbnail.jpg")
@@ -420,10 +449,12 @@ public class LecturesController : ControllerBase
 
             return await _files.SaveAsync(thumbFormFile, "lecture-thumbnails");
         }
-        catch
+        catch (Exception ex)
         {
             // ffmpeg not installed, corrupt video, etc. — never let a
-            // thumbnail failure block creating the lecture itself.
+            // thumbnail failure block creating the lecture itself, but DO
+            // log it so it's diagnosable instead of silently null forever.
+            _logger.LogWarning(ex, "Lecture thumbnail generation failed.");
             return null;
         }
         finally
