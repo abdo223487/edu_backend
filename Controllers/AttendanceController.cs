@@ -8,12 +8,18 @@ using Microsoft.EntityFrameworkCore;
 
 namespace EduApi.Controllers;
 
-// POST Attendance?lectureId=..  body: { encodedStudentId } OR { studentId }, plus optional { date }
+// POST Attendance?lectureId=..  body: { encodedStudentId } OR { studentId }, plus optional { date },
+// plus optional { autoSubscribe } (default false).
 // (single scan uses encodedStudentId; manual teacher entry uses studentId + date)
-public record RecordAttendanceRequest(string? EncodedStudentId, int? StudentId, DateTime? Date);
+// "autoSubscribe": when true and the lecture has a UnitId, recording this
+// student's attendance also subscribes them to that Unit (if not already
+// subscribed). Decided per-request/per-student, not per-lecture.
+public record RecordAttendanceRequest(string? EncodedStudentId, int? StudentId, DateTime? Date, bool AutoSubscribe = false);
 
-// POST Attendance/bulk?lectureId=..  body: [ { encodedStudentId, date }, ... ]
-public record BulkAttendanceItem(string EncodedStudentId, DateTime Date);
+// POST Attendance/bulk?lectureId=..  body: [ { encodedStudentId, date, autoSubscribe }, ... ]
+// "autoSubscribe" is per-item, so a single bulk call can open the lecture's
+// Unit for some students and not others.
+public record BulkAttendanceItem(string EncodedStudentId, DateTime Date, bool AutoSubscribe = false);
 
 /// <summary>
 /// Route: api/Attendance
@@ -86,7 +92,8 @@ public class AttendanceController : ControllerBase
         if (request.Date.HasValue) attendance.Date = request.Date.Value;
 
         _db.Attendances.Add(attendance);
-        await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
+        if (request.AutoSubscribe)
+            await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
         await IssueTriggeredCodesAsync(lectureId, studentId.Value);
         await _db.SaveChangesAsync();
 
@@ -116,7 +123,8 @@ public class AttendanceController : ControllerBase
                 EncodedStudentId = item.EncodedStudentId,
                 Date = item.Date
             });
-            await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
+            if (item.AutoSubscribe)
+                await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
             await IssueTriggeredCodesAsync(lectureId, studentId.Value);
             notifyList.Add((studentId.Value, item.Date));
             created++;
@@ -130,22 +138,22 @@ public class AttendanceController : ControllerBase
         return Ok(new { message = $"{created} attendance record(s) saved.", saved = created, total = items.Count });
     }
 
-    // FEATURE: a lecture can be flagged with AutoSubscribe = true (teacher
-    // sets this explicitly on the lecture, no more name-based heuristic).
-    // Attending such a lecture means the student is now subscribed to that
-    // lecture's Unit, even if they weren't enrolled in it before. We just
-    // add the pending StudentUnitSubscription row here; SaveChangesAsync at
-    // the end of the calling action persists it together with the
-    // Attendance row.
+    // FEATURE: "autoSubscribe" is now decided per attendance record (per
+    // student, per scan/entry) instead of being a fixed flag on the
+    // Lecture. The caller (Record / RecordBulk) only invokes this when the
+    // request/item explicitly asked for it. If the lecture has a UnitId,
+    // recording this student's attendance also subscribes them to that
+    // Unit, even if they weren't enrolled in it before. We just add the
+    // pending StudentUnitSubscription row here; SaveChangesAsync at the end
+    // of the calling action persists it together with the Attendance row.
     private async Task AutoSubscribeIfSubscriptionLectureAsync(int lectureId, int studentId)
     {
         var lecture = await _db.Lectures.AsNoTracking()
             .Where(l => l.Id == lectureId)
-            .Select(l => new { l.UnitId, l.AutoSubscribe, l.TeacherId })
+            .Select(l => new { l.UnitId, l.TeacherId })
             .FirstOrDefaultAsync();
 
         if (lecture == null || lecture.UnitId == null) return;
-        if (!lecture.AutoSubscribe) return;
 
         var unitId = lecture.UnitId.Value;
         var alreadySubscribed = await _db.StudentUnitSubscriptions

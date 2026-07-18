@@ -17,7 +17,7 @@ namespace EduApi.DTOs;
 // "schoolYear" is mainly useful to backfill standalone lectures created before
 // SchoolYear was required on them. Video source (file/YoutubeLink) is NOT
 // editable here — delete and recreate the lecture to change its video.
-public record UpdateLectureRequest(string? Name, string? AttendanceMethod, int? SchoolYear, bool? AutoSubscribe);
+public record UpdateLectureRequest(string? Name, string? AttendanceMethod, int? SchoolYear);
 
 // "Link" is whichever video source is actually playable right now: the R2
 // file's public URL if the lecture has one, otherwise the YoutubeLink.
@@ -37,7 +37,6 @@ public record LectureListItem(
     int? UnitId,
     int? LessonIndex,
     List<int> GroupIds,
-    DateTime CreatedAt,
-    bool AutoSubscribe);
+    DateTime CreatedAt);
 
 public record MaterialListItem(int Id, string Name, string Type, string Link);

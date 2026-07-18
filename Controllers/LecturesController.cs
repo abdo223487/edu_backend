@@ -65,7 +65,6 @@ public class LecturesController : ControllerBase
         IFormFile? videoFile;
         var groupIds = new List<int>();
         int? unitId, lessonIndex, requestSchoolYear;
-        bool autoSubscribe;
 
         if (Request.HasFormContentType)
         {
@@ -83,7 +82,6 @@ public class LecturesController : ControllerBase
             unitId = int.TryParse(form["UnitId"].ToString(), out var uid) ? uid : null;
             lessonIndex = int.TryParse(form["LessonIndex"].ToString(), out var li) ? li : null;
             requestSchoolYear = int.TryParse(form["SchoolYear"].ToString(), out var sy) ? sy : null;
-            autoSubscribe = bool.TryParse(form["AutoSubscribe"].ToString(), out var asb) && asb;
         }
         else
         {
@@ -105,15 +103,6 @@ public class LecturesController : ControllerBase
                 return null;
             }
 
-            bool GetBool(string camel, string pascal)
-            {
-                if (root.TryGetProperty(camel, out var v1) &&
-                    (v1.ValueKind == JsonValueKind.True || v1.ValueKind == JsonValueKind.False)) return v1.GetBoolean();
-                if (root.TryGetProperty(pascal, out var v2) &&
-                    (v2.ValueKind == JsonValueKind.True || v2.ValueKind == JsonValueKind.False)) return v2.GetBoolean();
-                return false;
-            }
-
             name = GetString("name", "Name") ?? "";
             attendanceMethodRaw = GetString("attendanceMethod", "AttendanceMethod") ?? "";
             youtubeLinkRaw = GetString("youtubeLink", "YoutubeLink");
@@ -128,7 +117,6 @@ public class LecturesController : ControllerBase
             unitId = GetInt("unitId", "UnitId");
             lessonIndex = GetInt("lessonIndex", "LessonIndex");
             requestSchoolYear = GetInt("schoolYear", "SchoolYear");
-            autoSubscribe = GetBool("autoSubscribe", "AutoSubscribe");
         }
 
         if (!Enum.TryParse<AttendanceMethod>(attendanceMethodRaw, true, out var method))
@@ -214,7 +202,6 @@ public class LecturesController : ControllerBase
             UnitId = unitId,
             LessonIndex = lessonIndex,
             SchoolYear = schoolYear,
-            AutoSubscribe = autoSubscribe,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
         };
 
@@ -235,7 +222,6 @@ public class LecturesController : ControllerBase
             Enum.TryParse<AttendanceMethod>(request.AttendanceMethod, true, out var method))
             lecture.AttendanceMethod = method;
         if (request.SchoolYear.HasValue) lecture.SchoolYear = request.SchoolYear.Value;
-        if (request.AutoSubscribe.HasValue) lecture.AutoSubscribe = request.AutoSubscribe.Value;
 
         await _db.SaveChangesAsync();
         return Ok(ToDto(lecture));
@@ -301,7 +287,7 @@ public class LecturesController : ControllerBase
         // the SQL level instead of materializing the full Lecture row
         // (TeacherId/Months/SchoolYear are never used here).
         var items = await query.OrderBy(l => l.Id)
-            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.AutoSubscribe })
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt })
             .ToListAsync();
         return Ok(items.Select(l =>
         {
@@ -309,7 +295,7 @@ public class LecturesController : ControllerBase
             return new LectureListItem(
                 l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
-                l.CreatedAt, l.AutoSubscribe);
+                l.CreatedAt);
         }));
     }
 
@@ -369,7 +355,7 @@ public class LecturesController : ControllerBase
             .OrderBy(l => l.Id)
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
-            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.AutoSubscribe })
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt })
             .ToListAsync();
 
         return Ok(items.Select(l =>
@@ -378,7 +364,7 @@ public class LecturesController : ControllerBase
             return new LectureListItem(
                 l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
-                l.CreatedAt, l.AutoSubscribe);
+                l.CreatedAt);
         }));
     }
 
@@ -449,7 +435,7 @@ public class LecturesController : ControllerBase
     private static LectureListItem ToDto(Lecture l)
     {
         var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
-        return new(l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIds, l.CreatedAt, l.AutoSubscribe);
+        return new(l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIds, l.CreatedAt);
     }
 
     /// <summary>

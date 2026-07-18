@@ -267,14 +267,6 @@ public class Lecture
     public int? SchoolYear { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
-    /// <summary>
-    /// When true and this lecture has a UnitId, attending it auto-subscribes
-    /// the student to that Unit (via StudentUnitSubscriptions) if they
-    /// weren't subscribed already. Replaces the old name-based
-    /// ("اشتراك"/"أشتراك" in Name) heuristic.
-    /// </summary>
-    public bool AutoSubscribe { get; set; } = false;
-
     /// <summary>TENANT LAYER: which teacher (tenant) this lecture belongs to.</summary>
     public int TeacherId { get; set; }
 }

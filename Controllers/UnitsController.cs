@@ -42,17 +42,18 @@ public class UnitsController : ControllerBase
         var query = _db.Units.AsNoTracking().AsQueryable();
         if (year.HasValue) query = query.Where(u => u.SchoolYear == year.Value);
 
-        // Students only ever see units they're actually subscribed to
-        // (StudentUnitSubscription, snapshotted into the "unitIds" JWT claim at
-        // login/refresh), OR a unit where they've redeemed a lecture-level
-        // code for at least one lecture inside it — in that case they only
-        // bought a single lesson's worth of content, not the whole unit, but
-        // the unit itself still needs to show up so they can open it (see
-        // GetUnit below, which trims it down to just that lesson). Teacher/
-        // staff callers are unaffected (they manage the full catalog).
+        // Students used to only ever see units they're actually subscribed
+        // to (StudentUnitSubscription, snapshotted into the "unitIds" JWT
+        // claim at login/refresh), OR a unit where they've redeemed a
+        // lecture-level code for at least one lecture inside it. Now we list
+        // EVERY unit for their year either way, and just flag which ones
+        // they're subscribed to via "subscribed" (true/false) — the client
+        // decides what to do with the unsubscribed ones (e.g. show them
+        // locked/greyed out) instead of them being hidden entirely.
+        HashSet<int> subscribedIds = new();
         if (User.IsInRole(Roles.Student))
         {
-            var subscribedIds = User.GetUnitIds();
+            subscribedIds = User.GetUnitIds().ToHashSet();
             var studentId = User.GetUserId();
 
             // BUGFIX: this used to be a single .Join(...) between
@@ -72,11 +73,14 @@ public class UnitsController : ControllerBase
                 .Distinct()
                 .ToListAsync();
 
-            query = query.Where(u => subscribedIds.Contains(u.Id) || unlockedUnitIds.Contains(u.Id));
+            subscribedIds.UnionWith(unlockedUnitIds);
         }
 
+        var isStudent = User.IsInRole(Roles.Student);
         var units = await query
-            .Select(u => new UnitListItem(u.Id, u.Name, u.SchoolYear, u.Month, u.ImageUrl))
+            .Select(u => new UnitListItem(
+                u.Id, u.Name, u.SchoolYear, u.Month, u.ImageUrl,
+                !isStudent || subscribedIds.Contains(u.Id)))
             .ToListAsync();
 
         return Ok(units);
@@ -159,7 +163,7 @@ public class UnitsController : ControllerBase
         _db.Units.Add(unit);
         await _db.SaveChangesAsync();
 
-        return StatusCode(201, new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl));
+        return StatusCode(201, new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl, true));
     }
 
     // Real client contract (confirmed from "edit Unit .dart"): ALWAYS multipart,
@@ -197,11 +201,11 @@ public class UnitsController : ControllerBase
             // 3) Delete old file (only after the DB safely points to the new one)
             await _files.DeleteAsync(oldImageUrl);
 
-            return Ok(new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl));
+            return Ok(new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl, true));
         }
 
         await _db.SaveChangesAsync();
-        return Ok(new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl));
+        return Ok(new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl, true));
     }
 
     [HttpPost("delete")]
