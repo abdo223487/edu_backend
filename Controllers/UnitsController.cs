@@ -74,6 +74,19 @@ public class UnitsController : ControllerBase
                 .ToListAsync();
 
             subscribedIds.UnionWith(unlockedUnitIds);
+
+            // BUGFIX: subscribedIds up to here only reflects the "unitIds"
+            // JWT claim, which is snapshotted at login/refresh — a unit
+            // subscription redeemed via a code just now would NOT show up
+            // as subscribed until the student's token refreshes, wrongly
+            // keeping the unit locked (and GetUnit below would 403) right
+            // after a successful redeem. Live-query the actual table too,
+            // same as the lecture-unlock check above.
+            var liveSubscribedUnitIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+                .Where(s => s.StudentId == studentId)
+                .Select(s => s.UnitId)
+                .ToListAsync();
+            subscribedIds.UnionWith(liveSubscribedUnitIds);
         }
 
         var isStudent = User.IsInRole(Roles.Student);
@@ -98,21 +111,33 @@ public class UnitsController : ControllerBase
         {
             var studentId = User.GetUserId();
 
-            // Same fix as GetUnits above: two plain queries instead of a
-            // Join across a nullable column, which was throwing at runtime.
-            var unlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
-                .Where(u => u.StudentId == studentId)
-                .Select(u => u.LectureId)
-                .ToListAsync();
-            unlockedLessonIndexes = (await _db.Lectures.AsNoTracking()
-                    .Where(l => unlockedLectureIds.Contains(l.Id) && l.UnitId == unitId && l.LessonIndex != null)
-                    .Select(l => l.LessonIndex!.Value)
-                    .Distinct()
-                    .ToListAsync())
-                .ToHashSet();
+            // BUGFIX: User.GetUnitIds() only reflects the "unitIds" JWT
+            // claim, snapshotted at login/refresh. A unit subscription
+            // redeemed via a code just now wouldn't show up there yet and
+            // would wrongly 403 until the token refreshes. Live-check the
+            // actual table before falling back to the lecture-level
+            // exception below.
+            var isLiveSubscribed = await _db.StudentUnitSubscriptions.AsNoTracking()
+                .AnyAsync(s => s.StudentId == studentId && s.UnitId == unitId);
 
-            if (unlockedLessonIndexes.Count == 0)
-                return StatusCode(403, new { message = "Not subscribed to this unit." });
+            if (!isLiveSubscribed)
+            {
+                // Same fix as GetUnits above: two plain queries instead of a
+                // Join across a nullable column, which was throwing at runtime.
+                var unlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
+                    .Where(u => u.StudentId == studentId)
+                    .Select(u => u.LectureId)
+                    .ToListAsync();
+                unlockedLessonIndexes = (await _db.Lectures.AsNoTracking()
+                        .Where(l => unlockedLectureIds.Contains(l.Id) && l.UnitId == unitId && l.LessonIndex != null)
+                        .Select(l => l.LessonIndex!.Value)
+                        .Distinct()
+                        .ToListAsync())
+                    .ToHashSet();
+
+                if (unlockedLessonIndexes.Count == 0)
+                    return StatusCode(403, new { message = "Not subscribed to this unit." });
+            }
         }
 
         var unit = await _db.Units.AsNoTracking().Include(u => u.Lessons)
