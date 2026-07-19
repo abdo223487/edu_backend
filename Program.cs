@@ -58,7 +58,18 @@ builder.Services.AddScoped<IWhatsAppService, MetaWhatsAppService>();
 builder.Services.AddScoped<ITenantContext, HttpTenantContext>();
 
 builder.Services.AddDbContext<AppDbContext>(options =>
-    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection")));
+{
+    options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"));
+    // BUGFIX: this project's migrations use raw SQL (migrationBuilder.Sql(...))
+    // instead of the normal model-builder-generated flow, so the model
+    // snapshot never truly matches Models/Entities.cs. EF Core treats that
+    // mismatch as a PendingModelChangesWarning and — by default — throws
+    // instead of just warning, which made db.Database.Migrate() below abort
+    // before applying ANY pending migration (including AddOnlineLessons).
+    // Suppressing it restores the old behavior: mismatch is fine, just apply
+    // whatever migrations haven't run yet.
+    options.ConfigureWarnings(w => w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning));
+});
 // Previously: options.UseInMemoryDatabase("EduApiDb")
 // Now connected to a persistent PostgreSQL database (Neon).
 

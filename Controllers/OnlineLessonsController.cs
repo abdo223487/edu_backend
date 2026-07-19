@@ -30,6 +30,9 @@ namespace EduApi.Controllers;
 ///  GET    OnlineLessons/{id}                          teacher: always; student: 403 unless unlocked
 ///  POST   OnlineLessons/{id}/lectures                  (multipart: Name, YoutubeLink? / VideoFile?)
 ///  POST   OnlineLessons/{id}/lectures/delete?lectureId=..
+///  GET    OnlineLessons/{id}/lectures/{lectureId}/materials
+///  POST   OnlineLessons/{id}/lectures/{lectureId}/materials/file    (multipart, field "Files", supports multiple)
+///  POST   OnlineLessons/{id}/lectures/{lectureId}/materials/delete?materialId=..
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -93,11 +96,22 @@ public class OnlineLessonsController : ControllerBase
                 return StatusCode(403, new { message = "Redeem a code for this online lesson first." });
         }
 
-        var lectures = await _db.Lectures.AsNoTracking()
+        var lectureEntities = await _db.Lectures.AsNoTracking()
             .Where(l => l.OnlineLessonId == onlineLessonId)
             .OrderBy(l => l.CreatedAt)
-            .Select(l => ToDto(l))
             .ToListAsync();
+
+        var lectureIds = lectureEntities.Select(l => l.Id).ToList();
+        var materialsByLecture = await _db.Materials.AsNoTracking()
+            .Where(m => m.LectureId != null && lectureIds.Contains(m.LectureId.Value))
+            .ToListAsync();
+        var materialsLookup = materialsByLecture
+            .GroupBy(m => m.LectureId!.Value)
+            .ToDictionary(g => g.Key, g => g.Select(m => new MaterialListItem(m.Id, m.Name, m.Type, m.Link)).ToList());
+
+        var lectures = lectureEntities
+            .Select(l => ToDto(l, materialsLookup.TryGetValue(l.Id, out var mats) ? mats : new List<MaterialListItem>()))
+            .ToList();
 
         return Ok(new OnlineLessonDetailDto(lesson.Id, lesson.Name, lesson.SchoolYear, lesson.ImageUrl, lectures));
     }
@@ -242,7 +256,98 @@ public class OnlineLessonsController : ControllerBase
         _db.Lectures.Add(lecture);
         await _db.SaveChangesAsync();
 
-        return StatusCode(201, ToDto(lecture));
+        return StatusCode(201, ToDto(lecture, new List<MaterialListItem>()));
+    }
+
+    // ─────────────────────────── Materials on a lecture inside it ───────────────────────────
+
+    // Same idea as LecturesController's Materials endpoints, but scoped under
+    // OnlineLessons so the access check is the container's code-gated
+    // StudentOnlineLessonUnlock instead of a Unit subscription (these
+    // lectures never have a UnitId).
+    //  GET  OnlineLessons/{onlineLessonId}/lectures/{lectureId}/materials
+    //  POST OnlineLessons/{onlineLessonId}/lectures/{lectureId}/materials/file       (multipart, field "Files", supports multiple)
+    //  POST OnlineLessons/{onlineLessonId}/lectures/{lectureId}/materials/delete?materialId=..
+
+    [HttpGet("{onlineLessonId:int}/lectures/{lectureId:int}/materials")]
+    public async Task<IActionResult> GetLectureMaterials(int onlineLessonId, int lectureId)
+    {
+        var lecture = await _db.Lectures.AsNoTracking()
+            .FirstOrDefaultAsync(l => l.Id == lectureId && l.OnlineLessonId == onlineLessonId);
+        if (lecture == null) return NotFound(new { message = "Lecture not found in this online lesson." });
+
+        if (User.IsInRole(Roles.Student))
+        {
+            var studentId = User.GetUserId();
+            var unlocked = await _db.StudentOnlineLessonUnlocks.AsNoTracking()
+                .AnyAsync(u => u.StudentId == studentId && u.OnlineLessonId == onlineLessonId);
+            if (!unlocked)
+                return StatusCode(403, new { message = "Redeem a code for this online lesson first." });
+        }
+
+        var materials = await _db.Materials.AsNoTracking().Where(m => m.LectureId == lectureId)
+            .Select(m => new MaterialListItem(m.Id, m.Name, m.Type, m.Link))
+            .ToListAsync();
+
+        return Ok(materials);
+    }
+
+    [HttpPost("{onlineLessonId:int}/lectures/{lectureId:int}/materials/file")]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> UploadLectureMaterials(
+        int onlineLessonId,
+        int lectureId,
+        [FromForm(Name = "Files")] List<IFormFile> files)
+    {
+        var lecture = await _db.Lectures.FirstOrDefaultAsync(l => l.Id == lectureId && l.OnlineLessonId == onlineLessonId);
+        if (lecture == null) return NotFound(new { message = "Lecture not found in this online lesson." });
+
+        if (files == null || files.Count == 0)
+            return BadRequest(new { message = "At least one file is required." });
+
+        var created = new List<MaterialListItem>();
+        foreach (var file in files)
+        {
+            if (file.Length == 0) continue;
+
+            var url = await _files.SaveAsync(file, "materials");
+            var material = new Material
+            {
+                Name = file.FileName,
+                Type = "File",
+                Link = url,
+                LectureId = lectureId,
+                SchoolYear = lecture.SchoolYear,
+                TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+            };
+            _db.Materials.Add(material);
+            created.Add(new MaterialListItem(material.Id, material.Name, material.Type, material.Link));
+        }
+
+        await _db.SaveChangesAsync();
+
+        // Single-file uploads keep returning one object (same back-compat
+        // rule as MaterialController.UploadFile); multi-file returns an array.
+        return StatusCode(201, created.Count == 1 ? created[0] : created);
+    }
+
+    [HttpPost("{onlineLessonId:int}/lectures/{lectureId:int}/materials/delete")]
+    public async Task<IActionResult> DeleteLectureMaterial(int onlineLessonId, int lectureId, [FromQuery] int materialId)
+    {
+        var lecture = await _db.Lectures.AsNoTracking()
+            .FirstOrDefaultAsync(l => l.Id == lectureId && l.OnlineLessonId == onlineLessonId);
+        if (lecture == null) return NotFound(new { message = "Lecture not found in this online lesson." });
+
+        var material = await _db.Materials.FirstOrDefaultAsync(m => m.Id == materialId && m.LectureId == lectureId);
+        if (material == null) return NotFound(new { message = "Material not found." });
+
+        _db.Materials.Remove(material);
+        await _db.SaveChangesAsync();
+
+        if (material.Type == "File")
+            await _files.DeleteAsync(material.Link);
+
+        return Ok(new { message = "Material deleted." });
     }
 
     [HttpPost("{onlineLessonId:int}/lectures/delete")]
@@ -262,10 +367,10 @@ public class OnlineLessonsController : ControllerBase
         return Ok(new { message = "Lecture deleted." });
     }
 
-    private static OnlineLectureDto ToDto(Lecture l)
+    private static OnlineLectureDto ToDto(Lecture l, List<MaterialListItem> materials)
     {
         var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
-        return new(l.Id, l.Name, link, sourceType, l.ThumbnailUrl, l.CreatedAt);
+        return new(l.Id, l.Name, link, sourceType, l.ThumbnailUrl, l.CreatedAt, materials);
     }
 
     /// <summary>Same rule as LecturesController.PlaybackInfo: at most one of StorageFileKey/YoutubeLink is ever set.</summary>

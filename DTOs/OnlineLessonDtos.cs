@@ -23,7 +23,8 @@ public record OnlineLectureDto(
     string? Link,
     string? VideoSourceType,
     string? ThumbnailUrl,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    List<MaterialListItem> Materials);
 
 public record OnlineLessonDetailDto(
     int Id,
