@@ -1150,8 +1150,22 @@ public class StudentsController : ControllerBase
                 _db.StudentLectureUnlocks.Add(new StudentLectureUnlock { TeacherId = code.TeacherId, StudentId = studentId, LectureId = lectureId });
         }
 
+        // Same pattern as UnitIds/LectureIds above: an unlock here grants
+        // access to the WHOLE OnlineLesson container (every lecture inside
+        // it), gated in OnlineLessonsController.GetOnlineLesson/GetOnlineLessons.
+        foreach (var onlineLessonId in code.OnlineLessonIds)
+        {
+            if (!await _db.StudentOnlineLessonUnlocks.AnyAsync(u => u.StudentId == studentId && u.OnlineLessonId == onlineLessonId))
+                _db.StudentOnlineLessonUnlocks.Add(new StudentOnlineLessonUnlock { TeacherId = code.TeacherId, StudentId = studentId, OnlineLessonId = onlineLessonId });
+        }
+
         await _db.SaveChangesAsync();
-        return Ok(new { message = "Code redeemed successfully.", unitIds = code.UnitIds, lectureIds = code.LectureIds });
+        return Ok(new {
+            message = "Code redeemed successfully.",
+            unitIds = code.UnitIds,
+            lectureIds = code.LectureIds,
+            onlineLessonIds = code.OnlineLessonIds
+        });
     }
 
     // GET Students/codes  (student, own codes — manually redeemed AND
@@ -1171,10 +1185,13 @@ public class StudentsController : ControllerBase
 
         var unitIdsFlat = codes.SelectMany(c => c.UnitIds).Distinct().ToList();
         var lectureIdsFlat = codes.SelectMany(c => c.LectureIds).Distinct().ToList();
+        var onlineLessonIdsFlat = codes.SelectMany(c => c.OnlineLessonIds).Distinct().ToList();
         var unitNames = await _db.Units.AsNoTracking().Where(u => unitIdsFlat.Contains(u.Id))
             .ToDictionaryAsync(u => u.Id, u => u.Name);
         var lectureNames = await _db.Lectures.AsNoTracking().Where(l => lectureIdsFlat.Contains(l.Id))
             .ToDictionaryAsync(l => l.Id, l => l.Name);
+        var onlineLessonNames = await _db.OnlineLessons.AsNoTracking().Where(o => onlineLessonIdsFlat.Contains(o.Id))
+            .ToDictionaryAsync(o => o.Id, o => o.Name);
 
         var dtos = codes.Select(c => new
         {
@@ -1183,6 +1200,7 @@ public class StudentsController : ControllerBase
             schoolYear = c.SchoolYear,
             units = c.UnitIds.Select(id => new { id, name = unitNames.GetValueOrDefault(id, "") }).ToList(),
             lectures = c.LectureIds.Select(id => new { id, name = lectureNames.GetValueOrDefault(id, "") }).ToList(),
+            onlineLessons = c.OnlineLessonIds.Select(id => new { id, name = onlineLessonNames.GetValueOrDefault(id, "") }).ToList(),
             redeemedAt = c.UsedAt?.ToString("O"),
             // true when this code was earned automatically by attendance
             // rather than typed in manually.

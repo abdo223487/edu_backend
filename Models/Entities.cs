@@ -203,6 +203,43 @@ public class Lesson
     public string? ImageUrl { get; set; }
 }
 
+/// <summary>
+/// A standalone container for online-only lectures — NOT tied to a Unit.
+/// Created with just a Name, SchoolYear, and ImageUrl. A student can never
+/// browse into it or its lectures on their own; the only way in is
+/// redeeming a Code that carries this OnlineLesson's Id (see
+/// StudentOnlineLessonUnlock / StudentsController.RedeemCode), same
+/// "code-gated" model as a standalone (no-unit) Lecture, but scoped to a
+/// whole group of lectures at once instead of one at a time.
+/// </summary>
+public class OnlineLesson
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = default!;
+    public int SchoolYear { get; set; }
+    public string? ImageUrl { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this online lesson belongs to.</summary>
+    public int TeacherId { get; set; }
+}
+
+/// <summary>
+/// Grants a student access to EVERY lecture inside one OnlineLesson
+/// container, created when a Code carrying that OnlineLessonId is redeemed
+/// (see StudentsController.RedeemCode). Mirrors StudentUnitSubscription,
+/// but for OnlineLesson containers instead of Units.
+/// </summary>
+public class StudentOnlineLessonUnlock
+{
+    public int Id { get; set; }
+    // MULTI-TENANT SECURITY: same reasoning as StudentUnitSubscription.TeacherId.
+    public int TeacherId { get; set; }
+    public int StudentId { get; set; }
+    public int OnlineLessonId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 public class StudentUnitSubscription
 {
     public int Id { get; set; }
@@ -262,6 +299,14 @@ public class Lecture
         set => GroupIdsCsv = string.Join(',', value);
     }
     public int? UnitId { get; set; }
+    /// <summary>
+    /// Set instead of UnitId for a lecture created inside an OnlineLesson
+    /// container (see OnlineLessonsController). Always AttendanceMethod =
+    /// Online, never has GroupIds -- the only way a student reaches it is by
+    /// redeeming a Code for its OnlineLessonId (StudentOnlineLessonUnlock).
+    /// Mutually exclusive with UnitId.
+    /// </summary>
+    public int? OnlineLessonId { get; set; }
     public int? LessonIndex { get; set; }
     public int? Months { get; set; }
     public int? SchoolYear { get; set; }
@@ -371,6 +416,17 @@ public class Code
     {
         get => LectureIdsCsv.Length == 0 ? new() : LectureIdsCsv.Split(',').Select(int.Parse).ToList();
         set => LectureIdsCsv = string.Join(',', value);
+    }
+    /// <summary>
+    /// OnlineLesson container ids this code unlocks (in addition to
+    /// UnitIds/LectureIds). Redeeming grants a StudentOnlineLessonUnlock for
+    /// each one, which in turn unlocks every lecture inside that container.
+    /// </summary>
+    public string OnlineLessonIdsCsv { get; set; } = string.Empty;
+    [NotMapped] public List<int> OnlineLessonIds
+    {
+        get => OnlineLessonIdsCsv.Length == 0 ? new() : OnlineLessonIdsCsv.Split(',').Select(int.Parse).ToList();
+        set => OnlineLessonIdsCsv = string.Join(',', value);
     }
     public bool IsUsed { get; set; }
     public int? UsedByStudentId { get; set; }

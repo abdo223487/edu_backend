@@ -10,7 +10,7 @@ namespace EduApi.Controllers;
 // GenerateCodeRequest.TriggerLectureId is optional: when set, the teacher is
 // creating a TEMPLATE tied to a Center lecture instead of a one-off code —
 // see CodesController.Generate and AttendanceController.IssueTriggeredCodesAsync.
-public record GenerateCodeRequest(int SchoolYear, List<int> UnitIds, List<int> LectureIds, int? TriggerLectureId);
+public record GenerateCodeRequest(int SchoolYear, List<int> UnitIds, List<int> LectureIds, int? TriggerLectureId, List<int>? OnlineLessonIds = null);
 
 /// <summary>
 /// Route: api/Codes
@@ -126,9 +126,33 @@ public class CodesController : ControllerBase
             .Select(l => new { id = l.Id, name = l.Name })
             .ToList();
 
+        // Online lesson containers: unlike Unit-lectures / standalone
+        // lectures, a lecture inside one of these was never required to
+        // have a Group (it's reached purely through the container's own
+        // code-gate, not through Lectures/by-group), so it doesn't need
+        // HasVideoSource's GroupIdsCsv check — just Online + a real video
+        // source. Every container for this year is listed even with zero
+        // lectures yet, same as units/lessons above.
+        var onlineLessons = await _db.OnlineLessons.AsNoTracking()
+            .Where(o => o.SchoolYear == schoolYear)
+            .ToListAsync();
+        var onlineLessonIds = onlineLessons.Select(o => o.Id).ToList();
+        var onlineLessonLectures = await _db.Lectures.AsNoTracking()
+            .Where(l => l.OnlineLessonId != null && onlineLessonIds.Contains(l.OnlineLessonId.Value))
+            .ToListAsync();
+        var onlineLessonTree = onlineLessons.Select(o => new
+        {
+            id = o.Id,
+            name = o.Name,
+            lectures = onlineLessonLectures
+                .Where(l => l.OnlineLessonId == o.Id && HasVideoSource(l))
+                .Select(l => new { id = l.Id, name = l.Name })
+                .ToList()
+        }).ToList();
+
         // NOTE: key is "lectures", NOT "standaloneLectures" — the client does
         // `standaloneLectures = data['lectures'] ?? []`.
-        return Ok(new { units = unitTree, lectures = standaloneDtos });
+        return Ok(new { units = unitTree, lectures = standaloneDtos, onlineLessons = onlineLessonTree });
     }
 
     // TEMPORARY DEBUG ENDPOINT — remove once codeables filtering is confirmed
@@ -254,6 +278,7 @@ public class CodesController : ControllerBase
             SchoolYear = request.SchoolYear,
             UnitIds = request.UnitIds ?? new(),
             LectureIds = request.LectureIds ?? new(),
+            OnlineLessonIds = request.OnlineLessonIds ?? new(),
             IsTemplate = request.TriggerLectureId.HasValue,
             TriggerLectureId = request.TriggerLectureId,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
@@ -272,6 +297,8 @@ public class CodesController : ControllerBase
             .Select(u => new { id = u.Id, name = u.Name }).ToListAsync();
         var lectures = await _db.Lectures.Where(l => c.LectureIds.Contains(l.Id))
             .Select(l => new { id = l.Id, name = l.Name }).ToListAsync();
+        var onlineLessons = await _db.OnlineLessons.Where(o => c.OnlineLessonIds.Contains(o.Id))
+            .Select(o => new { id = o.Id, name = o.Name }).ToListAsync();
 
         object? redeemedBy = null;
         if (c.UsedByStudentId.HasValue)
@@ -301,8 +328,9 @@ public class CodesController : ControllerBase
             schoolYear = c.SchoolYear,
             units,
             lectures,
+            onlineLessons,
             // "how many items this code unlocks" — only .length is read client-side.
-            unlocks = c.UnitIds.Concat(c.LectureIds).ToList(),
+            unlocks = c.UnitIds.Concat(c.LectureIds).Concat(c.OnlineLessonIds).ToList(),
             isUsed = c.IsUsed,
             isRedeemed = c.IsUsed, // client's list item reads "isRedeemed" specifically
             redeemedBy,

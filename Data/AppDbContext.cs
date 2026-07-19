@@ -18,6 +18,8 @@ public class AppDbContext : DbContext
     public DbSet<Group> Groups => Set<Group>();
     public DbSet<Unit> Units => Set<Unit>();
     public DbSet<Lesson> Lessons => Set<Lesson>();
+    public DbSet<OnlineLesson> OnlineLessons => Set<OnlineLesson>();
+    public DbSet<StudentOnlineLessonUnlock> StudentOnlineLessonUnlocks => Set<StudentOnlineLessonUnlock>();
     public DbSet<StudentUnitSubscription> StudentUnitSubscriptions => Set<StudentUnitSubscription>();
     public DbSet<StudentGroupMembership> StudentGroupMemberships => Set<StudentGroupMembership>();
     public DbSet<StudentLectureUnlock> StudentLectureUnlocks => Set<StudentLectureUnlock>();
@@ -78,6 +80,7 @@ public class AppDbContext : DbContext
         // ═══════════════════════════════════════════════════════════════
         modelBuilder.Entity<Group>().HasQueryFilter(g => g.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Unit>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<OnlineLesson>().HasQueryFilter(o => o.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Lecture>().HasQueryFilter(l => l.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Material>().HasQueryFilter(m => m.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Notebook>().HasQueryFilter(n => n.TeacherId == _tenant.CurrentTenantId);
@@ -147,6 +150,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<AssignmentSubmission>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<NotebookPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentLectureUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<StudentOnlineLessonUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentUnitSubscription>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
 
         modelBuilder.Entity<Attendance>().HasIndex(a => a.TeacherId);
@@ -154,6 +158,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<NotebookPayment>().HasIndex(p => p.TeacherId);
         modelBuilder.Entity<StudentLectureUnlock>().HasIndex(u => u.TeacherId);
         modelBuilder.Entity<StudentUnitSubscription>().HasIndex(s => s.TeacherId);
+        modelBuilder.Entity<StudentOnlineLessonUnlock>().HasIndex(u => u.TeacherId);
 
         // MULTI-TENANT MEMBERSHIP: a Student can belong to Groups under MORE THAN
         // ONE teacher now (StudentGroupMembership). A Student row is visible under
@@ -203,7 +208,8 @@ public class AppDbContext : DbContext
                 Set<Group>().Any(g => g.Id == s.GroupId && g.TeacherId == _tenant.CurrentTenantId) ||
                 Set<StudentGroupMembership>().Any(m => m.StudentId == s.Id && m.Group != null && m.Group.TeacherId == _tenant.CurrentTenantId) ||
                 Set<StudentUnitSubscription>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId) ||
-                Set<StudentLectureUnlock>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId));
+                Set<StudentLectureUnlock>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId) ||
+                Set<StudentOnlineLessonUnlock>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId));
 
         modelBuilder.Entity<StudentGroupMembership>()
             .HasIndex(m => new { m.StudentId, m.GroupId }).IsUnique();
@@ -261,6 +267,10 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<StudentLectureUnlock>()
             .HasIndex(u => new { u.StudentId, u.LectureId })
+            .IsUnique();
+
+        modelBuilder.Entity<StudentOnlineLessonUnlock>()
+            .HasIndex(u => new { u.StudentId, u.OnlineLessonId })
             .IsUnique();
 
         modelBuilder.Entity<BankAttemptQuestion>()
