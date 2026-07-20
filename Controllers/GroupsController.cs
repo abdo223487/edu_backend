@@ -89,4 +89,10 @@ public class GroupsController : ControllerBase
 
         return Ok(new { message = "Group deleted." });
     }
+
+    // GET Groups/count — total number of groups belonging to the caller's
+    // tenant (Groups is already tenant-scoped via the query filter).
+    [HttpGet("count")]
+    public async Task<IActionResult> Count()
+        => Ok(await _db.Groups.CountAsync());
 }

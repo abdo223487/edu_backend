@@ -216,9 +216,15 @@ public class AnalyticsController : ControllerBase
         if (groupId.HasValue) lectureQuery = lectureQuery.Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == groupId.Value));
         else if (schoolYear.HasValue) lectureQuery = lectureQuery.Where(l => l.SchoolYear == schoolYear.Value);
 
-        // Only Id/Name are read below -- project at the SQL level instead of
-        // pulling every Lecture column.
-        var lectures = await lectureQuery.Select(l => new { l.Id, l.Name }).ToListAsync();
+        // Only the last 4 lectures in this scope -- most recent last, so the
+        // graph reads left-to-right in chronological order.
+        var lectures = await lectureQuery
+            .OrderByDescending(l => l.Id)
+            .Take(4)
+            .Select(l => new { l.Id, l.Name })
+            .ToListAsync();
+        lectures.Reverse();
+
         var lectureIds = lectures.Select(l => l.Id).ToList();
         var countsByLecture = await _db.Attendances.AsNoTracking()
             .Where(a => lectureIds.Contains(a.LectureId))
@@ -245,6 +251,13 @@ public class AnalyticsController : ControllerBase
     // return an actual OOXML workbook, not CSV text wearing an .xlsx extension.
     // ASP.NET Core's File(bytes, contentType, fileDownloadName) overload sets the
     // Content-Disposition header automatically.
+
+    // GET Analytics/sheet/lectures/{id}
+    // One worksheet PER DAY this lecture was actually attended on (Egypt-local
+    // calendar date, e.g. "17-9-2026") -- a Center lecture can recur across
+    // several dates, so a single flat list used to mix every date together.
+    // Each row: Name, PhoneNumber, ParentPhoneNumber, GroupName, and the time
+    // the student attended, converted to Egypt local time.
     [HttpGet("sheet/lectures/{id:int}")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> DownloadLectureSheet(int id)
@@ -252,39 +265,116 @@ public class AnalyticsController : ControllerBase
         var lecture = await _db.Lectures.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (id));
         if (lecture == null) return NotFound(new { message = "Lecture not found." });
 
-        // Only StudentId/Date and Name/PhoneNumber are used in the rows below.
         var attendees = await _db.Attendances.AsNoTracking().Where(a => a.LectureId == id)
             .Select(a => new { a.StudentId, a.Date })
             .ToListAsync();
-        var studentIds = attendees.Select(a => a.StudentId).ToList();
+
+        var studentIds = attendees.Select(a => a.StudentId).Distinct().ToList();
         var students = await _db.Students.AsNoTracking().Where(s => studentIds.Contains(s.Id))
-            .Select(s => new { s.Id, s.Name, s.PhoneNumber })
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.ParentPhoneNumber })
             .ToDictionaryAsync(s => s.Id);
+        // Group name under the CURRENT tenant -- a student can belong to more
+        // than one teacher's group, so this must be resolved per-tenant, not
+        // read off the student's legacy single GroupId.
+        var groupNames = await _db.GetTenantGroupNamesAsync(studentIds);
 
-        var rows = attendees.Select(a =>
-        {
-            var s = students.GetValueOrDefault(a.StudentId);
-            return new[] { s?.Name ?? "", s?.PhoneNumber ?? "", a.Date.ToString("O") };
-        });
+        var sheets = attendees
+            .Select(a => new { a.StudentId, Local = ToEgyptTime(a.Date) })
+            .GroupBy(a => a.Local.Date)
+            .OrderBy(g => g.Key)
+            .Select(g =>
+            {
+                var rows = g.Select(a =>
+                {
+                    students.TryGetValue(a.StudentId, out var s);
+                    return new[]
+                    {
+                        s?.Name ?? "",
+                        s?.PhoneNumber ?? "",
+                        s?.ParentPhoneNumber ?? "",
+                        groupNames.GetValueOrDefault(a.StudentId, ""),
+                        a.Local.ToString("hh:mm tt")
+                    };
+                });
+                return (
+                    SheetName: SafeSheetName(g.Key.ToString("d-M-yyyy")),
+                    Headers: new[] { "Name", "PhoneNumber", "ParentPhoneNumber", "GroupName", "AttendedAt" },
+                    Rows: rows
+                );
+            });
 
-        var bytes = BuildXlsx("Attendance", new[] { "Name", "PhoneNumber", "Date" }, rows);
+        var bytes = BuildMultiSheetXlsx(sheets);
         return XlsxFile(bytes, $"lecture_{id}_attendance.xlsx");
     }
 
+    // GET Analytics/sheet?schoolYear=..&groupId=..
+    // ABSENT students, not present ones. Up to 4 worksheets, one per each of
+    // the last 4 Center lectures targeted at the requested group (or every
+    // group of the requested year, or every group of the caller's tenant if
+    // neither filter is given) -- most recent lecture first. Each sheet lists
+    // the students who belong to that scope but have NO Attendance row at all
+    // for that specific lecture: Name, PhoneNumber, ParentPhoneNumber.
     [HttpGet("sheet")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> DownloadGeneralSheet([FromQuery] int? schoolYear, [FromQuery] int? groupId)
     {
-        var query = _db.Students.AsNoTracking().AsQueryable();
-        if (groupId.HasValue) query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
-        else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
+        var groupsQuery = _db.Groups.AsNoTracking().AsQueryable();
+        if (groupId.HasValue) groupsQuery = groupsQuery.Where(g => g.Id == groupId.Value);
+        else if (schoolYear.HasValue) groupsQuery = groupsQuery.Where(g => g.SchoolYear == schoolYear.Value);
+        var groupIds = await groupsQuery.Select(g => g.Id).ToListAsync();
 
-        // Only Name/PhoneNumber end up in the exported rows.
-        var students = await query.Select(s => new { s.Name, s.PhoneNumber }).ToListAsync();
-        var rows = students.Select(s => new[] { s.Name, s.PhoneNumber });
+        var headers = new[] { "Name", "PhoneNumber", "ParentPhoneNumber" };
+        if (groupIds.Count == 0)
+        {
+            var emptyBytes = BuildMultiSheetXlsx(
+                Enumerable.Empty<(string SheetName, string[] Headers, IEnumerable<string[]> Rows)>());
+            return XlsxFile(emptyBytes, "absent_students.xlsx");
+        }
 
-        var bytes = BuildXlsx("Students", new[] { "Name", "PhoneNumber" }, rows);
-        return XlsxFile(bytes, "students_sheet.xlsx");
+        // Attendance-taking only ever applies to Center (on-site) lectures --
+        // Online lectures are watched on-demand and have no "absent" concept
+        // (same reasoning already used in Students/attendance).
+        // GroupIds is a [NotMapped] CSV-backed property, so the group-overlap
+        // filter has to run in memory after loading candidate lectures.
+        var candidateLectures = await _db.Lectures.AsNoTracking()
+            .Where(l => l.AttendanceMethod == AttendanceMethod.Center)
+            .Select(l => new { l.Id, l.Name, l.GroupIdsCsv })
+            .ToListAsync();
+
+        var targetLectures = candidateLectures
+            .Select(l => new { l.Id, l.Name, GroupIds = l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList() })
+            .Where(l => l.GroupIds.Any(groupIds.Contains))
+            .OrderByDescending(l => l.Id)
+            .Take(4)
+            .ToList();
+
+        var lectureIds = targetLectures.Select(l => l.Id).ToList();
+
+        var students = await _db.Students.AsNoTracking()
+            .Where(s => s.GroupMemberships.Any(m => groupIds.Contains(m.GroupId)))
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.ParentPhoneNumber })
+            .ToListAsync();
+        var studentIds = students.Select(s => s.Id).ToList();
+
+        var attendedPairs = (await _db.Attendances.AsNoTracking()
+                .Where(a => lectureIds.Contains(a.LectureId) && studentIds.Contains(a.StudentId))
+                .Select(a => new { a.LectureId, a.StudentId })
+                .ToListAsync())
+            .ToHashSet();
+
+        var sheets = targetLectures.Select((l, idx) =>
+        {
+            var absentees = students.Where(s => !attendedPairs.Contains(new { LectureId = l.Id, StudentId = s.Id }));
+            var rows = absentees.Select(s => new[] { s.Name, s.PhoneNumber, s.ParentPhoneNumber ?? "" });
+            return (
+                SheetName: SafeSheetName($"{idx + 1}-{l.Name}"),
+                Headers: headers,
+                Rows: rows
+            );
+        });
+
+        var bytes = BuildMultiSheetXlsx(sheets);
+        return XlsxFile(bytes, "absent_students.xlsx");
     }
 
     [HttpGet("notebooks/{notebookId:int}/paid")]
@@ -345,23 +435,90 @@ public class AnalyticsController : ControllerBase
     public Task<IActionResult> DownloadNotebookUnpaidSheet(int notebookId, [FromQuery] int? groupId, [FromQuery] int? schoolYear)
         => DownloadNotebookSheet(notebookId, paid: false, groupId, schoolYear);
 
+    // "paid" file: TWO sheets -- "دفعوا كامل" (paid the notebook's FULL price)
+    // and "دفعوا جزء" (paid only PART of it and never finished) -- each row
+    // has Name/PhoneNumber/ParentPhoneNumber/AmountPaid, with a totals row at
+    // the bottom summing the money actually collected on that sheet.
+    //
+    // "unpaid" file: one sheet, everyone with zero payments at all, now with
+    // ParentPhoneNumber added.
+    //
+    // BUGFIX: this used to go through the PAGINATED
+    // GetNotebookStudentsByPaymentStatus (always p=1), so a notebook with
+    // more students than one page silently exported only the first page.
+    // Sheet downloads now pull every matching student directly instead.
     private async Task<IActionResult> DownloadNotebookSheet(int notebookId, bool paid, int? groupId, int? schoolYear)
     {
-        var result = await GetNotebookStudentsByPaymentStatus(notebookId, paid, groupId, schoolYear, 1) as OkObjectResult;
-        var items = (result?.Value as IEnumerable<object>) ?? Enumerable.Empty<object>();
-        var rows = items.Select(i =>
-        {
-            var type = i.GetType();
-            var studentObj = type.GetProperty("student")?.GetValue(i);
-            var studentType = studentObj?.GetType();
-            var name = studentType?.GetProperty("name")?.GetValue(studentObj)?.ToString() ?? "";
-            var phone = studentType?.GetProperty("phoneNumber")?.GetValue(studentObj)?.ToString() ?? "";
-            return new[] { name, phone };
-        });
+        var notebook = await _db.Notebooks.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (notebookId));
+        if (notebook == null) return NotFound(new { message = "Notebook not found." });
 
-        var bytes = BuildXlsx(paid ? "Paid" : "Unpaid", new[] { "Name", "PhoneNumber" }, rows);
+        var query = _db.Students.AsNoTracking().AsQueryable();
+        if (groupId.HasValue) query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
+        else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
+        else query = query.Where(s => s.GroupMemberships.Any(m => notebook.GroupIds.Contains(m.GroupId)));
+
+        var students = await query.OrderBy(s => s.Name)
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.ParentPhoneNumber })
+            .ToListAsync();
+
+        var payments = await _db.NotebookPayments.AsNoTracking()
+            .Where(pay => pay.NotebookId == notebookId)
+            .ToListAsync();
+        var paidByStudent = payments.GroupBy(pay => pay.StudentId)
+            .ToDictionary(g => g.Key, g => g.Sum(pay => pay.DiscountedPrice ?? pay.Price));
+
+        IEnumerable<(string SheetName, string[] Headers, IEnumerable<string[]> Rows)> sheets;
+
+        if (paid)
+        {
+            var withTotals = students.Select(s => new
+            {
+                s.Name,
+                s.PhoneNumber,
+                s.ParentPhoneNumber,
+                TotalPaid = paidByStudent.TryGetValue(s.Id, out var t) ? t : 0
+            }).ToList();
+
+            var fullPaid = withTotals.Where(s => s.TotalPaid > 0 && s.TotalPaid >= notebook.Price).ToList();
+            var partialPaid = withTotals.Where(s => s.TotalPaid > 0 && s.TotalPaid < notebook.Price).ToList();
+
+            sheets = new[]
+            {
+                ("دفعوا كامل", new[] { "Name", "PhoneNumber", "ParentPhoneNumber", "AmountPaid" }, BuildPaymentRows(fullPaid)),
+                ("دفعوا جزء", new[] { "Name", "PhoneNumber", "ParentPhoneNumber", "AmountPaid" }, BuildPaymentRows(partialPaid)),
+            };
+        }
+        else
+        {
+            var unpaid = students.Where(s => !paidByStudent.ContainsKey(s.Id))
+                .Select(s => new[] { s.Name, s.PhoneNumber, s.ParentPhoneNumber ?? "" });
+
+            sheets = new[]
+            {
+                ("Unpaid", new[] { "Name", "PhoneNumber", "ParentPhoneNumber" }, unpaid),
+            };
+        }
+
+        var bytes = BuildMultiSheetXlsx(sheets);
         var filename = $"notebook_{notebookId}_{(paid ? "paid" : "unpaid")}.xlsx";
         return XlsxFile(bytes, filename);
+    }
+
+    // Per-student rows plus a trailing totals row summing AmountPaid across
+    // everyone on the sheet -- "مجموع الفلوس اللي فيها" at the bottom.
+    private static IEnumerable<string[]> BuildPaymentRows<T>(List<T> students)
+        where T : class
+    {
+        var rows = new List<string[]>();
+        var total = 0;
+        foreach (dynamic s in students)
+        {
+            rows.Add(new[] { (string)s.Name, (string)s.PhoneNumber, (string?)s.ParentPhoneNumber ?? "", ((int)s.TotalPaid).ToString() });
+            total += (int)s.TotalPaid;
+        }
+        rows.Add(new[] { "", "", "", "" });
+        rows.Add(new[] { "الإجمالي", "", "", total.ToString() });
+        return rows;
     }
 
     // ── xlsx helpers ─────────────────────────────────────────────────────
@@ -387,6 +544,83 @@ public class AnalyticsController : ControllerBase
         using var ms = new MemoryStream();
         workbook.SaveAs(ms);
         return ms.ToArray();
+    }
+
+    // Multi-sheet variant of BuildXlsx above -- one worksheet per (name,
+    // headers, rows) tuple, used by every export that now needs to split its
+    // data across several sheets (per-day attendance, per-lecture absentees,
+    // full-vs-partial notebook payments).
+    private static byte[] BuildMultiSheetXlsx(
+        IEnumerable<(string SheetName, string[] Headers, IEnumerable<string[]> Rows)> sheets)
+    {
+        using var workbook = new XLWorkbook();
+
+        foreach (var sheet in sheets)
+        {
+            var ws = workbook.Worksheets.Add(SafeSheetName(sheet.SheetName));
+
+            for (var c = 0; c < sheet.Headers.Length; c++)
+                ws.Cell(1, c + 1).Value = sheet.Headers[c];
+            ws.Row(1).Style.Font.Bold = true;
+
+            var r = 2;
+            foreach (var row in sheet.Rows)
+            {
+                for (var c = 0; c < row.Length; c++)
+                    ws.Cell(r, c + 1).Value = row[c];
+                r++;
+            }
+
+            ws.Columns().AdjustToContents();
+        }
+
+        // A workbook needs at least one worksheet -- if there was nothing to
+        // export at all (e.g. no lectures/attendance yet), add a single empty
+        // placeholder sheet instead of ClosedXML throwing on save.
+        if (workbook.Worksheets.Count == 0)
+            workbook.Worksheets.Add("Sheet1");
+
+        using var ms = new MemoryStream();
+        workbook.SaveAs(ms);
+        return ms.ToArray();
+    }
+
+    // Excel worksheet names: max 31 chars, and none of \ / ? * [ ] : allowed.
+    // Also guards against duplicate names (e.g. two lectures that happen to
+    // share the exact same title) by falling back to a generic name rather
+    // than letting ClosedXML throw on a duplicate Add().
+    private static readonly HashSet<string> _reservedSheetChars = new() { '\\'.ToString(), '/'.ToString(), '?'.ToString(), '*'.ToString(), '['.ToString(), ']'.ToString(), ':'.ToString() };
+    private static string SafeSheetName(string name)
+    {
+        var cleaned = new string(name.Where(c => !_reservedSheetChars.Contains(c.ToString())).ToArray()).Trim();
+        if (cleaned.Length == 0) cleaned = "Sheet";
+        return cleaned.Length > 31 ? cleaned[..31] : cleaned;
+    }
+
+    // EGYPT LOCAL TIME: attendance timestamps are stored in UTC (Attendance.Date
+    // defaults to DateTime.UtcNow) -- convert to Egypt local time for display on
+    // exported sheets. Tries the IANA id first (Linux/ICU, what this API runs
+    // on), then the Windows id, then falls back to a fixed UTC+2 offset so this
+    // never throws even on an unusual host.
+    private static readonly TimeZoneInfo EgyptTimeZone = ResolveEgyptTimeZone();
+
+    private static TimeZoneInfo ResolveEgyptTimeZone()
+    {
+        try { return TimeZoneInfo.FindSystemTimeZoneById("Africa/Cairo"); }
+        catch (TimeZoneNotFoundException) { }
+        catch (InvalidTimeZoneException) { }
+
+        try { return TimeZoneInfo.FindSystemTimeZoneById("Egypt Standard Time"); }
+        catch (TimeZoneNotFoundException) { }
+        catch (InvalidTimeZoneException) { }
+
+        return TimeZoneInfo.CreateCustomTimeZone("Egypt-Fallback", TimeSpan.FromHours(2), "Egypt", "Egypt");
+    }
+
+    private static DateTime ToEgyptTime(DateTime value)
+    {
+        var utc = value.Kind == DateTimeKind.Utc ? value : DateTime.SpecifyKind(value, DateTimeKind.Utc);
+        return TimeZoneInfo.ConvertTimeFromUtc(utc, EgyptTimeZone);
     }
 
     private FileContentResult XlsxFile(byte[] bytes, string filename) =>

@@ -729,8 +729,16 @@ public class AssignmentAnswer
 public class BankQuestion
 {
     public int Id { get; set; }
-    public int LessonId { get; set; }
+
+    // Exactly one of LessonId / UnitId is set. LessonId = question belongs to
+    // one specific lesson inside a unit (as before). UnitId = the teacher
+    // attached it directly to the whole unit without picking a lesson —
+    // still shows up whenever a student browses/practices that unit.
+    public int? LessonId { get; set; }
     [ForeignKey(nameof(LessonId))] public Lesson? Lesson { get; set; }
+
+    public int? UnitId { get; set; }
+    [ForeignKey(nameof(UnitId))] public Unit? Unit { get; set; }
 
     public string Type { get; set; } = "MCQ";
     public string Text { get; set; } = default!;

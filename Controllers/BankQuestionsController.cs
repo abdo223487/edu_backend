@@ -51,13 +51,16 @@ public class BankQuestionsController : ControllerBase
     {
         var form = await Request.ReadFormAsync();
 
-        var lessonId = int.Parse(form["LessonId"].ToString());
-        var lesson = await _db.Lessons.FirstOrDefaultAsync(l => l.Id == lessonId);
-        if (lesson == null) return NotFound(new { message = "Lesson not found." });
+        var lessonIdRaw = form["LessonId"].ToString();
+        var unitIdRaw = form["UnitId"].ToString();
+        var hasLessonId = int.TryParse(lessonIdRaw, out var lessonId);
+        var hasUnitId = int.TryParse(unitIdRaw, out var unitId);
+
+        if (hasLessonId == hasUnitId)
+            return BadRequest(new { message = "Provide exactly one of LessonId or UnitId." });
 
         var question = new BankQuestion
         {
-            LessonId = lessonId,
             Type = form["Type"].ToString(),
             Text = form["Text"].ToString(),
             Answer = form["Answer"].ToString(),
@@ -65,6 +68,19 @@ public class BankQuestionsController : ControllerBase
             Difficulty = form["Difficulty"].ToString(),
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
         };
+
+        if (hasLessonId)
+        {
+            var lesson = await _db.Lessons.FirstOrDefaultAsync(l => l.Id == lessonId);
+            if (lesson == null) return NotFound(new { message = "Lesson not found." });
+            question.LessonId = lessonId;
+        }
+        else
+        {
+            var unit = await _db.Units.FirstOrDefaultAsync(u => u.Id == unitId);
+            if (unit == null) return NotFound(new { message = "Unit not found." });
+            question.UnitId = unitId;
+        }
 
         var choices = new List<string>();
         for (var j = 0; form.ContainsKey($"Choices[{j}]"); j++)
@@ -86,16 +102,24 @@ public class BankQuestionsController : ControllerBase
     public async Task<IActionResult> GetAll([FromQuery] int? lessonId, [FromQuery] int? unitId,
         [FromQuery] string? difficulty, [FromQuery] int? schoolYear, [FromQuery] int p = 1)
     {
-        var query = _db.BankQuestions.AsNoTracking().Include(q => q.Lesson).ThenInclude(l => l!.Unit).AsQueryable();
+        var query = _db.BankQuestions.AsNoTracking()
+            .Include(q => q.Lesson).ThenInclude(l => l!.Unit)
+            .Include(q => q.Unit)
+            .AsQueryable();
 
         if (lessonId.HasValue) query = query.Where(q => q.LessonId == lessonId.Value);
-        if (unitId.HasValue) query = query.Where(q => q.Lesson!.UnitId == unitId.Value);
+        if (unitId.HasValue)
+            query = query.Where(q => q.Lesson!.UnitId == unitId.Value || q.UnitId == unitId.Value);
         if (!string.IsNullOrEmpty(difficulty)) query = query.Where(q => q.Difficulty == difficulty);
         // BUGFIX: without this, "GetAll" for a given year returned every
         // question the teacher ever uploaded across ALL school years (as long
         // as lessonId/unitId weren't explicitly picked) — filter by the
-        // lesson's unit's SchoolYear, same as everywhere else in the app.
-        if (schoolYear.HasValue) query = query.Where(q => q.Lesson!.Unit!.SchoolYear == schoolYear.Value);
+        // question's unit's SchoolYear (via Lesson or direct), same as
+        // everywhere else in the app.
+        if (schoolYear.HasValue)
+            query = query.Where(q =>
+                (q.Lesson != null && q.Lesson.Unit!.SchoolYear == schoolYear.Value) ||
+                (q.Unit != null && q.Unit.SchoolYear == schoolYear.Value));
 
         var questions = await query
             .OrderByDescending(q => q.Id)
@@ -104,7 +128,8 @@ public class BankQuestionsController : ControllerBase
             .ToListAsync();
 
         var items = questions.Select(q => new BankQuestionDto(
-            q.Id, q.LessonId, q.Lesson?.Name ?? "", q.Lesson?.UnitId ?? 0, q.Lesson?.Unit?.Name ?? "",
+            q.Id, q.LessonId, q.Lesson?.Name,
+            q.Lesson?.UnitId ?? q.UnitId ?? 0, q.Lesson?.Unit?.Name ?? q.Unit?.Name ?? "",
             q.Type, q.Text, q.Choices, q.Answer, q.Mark, q.ImageUrl, q.Difficulty));
 
         return Ok(items);
@@ -114,15 +139,19 @@ public class BankQuestionsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetStats([FromQuery] int? lessonId, [FromQuery] int? unitId)
     {
-        var query = _db.BankQuestions.AsNoTracking().Include(q => q.Lesson).AsQueryable();
+        var query = _db.BankQuestions.AsNoTracking().Include(q => q.Lesson).Include(q => q.Unit).AsQueryable();
         if (lessonId.HasValue) query = query.Where(q => q.LessonId == lessonId.Value);
-        if (unitId.HasValue) query = query.Where(q => q.Lesson!.UnitId == unitId.Value);
+        if (unitId.HasValue)
+            query = query.Where(q => q.Lesson!.UnitId == unitId.Value || q.UnitId == unitId.Value);
 
         // Only Id/Text/Difficulty/Lesson name are read below -- project those
         // columns instead of the full question row (Choices/Answer/Mark/
         // ImageUrl/TeacherId are never used in this endpoint).
         var questions = await query
-            .Select(q => new { q.Id, q.Text, q.Difficulty, LessonName = q.Lesson != null ? q.Lesson.Name : null })
+            .Select(q => new {
+                q.Id, q.Text, q.Difficulty,
+                LessonName = q.Lesson != null ? q.Lesson.Name : (q.Unit != null ? q.Unit.Name : null)
+            })
             .ToListAsync();
         var questionIds = questions.Select(q => q.Id).ToList();
 
@@ -247,11 +276,18 @@ public class BankQuestionsController : ControllerBase
 
         var units = await _db.Units.AsNoTracking().Where(u => subscribedUnitIds.Contains(u.Id))
             .Include(u => u.Lessons).ToListAsync();
+        var unitIds = units.Select(u => u.Id).ToList();
 
         var lessonIds = units.SelectMany(u => u.Lessons).Select(l => l.Id).ToList();
-        var counts = await _db.BankQuestions.AsNoTracking().Where(q => lessonIds.Contains(q.LessonId))
+        var counts = await _db.BankQuestions.AsNoTracking().Where(q => q.LessonId != null && lessonIds.Contains(q.LessonId!.Value))
             .GroupBy(q => new { q.LessonId, q.Difficulty })
             .Select(g => new { g.Key.LessonId, g.Key.Difficulty, Count = g.Count() })
+            .ToListAsync();
+
+        // Questions the teacher attached directly to the unit (no lesson picked).
+        var directCounts = await _db.BankQuestions.AsNoTracking().Where(q => q.UnitId != null && unitIds.Contains(q.UnitId!.Value))
+            .GroupBy(q => new { q.UnitId, q.Difficulty })
+            .Select(g => new { g.Key.UnitId, g.Key.Difficulty, Count = g.Count() })
             .ToListAsync();
 
         var result = units.Select(u => new BankUnitScopeDto(
@@ -261,7 +297,10 @@ public class BankQuestionsController : ControllerBase
                 counts.Where(c => c.LessonId == l.Id && c.Difficulty == "Easy").Sum(c => c.Count),
                 counts.Where(c => c.LessonId == l.Id && c.Difficulty == "Medium").Sum(c => c.Count),
                 counts.Where(c => c.LessonId == l.Id && c.Difficulty == "Hard").Sum(c => c.Count)
-            )).ToList()
+            )).ToList(),
+            directCounts.Where(c => c.UnitId == u.Id && c.Difficulty == "Easy").Sum(c => c.Count),
+            directCounts.Where(c => c.UnitId == u.Id && c.Difficulty == "Medium").Sum(c => c.Count),
+            directCounts.Where(c => c.UnitId == u.Id && c.Difficulty == "Hard").Sum(c => c.Count)
         ));
 
         return Ok(result);
@@ -314,9 +353,11 @@ public class BankQuestionsController : ControllerBase
         var weakOnly = request.WeakOnly == true;
         var useMixed = request.UseMixedDifficulty == true;
 
-        var basePool = _db.BankQuestions.Where(q => request.UnitIds.Contains(q.Lesson!.UnitId));
+        var basePool = _db.BankQuestions.Where(q =>
+            (q.LessonId != null && request.UnitIds.Contains(q.Lesson!.UnitId)) ||
+            (q.UnitId != null && request.UnitIds.Contains(q.UnitId!.Value)));
         if (request.LessonIds != null && request.LessonIds.Count > 0)
-            basePool = basePool.Where(q => request.LessonIds.Contains(q.LessonId));
+            basePool = basePool.Where(q => q.LessonId != null && request.LessonIds.Contains(q.LessonId!.Value));
 
         // Every BankQuestionId this student has ever answered (right or wrong), across all attempts.
         var answeredQuestionIds = await _db.BankAttemptQuestions

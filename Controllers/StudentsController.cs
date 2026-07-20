@@ -895,10 +895,20 @@ public class StudentsController : ControllerBase
     [HttpGet("count")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> Count()
-        // PER-TENANT FIX: "cancelled" is per teacher-membership now, so count only
-        // students whose membership under THIS tenant isn't cancelled -- a student
-        // cancelled by a different teacher must still count here.
-        => Ok(await _db.Students.CountAsync(s => s.GroupMemberships.Any(m => !m.IsCancelled)));
+        // BUGFIX: this used to go through _db.Students.CountAsync(s =>
+        // s.GroupMemberships.Any(...)), which always returned 0 -- combining
+        // Student's own tenant query filter with StudentGroupMembership's
+        // tenant query filter on the SAME navigation, inside one more
+        // explicit .Any() predicate, didn't translate/combine correctly.
+        // Querying StudentGroupMemberships directly (already tenant-scoped
+        // via its own HasQueryFilter) sidesteps that entirely -- same
+        // approach already used successfully in
+        // TeachersController.SuperAdminStudentCounts.
+        => Ok(await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => !m.IsCancelled)
+            .Select(m => m.StudentId)
+            .Distinct()
+            .CountAsync());
 
     // GET Students/{id}
     [HttpGet("{id:int}")]
@@ -1449,6 +1459,105 @@ public class StudentsController : ControllerBase
         await _db.SaveChangesAsync();
 
         return Ok(new { message = "Discount applied.", discountedPrice });
+    }
+
+    // GET Students/notebooks  (student, own — no params, studentId comes from JWT)
+    // Every notebook targeted at the student's group under the CURRENT tenant,
+    // with: name, price, total paid so far, and the full payment history --
+    // each payment shows which lecture it was made for and how much of the
+    // notebook's price was still remaining right after that payment.
+    [HttpGet("notebooks")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> GetMyNotebooks()
+    {
+        var studentId = User.GetUserId();
+
+        // Resolve this student's group under the CURRENT tenant -- same
+        // resolution order as GetAttendance, since a student can belong to
+        // several teachers' groups at once (MULTI-TENANT MEMBERSHIP).
+        var tenantGroupId = await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => m.StudentId == studentId)
+            .Select(m => (int?)m.GroupId)
+            .FirstOrDefaultAsync();
+
+        if (tenantGroupId == null)
+        {
+            var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == studentId);
+            if (student != null)
+                tenantGroupId = await _db.Groups.AsNoTracking()
+                    .Where(g => g.Id == student.GroupId && g.TeacherId == _tenant.CurrentTenantId)
+                    .Select(g => (int?)g.Id)
+                    .FirstOrDefaultAsync();
+        }
+
+        var notebooks = tenantGroupId == null
+            ? new List<Notebook>()
+            : (await _db.Notebooks.AsNoTracking().ToListAsync())
+                .Where(n => n.GroupIds.Contains(tenantGroupId.Value))
+                .ToList();
+
+        var notebookIds = notebooks.Select(n => n.Id).ToList();
+
+        var payments = await _db.NotebookPayments.AsNoTracking()
+            .Where(p => p.StudentId == studentId && notebookIds.Contains(p.NotebookId))
+            .Include(p => p.Lecture)
+            .OrderBy(p => p.Date)
+            .ToListAsync();
+
+        // Lecture has no Unit navigation property (just a raw UnitId), so
+        // batch-load the handful of Units these lectures point to.
+        var unitIds = payments.Where(p => p.Lecture?.UnitId != null)
+            .Select(p => p.Lecture!.UnitId!.Value).Distinct().ToList();
+        var unitsById = await _db.Units.AsNoTracking()
+            .Where(u => unitIds.Contains(u.Id))
+            .ToDictionaryAsync(u => u.Id, u => u.Name);
+
+        var paymentsByNotebook = payments.GroupBy(p => p.NotebookId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var result = notebooks.Select(n =>
+        {
+            var notebookPayments = paymentsByNotebook.GetValueOrDefault(n.Id, new List<NotebookPayment>());
+
+            // Running remaining balance: computed step-by-step in payment
+            // order, so each payment can report exactly what was left of the
+            // notebook's price right after it was made.
+            var runningPaid = 0;
+            var paymentDtos = notebookPayments.Select(p =>
+            {
+                var amountPaid = p.DiscountedPrice ?? p.Price;
+                runningPaid += amountPaid;
+                return new
+                {
+                    id = p.Id,
+                    amountPaid,
+                    date = p.Date,
+                    lecture = p.Lecture == null ? null : new
+                    {
+                        id = p.Lecture.Id,
+                        name = p.Lecture.Name,
+                        unit = p.Lecture.UnitId != null && unitsById.TryGetValue(p.Lecture.UnitId.Value, out var uName)
+                            ? new { id = p.Lecture.UnitId.Value, name = uName }
+                            : null
+                    },
+                    remaining = Math.Max(0, n.Price - runningPaid)
+                };
+            }).ToList();
+
+            var totalPaid = notebookPayments.Sum(p => p.DiscountedPrice ?? p.Price);
+
+            return new
+            {
+                id = n.Id,
+                name = n.Name,
+                price = n.Price,
+                totalPaid,
+                remaining = Math.Max(0, n.Price - totalPaid),
+                payments = paymentDtos
+            };
+        });
+
+        return Ok(result);
     }
 
     // GET Students/quiz-results/center?studentId=..  (teacher) / no params (student, own)

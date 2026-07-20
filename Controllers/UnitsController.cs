@@ -244,6 +244,13 @@ public class UnitsController : ControllerBase
         return Ok(new { message = "Unit deleted." });
     }
 
+    // GET Units/count — total number of courses/units belonging to the
+    // caller's tenant (Units is already tenant-scoped via the query filter).
+    [HttpGet("count")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> Count()
+        => Ok(await _db.Units.CountAsync());
+
     // Image is now MANDATORY when adding a Lesson, same as Units. Explicit
     // [FromForm] params so Swagger renders the real multipart form.
     [HttpPost("lessons")]

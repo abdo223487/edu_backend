@@ -2,15 +2,17 @@ namespace EduApi.DTOs;
 
 // ── Teacher: browsing/managing bank questions ──
 public record BankQuestionDto(
-    int Id, int LessonId, string LessonName, int UnitId, string UnitName,
+    int Id, int? LessonId, string? LessonName, int UnitId, string UnitName,
     string QuestionType, string Text, List<string> Choices, string CorrectAnswer,
     int Mark, string? ImageUrl, string Difficulty);
 
-// POST BankQuestions (multipart): LessonId, Type, Text, Answer, Mark, Difficulty, Choices[], image
+// POST BankQuestions (multipart): exactly one of LessonId or UnitId, Type, Text, Answer, Mark, Difficulty, Choices[], image
 
 // ── Student: scope picker (units → lessons → per-difficulty counts) ──
 public record BankLessonScopeDto(int LessonId, string LessonName, int Easy, int Medium, int Hard);
-public record BankUnitScopeDto(int UnitId, string UnitName, List<BankLessonScopeDto> Lessons);
+// Direct = questions the teacher attached to the unit itself (no lesson picked).
+public record BankUnitScopeDto(int UnitId, string UnitName, List<BankLessonScopeDto> Lessons,
+    int DirectEasy = 0, int DirectMedium = 0, int DirectHard = 0);
 
 // POST BankQuestions/start
 // - ExcludeSolved: skip any question this student has ever answered before (right or wrong).

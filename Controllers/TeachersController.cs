@@ -61,7 +61,12 @@ public class TeachersController : ControllerBase
         }
 
         var teachers = await _db.Teachers.AsNoTracking()
-            .Where(t => t.TenantOwnerId == null) // only real tenant-root teachers are "selectable"
+            // BUGFIX: "TenantOwnerId == null" alone also matches SuperAdmin
+            // accounts (they own no tenant either), so this list used to leak
+            // super admins in as if they were regular teachers. Require the
+            // Teacher role explicitly -- only real tenant-root teachers are
+            // "selectable" here.
+            .Where(t => t.TenantOwnerId == null && t.Role == Roles.Teacher)
             .Select(t => new
             {
                 id = t.Id,
