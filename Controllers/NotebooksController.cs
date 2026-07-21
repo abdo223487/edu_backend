@@ -143,7 +143,7 @@ public class NotebooksController : ControllerBase
     public async Task<IActionResult> GetPayments(int id)
     {
         var payments = await _db.NotebookPayments.AsNoTracking()
-            .Where(p => p.NotebookId == id)
+            .Where(p => p.NotebookId == id && !p.DiscountedPrice.HasValue)
             .ToListAsync();
 
         var studentIds = payments.Select(p => p.StudentId).Distinct().ToList();
@@ -164,7 +164,7 @@ public class NotebooksController : ControllerBase
         {
             students.TryGetValue(p.StudentId, out var s);
             statusByStudent.TryGetValue(p.StudentId, out var st);
-            var totalPaid = p.DiscountedPrice.HasValue ? 0 : p.Price;
+            var totalPaid = p.Price;
 
             return new
             {

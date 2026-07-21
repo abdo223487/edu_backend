@@ -1358,7 +1358,7 @@ public class StudentsController : ControllerBase
         // below), include the Lecture so each row can report which lecture
         // the payment was actually made for.
         var payments = await _db.NotebookPayments.AsNoTracking()
-            .Where(p => p.NotebookId == notebookId && p.StudentId == studentId)
+            .Where(p => p.NotebookId == notebookId && p.StudentId == studentId && !p.DiscountedPrice.HasValue)
             .Include(p => p.Lecture)
             .ToListAsync();
 
@@ -1573,13 +1573,26 @@ public class StudentsController : ControllerBase
         {
             var notebookPayments = paymentsByNotebook.GetValueOrDefault(n.Id, new List<NotebookPayment>());
 
+            // The discount target, if a discount was applied — this is what
+            // "remaining" should be measured against, not the notebook's
+            // original price.
+            var effectivePrice = notebookPayments
+                .Where(p => p.DiscountedPrice.HasValue)
+                .OrderByDescending(p => p.Date)
+                .FirstOrDefault()?.DiscountedPrice
+                ?? n.Price;
+
+            // Discount rows aren't real payments (no money changed hands),
+            // so they're excluded from the payment history shown here.
+            var realPayments = notebookPayments.Where(p => !p.DiscountedPrice.HasValue).ToList();
+
             // Running remaining balance: computed step-by-step in payment
             // order, so each payment can report exactly what was left of the
-            // notebook's price right after it was made.
+            // notebook's (possibly discounted) price right after it was made.
             var runningPaid = 0;
-            var paymentDtos = notebookPayments.Select(p =>
+            var paymentDtos = realPayments.Select(p =>
             {
-                var amountPaid = p.DiscountedPrice.HasValue ? 0 : p.Price;
+                var amountPaid = p.Price;
                 runningPaid += amountPaid;
                 return new
                 {
@@ -1594,11 +1607,11 @@ public class StudentsController : ControllerBase
                             ? new { id = p.Lecture.UnitId.Value, name = uName }
                             : null
                     },
-                    remaining = Math.Max(0, n.Price - runningPaid)
+                    remaining = Math.Max(0, effectivePrice - runningPaid)
                 };
             }).ToList();
 
-            var totalPaid = notebookPayments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
+            var totalPaid = realPayments.Sum(p => p.Price);
 
             return new
             {
@@ -1606,7 +1619,7 @@ public class StudentsController : ControllerBase
                 name = n.Name,
                 price = n.Price,
                 totalPaid,
-                remaining = Math.Max(0, n.Price - totalPaid),
+                remaining = Math.Max(0, effectivePrice - totalPaid),
                 payments = paymentDtos
             };
         });
