@@ -108,6 +108,26 @@ public class StudentsController : ControllerBase
 
         if (existing != null)
         {
+            var membership = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+                .FirstOrDefaultAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
+
+            // SAFETY: if this phone number is already ACTIVE under this same
+            // teacher, this is NOT a "re-add" or a cross-teacher merge -- it
+            // means the teacher is trying to register a (presumably
+            // different) student with a number that's already taken by
+            // someone else in their own account. Silently merging into the
+            // existing student here would ignore the new Name entirely and
+            // quietly attach this group to the wrong person. Reject instead.
+            if (membership is { IsCancelled: false, IsSuspended: false })
+            {
+                return Conflict(new
+                {
+                    message = $"This phone number is already registered to another student in your account ({existing.Name}). Each student must have a unique phone number.",
+                    existingStudentId = existing.Id,
+                    existingStudentName = existing.Name
+                });
+            }
+
             // RE-ADD FIX: this used to only check whether ANY membership row
             // existed for this teacher and, if so, no-op — but a row can
             // exist and be IsCancelled/IsSuspended (e.g. this same teacher
@@ -119,8 +139,6 @@ public class StudentsController : ControllerBase
             // fetch the actual row and reactivate it if it was
             // cancelled/suspended, so re-adding a student really does bring
             // them back for this teacher.
-            var membership = await _db.StudentGroupMemberships.IgnoreQueryFilters()
-                .FirstOrDefaultAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
             if (membership == null)
             {
                 _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = existing.Id, GroupId = group.Id });
@@ -208,14 +226,29 @@ public class StudentsController : ControllerBase
         if (student == null)
             return NotFound(new { message = "No student with this phone number exists yet. Use Create instead." });
 
+        var membership = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+            .FirstOrDefaultAsync(m => m.StudentId == student.Id && m.Group!.TeacherId == group.TeacherId);
+
+        // SAFETY: same reasoning as Students/Create -- if this phone is
+        // already active under this same teacher, don't silently treat the
+        // call as a successful "link"; that number is already taken by an
+        // existing student in this teacher's account.
+        if (membership is { IsCancelled: false, IsSuspended: false })
+        {
+            return Conflict(new
+            {
+                message = $"This phone number is already registered to another student in your account ({student.Name}). Each student must have a unique phone number.",
+                existingStudentId = student.Id,
+                existingStudentName = student.Name
+            });
+        }
+
         // RE-ADD FIX: same reasoning as Students/Create above -- a membership
         // row can already exist for this teacher but be cancelled/suspended
         // (e.g. this teacher deleted this student before). Previously that
         // counted as "already linked" and was left untouched, so re-linking
         // never actually brought the student back for this teacher. Now we
         // reactivate it.
-        var membership = await _db.StudentGroupMemberships.IgnoreQueryFilters()
-            .FirstOrDefaultAsync(m => m.StudentId == student.Id && m.Group!.TeacherId == group.TeacherId);
         if (membership == null)
         {
             _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = student.Id, GroupId = group.Id });
@@ -637,12 +670,26 @@ public class StudentsController : ControllerBase
 
                 if (existing != null)
                 {
+                    var membership = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+                        .FirstOrDefaultAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
+
+                    // SAFETY: same reasoning as Students/Create -- a phone number
+                    // already active under this SAME teacher means this row
+                    // collides with a different existing student, not a
+                    // legitimate re-add/cross-teacher merge. Flag it instead of
+                    // silently attaching this group to the wrong person.
+                    if (membership is { IsCancelled: false, IsSuspended: false })
+                    {
+                        failed++;
+                        results.Add(new ImportStudentsRowResult(r, name, phone, "Failed",
+                            $"This phone number is already registered to another student in your account ({existing.Name}).", existing.Id));
+                        continue;
+                    }
+
                     // RE-ADD FIX: same reasoning as Students/Create -- reactivate a
                     // cancelled/suspended membership instead of treating it as a
                     // no-op "already linked" row, otherwise a re-imported student
                     // never actually comes back for this teacher.
-                    var membership = await _db.StudentGroupMemberships.IgnoreQueryFilters()
-                        .FirstOrDefaultAsync(m => m.StudentId == existing.Id && m.Group!.TeacherId == group.TeacherId);
                     if (membership == null)
                     {
                         _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = existing.Id, GroupId = group.Id });
