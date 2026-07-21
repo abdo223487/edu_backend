@@ -1398,6 +1398,37 @@ public class StudentsController : ControllerBase
         var notebook = await _db.Notebooks.FirstOrDefaultAsync(e => e.Id == (notebookId));
         if (notebook == null) return NotFound(new { message = "Notebook not found." });
 
+        // SAFETY: make sure request.StudentId is actually a real student who
+        // belongs to a group this notebook targets, under the CURRENT tenant.
+        // StudentGroupMemberships already carries a tenant query filter, so
+        // this can't match a membership from another teacher. Without this
+        // check a stale/incorrect StudentId from the client would silently
+        // get recorded as a payment for the wrong student.
+        var studentGroupId = await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => m.StudentId == request.StudentId)
+            .Select(m => (int?)m.GroupId)
+            .FirstOrDefaultAsync();
+        if (studentGroupId == null || !notebook.GroupIds.Contains(studentGroupId.Value))
+            return BadRequest(new { message = "This student is not enrolled in a group this notebook applies to." });
+
+        if (request.Amount <= 0)
+            return BadRequest(new { message = "Payment amount must be greater than zero." });
+
+        // SAFETY: don't let a student "overpay" past the notebook's price
+        // (or their applied discounted price, if any). Cap the accepted
+        // amount to whatever is actually still owed.
+        var existingPayments = await _db.NotebookPayments.AsNoTracking()
+            .Where(p => p.NotebookId == notebookId && p.StudentId == request.StudentId)
+            .ToListAsync();
+        var alreadyPaid = existingPayments.Sum(p => p.DiscountedPrice ?? p.Price);
+        var owedTotal = existingPayments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
+                        ?? notebook.Price;
+        var remaining = owedTotal - alreadyPaid;
+        if (remaining <= 0)
+            return BadRequest(new { message = "This student has already fully paid for this notebook." });
+        if (request.Amount > remaining)
+            return BadRequest(new { message = $"Amount exceeds what's left to pay ({remaining})." });
+
         var payment = new NotebookPayment
         {
             TeacherId = notebook.TeacherId,
@@ -1442,10 +1473,26 @@ public class StudentsController : ControllerBase
     // POST Students/{notebookId}/discount?studentId=..&discountedPrice=..
     [HttpPost("{notebookId:int}/discount")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public async Task<IActionResult> ApplyDiscount(int notebookId, [FromQuery] int studentId, [FromQuery] int discountedPrice)
+    public async Task<IActionResult> ApplyDiscount(int notebookId, [FromQuery] int studentId, [FromQuery] decimal discountedPrice)
     {
         var notebook = await _db.Notebooks.FirstOrDefaultAsync(e => e.Id == (notebookId));
         if (notebook == null) return NotFound(new { message = "Notebook not found." });
+
+        // SAFETY: same tenant-scoped membership check as PayNotebook -- make
+        // sure this studentId actually belongs to a group this notebook applies to.
+        var studentGroupId = await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => m.StudentId == studentId)
+            .Select(m => (int?)m.GroupId)
+            .FirstOrDefaultAsync();
+        if (studentGroupId == null || !notebook.GroupIds.Contains(studentGroupId.Value))
+            return BadRequest(new { message = "This student is not enrolled in a group this notebook applies to." });
+
+        // Prices are stored as whole numbers; the client can send something
+        // like 50.0, so accept decimal and round rather than rejecting it
+        // outright with a binding error.
+        var roundedDiscountedPrice = (int)Math.Round(discountedPrice, MidpointRounding.AwayFromZero);
+        if (roundedDiscountedPrice <= 0 || roundedDiscountedPrice > notebook.Price)
+            return BadRequest(new { message = $"Discounted price must be between 1 and the notebook price ({notebook.Price})." });
 
         var payment = new NotebookPayment
         {
@@ -1453,12 +1500,12 @@ public class StudentsController : ControllerBase
             NotebookId = notebookId,
             StudentId = studentId,
             Price = notebook.Price,
-            DiscountedPrice = discountedPrice
+            DiscountedPrice = roundedDiscountedPrice
         };
         _db.NotebookPayments.Add(payment);
         await _db.SaveChangesAsync();
 
-        return Ok(new { message = "Discount applied.", discountedPrice });
+        return Ok(new { message = "Discount applied.", discountedPrice = roundedDiscountedPrice });
     }
 
     // GET Students/notebooks  (student, own — no params, studentId comes from JWT)
