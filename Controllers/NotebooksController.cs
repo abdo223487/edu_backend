@@ -35,15 +35,19 @@ public class NotebooksController : ControllerBase
         var notebooks = await query.ToListAsync();
         var notebookIds = notebooks.Select(n => n.Id).ToList();
 
-        // Sum of what students actually paid (DiscountedPrice if set, else full Price)
-        // per notebook, computed in one query instead of N+1.
+        // Sum of what students actually paid — real payment rows only.
+        // Discount rows (DiscountedPrice set) are a target marker, not cash
+        // received, so they must NOT be summed here or every discount
+        // application/re-application would add the notebook's full price to
+        // the "paid" total.
         var payments = await _db.NotebookPayments.AsNoTracking()
             .Where(p => notebookIds.Contains(p.NotebookId))
             .Select(p => new { p.NotebookId, p.DiscountedPrice, p.Price })
             .ToListAsync();
         var paidByNotebook = payments
+            .Where(p => !p.DiscountedPrice.HasValue)
             .GroupBy(p => p.NotebookId)
-            .ToDictionary(g => g.Key, g => g.Sum(p => p.DiscountedPrice ?? p.Price));
+            .ToDictionary(g => g.Key, g => g.Sum(p => p.Price));
 
         var result = notebooks.Select(n => new
         {
@@ -160,7 +164,7 @@ public class NotebooksController : ControllerBase
         {
             students.TryGetValue(p.StudentId, out var s);
             statusByStudent.TryGetValue(p.StudentId, out var st);
-            var totalPaid = p.DiscountedPrice ?? p.Price;
+            var totalPaid = p.DiscountedPrice.HasValue ? 0 : p.Price;
 
             return new
             {

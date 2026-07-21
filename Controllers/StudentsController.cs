@@ -1420,7 +1420,7 @@ public class StudentsController : ControllerBase
         var existingPayments = await _db.NotebookPayments.AsNoTracking()
             .Where(p => p.NotebookId == notebookId && p.StudentId == request.StudentId)
             .ToListAsync();
-        var alreadyPaid = existingPayments.Sum(p => p.DiscountedPrice ?? p.Price);
+        var alreadyPaid = existingPayments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
         var owedTotal = existingPayments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
                         ?? notebook.Price;
         var remaining = owedTotal - alreadyPaid;
@@ -1459,7 +1459,7 @@ public class StudentsController : ControllerBase
             .OrderByDescending(p => p.Date)
             .ToListAsync();
 
-        var paid = payments.Sum(p => p.Price);
+        var paid = payments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
         var discountedPrice = payments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
                                ?? notebook.Price;
 
@@ -1494,12 +1494,19 @@ public class StudentsController : ControllerBase
         if (roundedDiscountedPrice <= 0 || roundedDiscountedPrice > notebook.Price)
             return BadRequest(new { message = $"Discounted price must be between 1 and the notebook price ({notebook.Price})." });
 
+        // Price=0 here on purpose: this row exists to record the discount
+        // target, not an actual payment. Every "amount paid" calculation
+        // elsewhere treats rows with DiscountedPrice set as non-cash markers
+        // (real payments always come from PayNotebook, which never sets
+        // DiscountedPrice) -- if this were notebook.Price instead, applying
+        // (or re-applying) a discount would add the FULL original price to
+        // the student's paid total each time.
         var payment = new NotebookPayment
         {
             TeacherId = notebook.TeacherId,
             NotebookId = notebookId,
             StudentId = studentId,
-            Price = notebook.Price,
+            Price = 0,
             DiscountedPrice = roundedDiscountedPrice
         };
         _db.NotebookPayments.Add(payment);
@@ -1572,7 +1579,7 @@ public class StudentsController : ControllerBase
             var runningPaid = 0;
             var paymentDtos = notebookPayments.Select(p =>
             {
-                var amountPaid = p.DiscountedPrice ?? p.Price;
+                var amountPaid = p.DiscountedPrice.HasValue ? 0 : p.Price;
                 runningPaid += amountPaid;
                 return new
                 {
@@ -1591,7 +1598,7 @@ public class StudentsController : ControllerBase
                 };
             }).ToList();
 
-            var totalPaid = notebookPayments.Sum(p => p.DiscountedPrice ?? p.Price);
+            var totalPaid = notebookPayments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
 
             return new
             {
