@@ -212,7 +212,13 @@ public class AnalyticsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetAttendanceGraph([FromQuery] int? groupId, [FromQuery] int? schoolYear)
     {
-        var lectureQuery = _db.Lectures.AsNoTracking().AsQueryable();
+        var lectureQuery = _db.Lectures.AsNoTracking()
+            // Attendance-taking (and this graph) only applies to Center
+            // (on-site) lectures -- Online lectures are watched on-demand
+            // and were leaking in here, pushing real Center lectures out of
+            // the "last 4" window.
+            .Where(l => l.AttendanceMethod == AttendanceMethod.Center)
+            .AsQueryable();
         if (groupId.HasValue) lectureQuery = lectureQuery.Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == groupId.Value));
         else if (schoolYear.HasValue) lectureQuery = lectureQuery.Where(l => l.SchoolYear == schoolYear.Value);
 
