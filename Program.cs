@@ -89,6 +89,15 @@ builder.Services.AddSingleton<Amazon.S3.IAmazonS3>(sp =>
         ServiceURL = $"https://{r2.AccountId}.r2.cloudflarestorage.com",
         ForcePathStyle = true, // required by R2's S3-compatible API
 
+        // R2's SigV4 query-auth (used by GetPreSignedURL) validates the
+        // region in the credential scope strictly and requires it to be
+        // "auto" — without this, the SDK defaults to "us-east-1" for
+        // signing. Direct SDK calls like PutObjectAsync still work without
+        // this because the SDK builds/sends the request itself, but any
+        // presigned URL (e.g. GetVideoUploadUrl) gets rejected by R2 with a
+        // 401 the moment a client tries to PUT to it.
+        AuthenticationRegion = "auto",
+
         // AWSSDK.S3 3.7.400+ defaults to signing uploads with a streaming
         // "aws-chunked" body (optionally + a trailing checksum). Cloudflare R2
         // doesn't implement EITHER streaming-signed-payload variant and
