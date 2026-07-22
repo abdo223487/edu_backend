@@ -89,6 +89,33 @@ public class R2FileStorageService : IFileStorageService
         return $"{_options.PublicBaseUrl.TrimEnd('/')}/{key}";
     }
 
+    public (string UploadUrl, string PublicUrl) GetPresignedUploadUrl(string subFolder, string fileExtension, string contentType)
+    {
+        var tenantId = _tenant.CurrentTenantId;
+        if (tenantId == null)
+        {
+            throw new InvalidOperationException(
+                "Presigned upload rejected: no tenant could be resolved for the current request.");
+        }
+
+        var safeSubFolder = SanitizeSegment(subFolder);
+        var safeExtension = IsSafeExtension(fileExtension) ? fileExtension : string.Empty;
+        var key = $"{tenantId.Value}/{safeSubFolder}/{Guid.NewGuid():N}{safeExtension}";
+
+        var request = new GetPreSignedUrlRequest
+        {
+            BucketName = _options.BucketName,
+            Key = key,
+            Verb = HttpVerb.PUT,
+            Expires = DateTime.UtcNow.AddMinutes(30),
+            ContentType = string.IsNullOrWhiteSpace(contentType) ? "application/octet-stream" : contentType,
+        };
+
+        var uploadUrl = _s3.GetPreSignedURL(request);
+        var publicUrl = $"{_options.PublicBaseUrl.TrimEnd('/')}/{key}";
+        return (uploadUrl, publicUrl);
+    }
+
     public async Task DeleteAsync(string? fileUrl)
     {
         var key = TryExtractKey(fileUrl);

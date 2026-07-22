@@ -28,4 +28,18 @@ public interface IFileStorageService
     /// that's replacing it.
     /// </summary>
     Task DeleteAsync(string? fileUrl);
+
+    /// <summary>
+    /// Generates a short-lived presigned PUT URL that lets the CLIENT upload a
+    /// file straight to R2 without the bytes ever passing through this API
+    /// server (used for large recorded-lecture videos so we don't tie up an
+    /// ASP.NET request/worker for the whole upload). Returns both the
+    /// UploadUrl the client should PUT the raw file bytes to (with the exact
+    /// same Content-Type header used here) and the PublicUrl that object will
+    /// be reachable at afterwards — the same PublicUrl shape SaveAsync would
+    /// have returned had the server done the upload itself, so it can be
+    /// stored/used identically (e.g. passed back as Lecture.YoutubeLink).
+    /// Tenant is resolved from ITenantContext, same isolation as SaveAsync.
+    /// </summary>
+    (string UploadUrl, string PublicUrl) GetPresignedUploadUrl(string subFolder, string fileExtension, string contentType);
 }

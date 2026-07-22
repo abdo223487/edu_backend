@@ -39,6 +39,36 @@ public class LecturesController : ControllerBase
         _logger = logger;
     }
 
+    // GET Lectures/video-upload-url?extension=.mp4&contentType=video/mp4
+    // Returns a short-lived presigned R2 PUT URL so the app can upload the
+    // recorded video straight to Cloudflare R2 from the device, instead of
+    // sending the whole file through this API. Flow: 1) call this to get
+    // {uploadUrl, publicUrl}; 2) PUT the raw video bytes to uploadUrl with
+    // the SAME Content-Type header sent here; 3) call POST Lectures with
+    // YoutubeLink = publicUrl (Create() already treats any non-YouTube link
+    // in that field as an already-hosted video — no VideoFile needed, and no
+    // separate upload endpoint/field required for this case).
+    [HttpGet("video-upload-url")]
+    public IActionResult GetVideoUploadUrl([FromQuery] string extension = ".mp4", [FromQuery] string contentType = "video/mp4")
+    {
+        if (!string.Equals(extension, ".mp4", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { message = "Only .mp4 video files are supported." });
+
+        try
+        {
+            var (uploadUrl, publicUrl) = _files.GetPresignedUploadUrl("lectures", extension, contentType);
+            return Ok(new { uploadUrl, publicUrl });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (NotSupportedException ex)
+        {
+            return StatusCode(501, new { message = ex.Message });
+        }
+    }
+
     // Multipart create — supports an actual recorded-video upload (stored in
     // Cloudflare R2, same as quiz-question images and lecture materials) in
     // addition to a plain YouTube link.

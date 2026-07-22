@@ -91,6 +91,15 @@ public class FileStorageService : IFileStorageService
         return $"{baseUrl}/uploads/{tenantId}/{safeSubFolder}/{fileName}";
     }
 
+    // Direct-to-storage presigned uploads only make sense for a real
+    // object-storage backend (R2/S3) that clients can PUT to over the
+    // internet. The local-disk implementation is dev/demo-only, so there's
+    // no equivalent — callers should already be selecting R2 in any
+    // environment where this endpoint gets used.
+    public (string UploadUrl, string PublicUrl) GetPresignedUploadUrl(string subFolder, string fileExtension, string contentType) =>
+        throw new NotSupportedException(
+            "Direct client uploads require the R2 file storage backend; the local-disk FileStorageService does not support presigned URLs.");
+
     public Task DeleteAsync(string? fileUrl)
     {
         var relativePath = TryExtractRelativePath(fileUrl);
