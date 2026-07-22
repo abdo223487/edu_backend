@@ -39,6 +39,30 @@ public class LecturesController : ControllerBase
         _logger = logger;
     }
 
+    // GET Lectures/latest-center
+    // Returns the most recently created Center (in-person) lecture for the
+    // current teacher — {id, name, createdAt}, or 404 if none exist yet.
+    // Used by the offline notebook-payment flow: since a NotebookPayment
+    // should record which lecture it was made for (LectureId) but the
+    // teacher is recording payments offline with no lecture picker
+    // available, the app fetches this once while it HAS connectivity and
+    // caches it locally, then attaches that cached lecture id to every
+    // payment it queues until the next time it can refresh this value.
+    [HttpGet("latest-center")]
+    public async Task<IActionResult> GetLatestCenterLecture()
+    {
+        var lecture = await _db.Lectures.AsNoTracking()
+            .Where(l => l.AttendanceMethod == AttendanceMethod.Center)
+            .OrderByDescending(l => l.CreatedAt)
+            .Select(l => new { l.Id, l.Name, l.CreatedAt })
+            .FirstOrDefaultAsync();
+
+        if (lecture == null)
+            return NotFound(new { message = "No center lecture has been created yet." });
+
+        return Ok(lecture);
+    }
+
     // GET Lectures/video-upload-url?extension=.mp4&contentType=video/mp4
     // Returns a short-lived presigned R2 PUT URL so the app can upload the
     // recorded video straight to Cloudflare R2 from the device, instead of
