@@ -410,11 +410,14 @@ public class AnalyticsController : ControllerBase
             .Select(s => new { s.Id, s.Name, s.PhoneNumber })
             .ToListAsync();
 
+        // Discount rows (DiscountedPrice set) are a target marker, not cash
+        // received, so they must NOT be treated as payments here — otherwise
+        // applying a discount alone makes a student look "paid".
         var payments = await _db.NotebookPayments.AsNoTracking()
-            .Where(pay => pay.NotebookId == notebookId)
+            .Where(pay => pay.NotebookId == notebookId && !pay.DiscountedPrice.HasValue)
             .ToListAsync();
         var paidByStudent = payments.GroupBy(pay => pay.StudentId)
-            .ToDictionary(g => g.Key, g => g.Sum(pay => pay.DiscountedPrice ?? pay.Price));
+            .ToDictionary(g => g.Key, g => g.Sum(pay => pay.Price));
 
         // Client (notebbok analytics .dart) reads s['student']['name'] (a nested
         // object, not a flat one), plus s['totalPaid'] and s['price'] at the top
@@ -467,11 +470,13 @@ public class AnalyticsController : ControllerBase
             .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.ParentPhoneNumber })
             .ToListAsync();
 
+        // Discount rows (DiscountedPrice set) are a target marker, not cash
+        // received, so they must NOT be treated as payments here.
         var payments = await _db.NotebookPayments.AsNoTracking()
-            .Where(pay => pay.NotebookId == notebookId)
+            .Where(pay => pay.NotebookId == notebookId && !pay.DiscountedPrice.HasValue)
             .ToListAsync();
         var paidByStudent = payments.GroupBy(pay => pay.StudentId)
-            .ToDictionary(g => g.Key, g => g.Sum(pay => pay.DiscountedPrice ?? pay.Price));
+            .ToDictionary(g => g.Key, g => g.Sum(pay => pay.Price));
 
         IEnumerable<(string SheetName, string[] Headers, IEnumerable<string[]> Rows)> sheets;
 
