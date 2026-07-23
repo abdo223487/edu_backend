@@ -1174,6 +1174,27 @@ public class StudentsController : ControllerBase
         return Ok(new { message = "Student deleted." });
     }
 
+    // GET Students/me  (student — returns the calling student's own Id in
+    // the system, plus basic identifying info, straight from the JWT claim.
+    // Used anywhere the app needs "ايه الـ ID بتاعي" — e.g. a student
+    // wanting to give their ID to the teacher for an offline-recorded
+    // notebook payment (see LecturesController.latest-center-by-year /
+    // OfflineNotebookPaymentsPage).
+    [HttpGet("me")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> GetMe()
+    {
+        var studentId = User.GetUserId();
+        var student = await _db.Students.AsNoTracking()
+            .Where(s => s.Id == studentId)
+            .Select(s => new { s.Id, s.Name })
+            .FirstOrDefaultAsync();
+
+        if (student == null) return NotFound(new { message = "Student not found." });
+
+        return Ok(student);
+    }
+
     // POST Students/codes  body: { code }  (student redeems a code)
     [HttpPost("codes")]
     [Authorize(Roles = Roles.Student)]
