@@ -39,28 +39,35 @@ public class LecturesController : ControllerBase
         _logger = logger;
     }
 
-    // GET Lectures/latest-center
-    // Returns the most recently created Center (in-person) lecture for the
-    // current teacher — {id, name, createdAt}, or 404 if none exist yet.
+    // GET Lectures/latest-center-by-year
+    // Returns the most recently created Center (in-person) lecture PER
+    // SchoolYear for the current teacher — a list of
+    // {schoolYear, id, name, createdAt}, ordered by SchoolYear descending
+    // (lectures with no SchoolYear set are grouped under 0 and sorted
+    // last). Empty list (never 404) if no center lectures exist yet.
     // Used by the offline notebook-payment flow: since a NotebookPayment
     // should record which lecture it was made for (LectureId) but the
-    // teacher is recording payments offline with no lecture picker
+    // teacher is recording payments offline with no live lecture picker
     // available, the app fetches this once while it HAS connectivity and
-    // caches it locally, then attaches that cached lecture id to every
-    // payment it queues until the next time it can refresh this value.
-    [HttpGet("latest-center")]
-    public async Task<IActionResult> GetLatestCenterLecture()
+    // caches the list locally, then lets the teacher pick which cached
+    // lecture (i.e. which year) to attach to each payment it queues until
+    // the next time it can refresh this value.
+    [HttpGet("latest-center-by-year")]
+    public async Task<IActionResult> GetLatestCenterLectureByYear()
     {
-        var lecture = await _db.Lectures.AsNoTracking()
+        var centerLectures = await _db.Lectures.AsNoTracking()
             .Where(l => l.AttendanceMethod == AttendanceMethod.Center)
-            .OrderByDescending(l => l.CreatedAt)
-            .Select(l => new { l.Id, l.Name, l.CreatedAt })
-            .FirstOrDefaultAsync();
+            .Select(l => new { l.Id, l.Name, l.CreatedAt, l.SchoolYear })
+            .ToListAsync();
 
-        if (lecture == null)
-            return NotFound(new { message = "No center lecture has been created yet." });
+        var latestPerYear = centerLectures
+            .GroupBy(l => l.SchoolYear ?? 0)
+            .Select(g => g.OrderByDescending(l => l.CreatedAt).First())
+            .OrderByDescending(l => l.SchoolYear ?? 0)
+            .Select(l => new { schoolYear = l.SchoolYear, l.Id, l.Name, l.CreatedAt })
+            .ToList();
 
-        return Ok(lecture);
+        return Ok(latestPerYear);
     }
 
     // GET Lectures/video-upload-url?extension=.mp4&contentType=video/mp4
