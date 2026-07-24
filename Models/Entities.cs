@@ -399,6 +399,50 @@ public class NotebookPayment
     public Lecture? Lecture { get; set; }
 }
 
+// ── Billing (monthly payment) ───────────────────────────────────────────
+// Exact mirror of Notebook/NotebookPayment above — same shape, same
+// endpoints, same rules (paid/discount/analytics). Kept as a fully separate
+// entity (not a "type" flag on Notebook) so a Notebook and a Billing item
+// can never collide on id, and so "مدفوعاتي" at the student can report both
+// kinds side-by-side without ambiguity.
+public class Billing
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = default!;
+    public int SchoolYear { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this billing item belongs to.</summary>
+    public int TeacherId { get; set; }
+
+    public string GroupIdsCsv { get; set; } = string.Empty;
+    [NotMapped] public List<int> GroupIds
+    {
+        get => GroupIdsCsv.Length == 0 ? new() : GroupIdsCsv.Split(',').Select(int.Parse).ToList();
+        set => GroupIdsCsv = string.Join(',', value);
+    }
+    public int Price { get; set; }
+    public string UnitIdsCsv { get; set; } = string.Empty;
+    [NotMapped] public List<int> UnitIds
+    {
+        get => UnitIdsCsv.Length == 0 ? new() : UnitIdsCsv.Split(',').Select(int.Parse).ToList();
+        set => UnitIdsCsv = string.Join(',', value);
+    }
+}
+
+public class BillingPayment
+{
+    public int Id { get; set; }
+    public int TeacherId { get; set; }
+    public int BillingId { get; set; }
+    public int StudentId { get; set; }
+    public int Price { get; set; }
+    public int? DiscountedPrice { get; set; }
+    public DateTime Date { get; set; } = DateTime.UtcNow;
+    public int? LectureId { get; set; }
+    public Lecture? Lecture { get; set; }
+}
+
 
 public class Code
 {

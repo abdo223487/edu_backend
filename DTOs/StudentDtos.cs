@@ -38,6 +38,7 @@ public record RedeemCodeRequest(string Code);
 
 // POST Students/{notebookId}/pay body: { studentId, amount, lectureId }
 public record PayNotebookRequest(int StudentId, int Amount, int? LectureId);
+public record PayBillingRequest(int StudentId, int Amount, int? LectureId);
 
 // POST Students/quiz-results/center/add body: { studentId, quizTotalMarks, mark }
 public record AddCenterQuizResultRequest(int StudentId, int QuizTotalMarks, int Mark);

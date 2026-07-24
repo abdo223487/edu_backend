@@ -1695,6 +1695,292 @@ public class StudentsController : ControllerBase
         return Ok(result);
     }
 
+    // ── Billing (monthly payment) — exact mirror of the Notebook payment
+    // endpoints above (GetNotebookPaymentsForStudent / PayNotebook /
+    // GetNotebookDiscountInfo / ApplyDiscount / GetMyNotebooks). ──────────
+
+    // GET Students/billing/{billingId}/payments?studentId=..
+    [HttpGet("billing/{billingId:int}/payments")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> GetBillingPaymentsForStudent(int billingId, [FromQuery] int studentId)
+    {
+        var payments = await _db.BillingPayments.AsNoTracking()
+            .Where(p => p.BillingId == billingId && p.StudentId == studentId && !p.DiscountedPrice.HasValue)
+            .Include(p => p.Lecture)
+            .ToListAsync();
+
+        var unitIds = payments.Where(p => p.Lecture?.UnitId != null)
+            .Select(p => p.Lecture!.UnitId!.Value).Distinct().ToList();
+        var unitsById = await _db.Units.AsNoTracking()
+            .Where(u => unitIds.Contains(u.Id))
+            .ToDictionaryAsync(u => u.Id, u => u.Name);
+
+        var result = payments.Select(p => new
+        {
+            id = p.Id,
+            amount = p.Price,
+            discountedPrice = p.DiscountedPrice,
+            date = p.Date,
+            lecture = p.Lecture == null ? null : new
+            {
+                id = p.Lecture.Id,
+                name = p.Lecture.Name,
+                unit = p.Lecture.UnitId != null && unitsById.TryGetValue(p.Lecture.UnitId.Value, out var uName)
+                    ? new { id = p.Lecture.UnitId.Value, name = uName }
+                    : null
+            }
+        });
+
+        return Ok(result);
+    }
+
+    // POST Students/billing/{billingId}/pay  body: { studentId, amount, lectureId }
+    [HttpPost("billing/{billingId:int}/pay")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> PayBilling(int billingId, [FromBody] PayBillingRequest request)
+    {
+        var billing = await _db.Billings.FirstOrDefaultAsync(e => e.Id == (billingId));
+        if (billing == null) return NotFound(new { message = "Billing not found." });
+
+        var studentGroupId = await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => m.StudentId == request.StudentId)
+            .Select(m => (int?)m.GroupId)
+            .FirstOrDefaultAsync();
+        if (studentGroupId == null || !billing.GroupIds.Contains(studentGroupId.Value))
+            return BadRequest(new { message = "This student is not enrolled in a group this billing applies to." });
+
+        if (request.Amount <= 0)
+            return BadRequest(new { message = "Payment amount must be greater than zero." });
+
+        var existingPayments = await _db.BillingPayments.AsNoTracking()
+            .Where(p => p.BillingId == billingId && p.StudentId == request.StudentId)
+            .ToListAsync();
+        var alreadyPaid = existingPayments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
+        var owedTotal = existingPayments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
+                        ?? billing.Price;
+        var remaining = owedTotal - alreadyPaid;
+        if (remaining <= 0)
+            return BadRequest(new { message = "This student has already fully paid for this billing." });
+        if (request.Amount > remaining)
+            return BadRequest(new { message = $"Amount exceeds what's left to pay ({remaining})." });
+
+        var payment = new BillingPayment
+        {
+            TeacherId = billing.TeacherId,
+            BillingId = billingId,
+            StudentId = request.StudentId,
+            Price = request.Amount,
+            LectureId = request.LectureId,
+        };
+        _db.BillingPayments.Add(payment);
+        await _db.SaveChangesAsync();
+
+        return StatusCode(201, new { id = payment.Id, message = "Payment recorded." });
+    }
+
+    // GET Students/billing/{billingId}/discount?studentId=..
+    [HttpGet("billing/{billingId:int}/discount")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> GetBillingDiscountInfo(int billingId, [FromQuery] int studentId)
+    {
+        var billing = await _db.Billings.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (billingId));
+        if (billing == null) return NotFound(new { message = "Billing not found." });
+
+        var payments = await _db.BillingPayments.AsNoTracking()
+            .Where(p => p.BillingId == billingId && p.StudentId == studentId)
+            .OrderByDescending(p => p.Date)
+            .ToListAsync();
+
+        var paid = payments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
+        var discountedPrice = payments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
+                               ?? billing.Price;
+
+        return Ok(new
+        {
+            billing = new { name = billing.Name, price = billing.Price, paid },
+            discountedPrice
+        });
+    }
+
+    // POST Students/billing/{billingId}/discount?studentId=..&discountedPrice=..
+    [HttpPost("billing/{billingId:int}/discount")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> ApplyBillingDiscount(int billingId, [FromQuery] int studentId, [FromQuery] decimal discountedPrice)
+    {
+        var billing = await _db.Billings.FirstOrDefaultAsync(e => e.Id == (billingId));
+        if (billing == null) return NotFound(new { message = "Billing not found." });
+
+        var studentGroupId = await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => m.StudentId == studentId)
+            .Select(m => (int?)m.GroupId)
+            .FirstOrDefaultAsync();
+        if (studentGroupId == null || !billing.GroupIds.Contains(studentGroupId.Value))
+            return BadRequest(new { message = "This student is not enrolled in a group this billing applies to." });
+
+        var roundedDiscountedPrice = (int)Math.Round(discountedPrice, MidpointRounding.AwayFromZero);
+        if (roundedDiscountedPrice <= 0 || roundedDiscountedPrice > billing.Price)
+            return BadRequest(new { message = $"Discounted price must be between 1 and the billing price ({billing.Price})." });
+
+        var payment = new BillingPayment
+        {
+            TeacherId = billing.TeacherId,
+            BillingId = billingId,
+            StudentId = studentId,
+            Price = 0,
+            DiscountedPrice = roundedDiscountedPrice
+        };
+        _db.BillingPayments.Add(payment);
+        await _db.SaveChangesAsync();
+
+        return Ok(new { message = "Discount applied.", discountedPrice = roundedDiscountedPrice });
+    }
+
+    // GET Students/billings  (student, own — no params, studentId comes from JWT)
+    // Exact mirror of GET Students/notebooks.
+    [HttpGet("billings")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> GetMyBillings()
+    {
+        var studentId = User.GetUserId();
+
+        var tenantGroupId = await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => m.StudentId == studentId)
+            .Select(m => (int?)m.GroupId)
+            .FirstOrDefaultAsync();
+
+        if (tenantGroupId == null)
+        {
+            var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == studentId);
+            if (student != null)
+                tenantGroupId = await _db.Groups.AsNoTracking()
+                    .Where(g => g.Id == student.GroupId && g.TeacherId == _tenant.CurrentTenantId)
+                    .Select(g => (int?)g.Id)
+                    .FirstOrDefaultAsync();
+        }
+
+        var billings = tenantGroupId == null
+            ? new List<Billing>()
+            : (await _db.Billings.AsNoTracking().ToListAsync())
+                .Where(n => n.GroupIds.Contains(tenantGroupId.Value))
+                .ToList();
+
+        var billingIds = billings.Select(n => n.Id).ToList();
+
+        var payments = await _db.BillingPayments.AsNoTracking()
+            .Where(p => p.StudentId == studentId && billingIds.Contains(p.BillingId))
+            .Include(p => p.Lecture)
+            .OrderBy(p => p.Date)
+            .ToListAsync();
+
+        var unitIds = payments.Where(p => p.Lecture?.UnitId != null)
+            .Select(p => p.Lecture!.UnitId!.Value).Distinct().ToList();
+        var unitsById = await _db.Units.AsNoTracking()
+            .Where(u => unitIds.Contains(u.Id))
+            .ToDictionaryAsync(u => u.Id, u => u.Name);
+
+        var paymentsByBilling = payments.GroupBy(p => p.BillingId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        var result = billings.Select(n =>
+        {
+            var billingPayments = paymentsByBilling.GetValueOrDefault(n.Id, new List<BillingPayment>());
+
+            var effectivePrice = billingPayments
+                .Where(p => p.DiscountedPrice.HasValue)
+                .OrderByDescending(p => p.Date)
+                .FirstOrDefault()?.DiscountedPrice
+                ?? n.Price;
+
+            var realPayments = billingPayments.Where(p => !p.DiscountedPrice.HasValue).ToList();
+
+            var runningPaid = 0;
+            var paymentDtos = realPayments.Select(p =>
+            {
+                var amountPaid = p.Price;
+                runningPaid += amountPaid;
+                return new
+                {
+                    id = p.Id,
+                    amountPaid,
+                    date = p.Date,
+                    lecture = p.Lecture == null ? null : new
+                    {
+                        id = p.Lecture.Id,
+                        name = p.Lecture.Name,
+                        unit = p.Lecture.UnitId != null && unitsById.TryGetValue(p.Lecture.UnitId.Value, out var uName)
+                            ? new { id = p.Lecture.UnitId.Value, name = uName }
+                            : null
+                    },
+                    remaining = Math.Max(0, effectivePrice - runningPaid)
+                };
+            }).ToList();
+
+            var totalPaid = realPayments.Sum(p => p.Price);
+
+            return new
+            {
+                id = n.Id,
+                name = n.Name,
+                price = n.Price,
+                totalPaid,
+                remaining = Math.Max(0, effectivePrice - totalPaid),
+                payments = paymentDtos
+            };
+        });
+
+        return Ok(result);
+    }
+
+    // GET Students/payments  (student, own — combines Notebooks AND Billing
+    // into one merged, date-sorted list, each row tagged with "kind" so the
+    // Flutter "مدفوعاتي" screen can show everything in one place without
+    // caring which system it came from).
+    [HttpGet("payments")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> GetMyAllPayments()
+    {
+        var studentId = User.GetUserId();
+
+        var notebookPayments = await _db.NotebookPayments.AsNoTracking()
+            .Where(p => p.StudentId == studentId && !p.DiscountedPrice.HasValue)
+            .Include(p => p.Lecture)
+            .ToListAsync();
+        var billingPayments = await _db.BillingPayments.AsNoTracking()
+            .Where(p => p.StudentId == studentId && !p.DiscountedPrice.HasValue)
+            .Include(p => p.Lecture)
+            .ToListAsync();
+
+        var notebookIds = notebookPayments.Select(p => p.NotebookId).Distinct().ToList();
+        var billingIds = billingPayments.Select(p => p.BillingId).Distinct().ToList();
+        var notebookNames = await _db.Notebooks.AsNoTracking()
+            .Where(n => notebookIds.Contains(n.Id)).ToDictionaryAsync(n => n.Id, n => n.Name);
+        var billingNames = await _db.Billings.AsNoTracking()
+            .Where(n => billingIds.Contains(n.Id)).ToDictionaryAsync(n => n.Id, n => n.Name);
+
+        var merged = notebookPayments.Select(p => (object)new
+        {
+            id = p.Id,
+            kind = "notebook",
+            title = notebookNames.GetValueOrDefault(p.NotebookId, ""),
+            amount = p.Price,
+            date = p.Date,
+            lecture = p.Lecture?.Name
+        })
+        .Concat(billingPayments.Select(p => (object)new
+        {
+            id = p.Id,
+            kind = "billing",
+            title = billingNames.GetValueOrDefault(p.BillingId, ""),
+            amount = p.Price,
+            date = p.Date,
+            lecture = p.Lecture?.Name
+        }))
+        .OrderByDescending(x => ((dynamic)x).date)
+        .ToList();
+
+        return Ok(merged);
+    }
+
     // GET Students/quiz-results/center?studentId=..  (teacher) / no params (student, own)
     [HttpGet("quiz-results/center")]
     public async Task<IActionResult> GetCenterQuizResults([FromQuery] int? studentId)

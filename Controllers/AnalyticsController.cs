@@ -515,6 +515,120 @@ public class AnalyticsController : ControllerBase
         return XlsxFile(bytes, filename);
     }
 
+    // ── Billing (monthly payment) analytics — exact mirror of the notebook
+    // paid/unpaid + sheet endpoints above. ────────────────────────────────
+
+    [HttpGet("billings/{billingId:int}/paid")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public Task<IActionResult> GetBillingPaidStudents(int billingId, [FromQuery] int? groupId, [FromQuery] int? schoolYear, [FromQuery] int p = 1)
+        => GetBillingStudentsByPaymentStatus(billingId, paid: true, groupId, schoolYear, p);
+
+    [HttpGet("billings/{billingId:int}/unpaid")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public Task<IActionResult> GetBillingUnpaidStudents(int billingId, [FromQuery] int? groupId, [FromQuery] int? schoolYear, [FromQuery] int p = 1)
+        => GetBillingStudentsByPaymentStatus(billingId, paid: false, groupId, schoolYear, p);
+
+    private async Task<IActionResult> GetBillingStudentsByPaymentStatus(
+        int billingId, bool paid, int? groupId, int? schoolYear, int p)
+    {
+        var billing = await _db.Billings.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (billingId));
+        if (billing == null) return NotFound(new { message = "Billing not found." });
+
+        var query = _db.Students.AsNoTracking().AsQueryable();
+        if (groupId.HasValue) query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
+        else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
+        else query = query.Where(s => s.GroupMemberships.Any(m => billing.GroupIds.Contains(m.GroupId)));
+
+        var students = await query.OrderBy(s => s.Name)
+            .Skip((p - 1) * PagingDefaults.PageSize).Take(PagingDefaults.PageSize)
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber })
+            .ToListAsync();
+
+        var payments = await _db.BillingPayments.AsNoTracking()
+            .Where(pay => pay.BillingId == billingId && !pay.DiscountedPrice.HasValue)
+            .ToListAsync();
+        var paidByStudent = payments.GroupBy(pay => pay.StudentId)
+            .ToDictionary(g => g.Key, g => g.Sum(pay => pay.Price));
+
+        var filtered = students
+            .Where(s => paid ? paidByStudent.ContainsKey(s.Id) : !paidByStudent.ContainsKey(s.Id))
+            .Select(s => new
+            {
+                student = new { id = s.Id, name = s.Name, phoneNumber = s.PhoneNumber },
+                totalPaid = paidByStudent.TryGetValue(s.Id, out var total) ? total : 0,
+                price = billing.Price
+            });
+
+        return Ok(filtered);
+    }
+
+    [HttpGet("sheets/billings/{billingId:int}/paid")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public Task<IActionResult> DownloadBillingPaidSheet(int billingId, [FromQuery] int? groupId, [FromQuery] int? schoolYear)
+        => DownloadBillingSheet(billingId, paid: true, groupId, schoolYear);
+
+    [HttpGet("sheets/billings/{billingId:int}/unpaid")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public Task<IActionResult> DownloadBillingUnpaidSheet(int billingId, [FromQuery] int? groupId, [FromQuery] int? schoolYear)
+        => DownloadBillingSheet(billingId, paid: false, groupId, schoolYear);
+
+    private async Task<IActionResult> DownloadBillingSheet(int billingId, bool paid, int? groupId, int? schoolYear)
+    {
+        var billing = await _db.Billings.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (billingId));
+        if (billing == null) return NotFound(new { message = "Billing not found." });
+
+        var query = _db.Students.AsNoTracking().AsQueryable();
+        if (groupId.HasValue) query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
+        else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
+        else query = query.Where(s => s.GroupMemberships.Any(m => billing.GroupIds.Contains(m.GroupId)));
+
+        var students = await query.OrderBy(s => s.Name)
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.ParentPhoneNumber })
+            .ToListAsync();
+
+        var payments = await _db.BillingPayments.AsNoTracking()
+            .Where(pay => pay.BillingId == billingId && !pay.DiscountedPrice.HasValue)
+            .ToListAsync();
+        var paidByStudent = payments.GroupBy(pay => pay.StudentId)
+            .ToDictionary(g => g.Key, g => g.Sum(pay => pay.Price));
+
+        IEnumerable<(string SheetName, string[] Headers, IEnumerable<string[]> Rows)> sheets;
+
+        if (paid)
+        {
+            var withTotals = students.Select(s => new
+            {
+                s.Name,
+                s.PhoneNumber,
+                s.ParentPhoneNumber,
+                TotalPaid = paidByStudent.TryGetValue(s.Id, out var t) ? t : 0
+            }).ToList();
+
+            var fullPaid = withTotals.Where(s => s.TotalPaid > 0 && s.TotalPaid >= billing.Price).ToList();
+            var partialPaid = withTotals.Where(s => s.TotalPaid > 0 && s.TotalPaid < billing.Price).ToList();
+
+            sheets = new[]
+            {
+                ("دفعوا كامل", new[] { "Name", "PhoneNumber", "ParentPhoneNumber", "AmountPaid" }, BuildPaymentRows(fullPaid)),
+                ("دفعوا جزء", new[] { "Name", "PhoneNumber", "ParentPhoneNumber", "AmountPaid" }, BuildPaymentRows(partialPaid)),
+            };
+        }
+        else
+        {
+            var unpaid = students.Where(s => !paidByStudent.ContainsKey(s.Id))
+                .Select(s => new[] { s.Name, s.PhoneNumber, s.ParentPhoneNumber ?? "" });
+
+            sheets = new[]
+            {
+                ("Unpaid", new[] { "Name", "PhoneNumber", "ParentPhoneNumber" }, unpaid),
+            };
+        }
+
+        var bytes = BuildMultiSheetXlsx(sheets);
+        var filename = $"billing_{billingId}_{(paid ? "paid" : "unpaid")}.xlsx";
+        return XlsxFile(bytes, filename);
+    }
+
     // Per-student rows plus a trailing totals row summing AmountPaid across
     // everyone on the sheet -- "مجموع الفلوس اللي فيها" at the bottom.
     private static IEnumerable<string[]> BuildPaymentRows<T>(List<T> students)

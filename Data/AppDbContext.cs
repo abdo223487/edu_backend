@@ -27,6 +27,8 @@ public class AppDbContext : DbContext
     public DbSet<Material> Materials => Set<Material>();
     public DbSet<Notebook> Notebooks => Set<Notebook>();
     public DbSet<NotebookPayment> NotebookPayments => Set<NotebookPayment>();
+    public DbSet<Billing> Billings => Set<Billing>();
+    public DbSet<BillingPayment> BillingPayments => Set<BillingPayment>();
     public DbSet<Code> Codes => Set<Code>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<Attendance> Attendances => Set<Attendance>();
@@ -85,6 +87,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Lecture>().HasQueryFilter(l => l.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Material>().HasQueryFilter(m => m.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Notebook>().HasQueryFilter(n => n.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<Billing>().HasQueryFilter(b => b.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Code>().HasQueryFilter(c => c.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Notification>().HasQueryFilter(n => n.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Quiz>().HasQueryFilter(q => q.TeacherId == _tenant.CurrentTenantId);
@@ -104,6 +107,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Lecture>().HasIndex(l => l.TeacherId);
         modelBuilder.Entity<Material>().HasIndex(m => m.TeacherId);
         modelBuilder.Entity<Notebook>().HasIndex(n => n.TeacherId);
+        modelBuilder.Entity<Billing>().HasIndex(b => b.TeacherId);
         modelBuilder.Entity<Code>().HasIndex(c => c.TeacherId);
         // Every attendance record now looks up Codes by TriggerLectureId
         // (IssueTriggeredCodesAsync) — same performance reasoning as the
@@ -151,6 +155,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Dismissal>().HasQueryFilter(d => d.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<AssignmentSubmission>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<NotebookPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<BillingPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentLectureUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentOnlineLessonUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentUnitSubscription>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
@@ -158,6 +163,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Attendance>().HasIndex(a => a.TeacherId);
         modelBuilder.Entity<AssignmentSubmission>().HasIndex(s => s.TeacherId);
         modelBuilder.Entity<NotebookPayment>().HasIndex(p => p.TeacherId);
+        modelBuilder.Entity<BillingPayment>().HasIndex(p => p.TeacherId);
         modelBuilder.Entity<StudentLectureUnlock>().HasIndex(u => u.TeacherId);
         modelBuilder.Entity<StudentUnitSubscription>().HasIndex(s => s.TeacherId);
         modelBuilder.Entity<StudentOnlineLessonUnlock>().HasIndex(u => u.TeacherId);
