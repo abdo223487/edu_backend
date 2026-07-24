@@ -79,6 +79,34 @@ public class MetaWhatsAppService : IWhatsAppService
         return await SendTemplateAsync(studentPhoneNumber, _options.WelcomeTemplateName, parameters, "welcome");
     }
 
+    public async Task<bool> SendDismissalNotificationAsync(string parentPhoneNumber, DismissalWhatsAppNotification data)
+    {
+        if (!_options.Enabled)
+        {
+            _logger.LogInformation("WhatsApp notifications disabled (WhatsApp:Enabled=false); skipping.");
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(parentPhoneNumber))
+        {
+            _logger.LogWarning("Skipping WhatsApp dismissal notification: no parent phone number.");
+            return false;
+        }
+
+        var egyptTime = ToEgyptTime(data.DismissalLocalTime);
+
+        var parameters = new object[]
+        {
+            new { type = "text", parameter_name = "teacher_name", text = data.TeacherName },
+            new { type = "text", parameter_name = "lesson_title", text = data.LessonTitle },
+            new { type = "text", parameter_name = "group_name", text = data.GroupName },
+            new { type = "text", parameter_name = "date", text = egyptTime.ToString("dd/MM/yyyy") },
+            new { type = "text", parameter_name = "time", text = egyptTime.ToString("HH:mm") },
+        };
+
+        return await SendTemplateAsync(parentPhoneNumber, _options.DismissalTemplateName, parameters, "dismissal");
+    }
+
     private async Task<bool> SendTemplateAsync(string rawPhoneNumber, string templateName, object[] bodyParameters, string kind)
     {
         if (string.IsNullOrWhiteSpace(_options.PhoneNumberId) || string.IsNullOrWhiteSpace(_options.AccessToken))

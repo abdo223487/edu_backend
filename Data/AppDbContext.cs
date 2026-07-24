@@ -30,6 +30,7 @@ public class AppDbContext : DbContext
     public DbSet<Code> Codes => Set<Code>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<Attendance> Attendances => Set<Attendance>();
+    public DbSet<Dismissal> Dismissals => Set<Dismissal>();
     public DbSet<Quiz> Quizzes => Set<Quiz>();
     public DbSet<Question> Questions => Set<Question>();
     public DbSet<QuizResult> QuizResults => Set<QuizResult>();
@@ -147,6 +148,7 @@ public class AppDbContext : DbContext
         // closes that off structurally instead of relying on every call
         // site remembering to join correctly.
         modelBuilder.Entity<Attendance>().HasQueryFilter(a => a.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<Dismissal>().HasQueryFilter(d => d.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<AssignmentSubmission>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<NotebookPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentLectureUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);

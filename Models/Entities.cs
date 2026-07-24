@@ -508,6 +508,24 @@ public class Attendance
     public DateTime Date { get; set; } = DateTime.UtcNow;
 }
 
+/// <summary>
+/// "الانصراف" — a teacher marks a lesson (for one Group, within one Unit) as
+/// finished. Recording this fires a single WhatsApp broadcast to every
+/// parent of every student currently in that Group, letting them know the
+/// class has ended. Unlike Attendance (per-student, QR-scan driven), this is
+/// a one-shot group-wide announcement with no per-student tracking.
+/// </summary>
+public class Dismissal
+{
+    public int Id { get; set; }
+    public int TeacherId { get; set; }
+    public string Title { get; set; } = default!; // اسم المحاضرة/الحصة
+    public int UnitId { get; set; }
+    public int GroupId { get; set; }
+    public DateTime Date { get; set; } = DateTime.UtcNow;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 public enum QuestionType
 {
     MCQ,

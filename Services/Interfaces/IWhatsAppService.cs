@@ -15,6 +15,13 @@ public record StudentWelcomeWhatsAppNotification(
     string Password
 );
 
+public record DismissalWhatsAppNotification(
+    string TeacherName,
+    string LessonTitle,
+    string GroupName,
+    DateTime DismissalLocalTime
+);
+
 public interface IWhatsAppService
 {
     /// <summary>
@@ -33,4 +40,12 @@ public interface IWhatsAppService
     /// even if this message doesn't go out.
     /// </summary>
     Task<bool> SendWelcomeMessageAsync(string studentPhoneNumber, StudentWelcomeWhatsAppNotification data);
+
+    /// <summary>
+    /// Sends the "lesson finished / dismissal" broadcast to one parent's
+    /// WhatsApp number. Same never-throw contract as the others: recording a
+    /// Dismissal must always succeed even if a given message doesn't go out.
+    /// The caller loops this over every parent phone number in the group.
+    /// </summary>
+    Task<bool> SendDismissalNotificationAsync(string parentPhoneNumber, DismissalWhatsAppNotification data);
 }

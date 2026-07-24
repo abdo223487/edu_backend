@@ -57,6 +57,23 @@ public class GreenApiWhatsAppService : IWhatsAppService
         return await SendTextAsync(studentPhoneNumber, BuildWelcomeMessageText(data), "welcome");
     }
 
+    public async Task<bool> SendDismissalNotificationAsync(string parentPhoneNumber, DismissalWhatsAppNotification data)
+    {
+        if (!_options.Enabled)
+        {
+            _logger.LogInformation("WhatsApp notifications disabled (GreenApi:Enabled=false); skipping.");
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(parentPhoneNumber))
+        {
+            _logger.LogWarning("Skipping WhatsApp dismissal notification: no parent phone number.");
+            return false;
+        }
+
+        return await SendTextAsync(parentPhoneNumber, BuildDismissalMessageText(data), "dismissal");
+    }
+
     private async Task<bool> SendTextAsync(string phoneNumber, string messageText, string kind)
     {
         if (string.IsNullOrWhiteSpace(_options.IdInstance) || string.IsNullOrWhiteSpace(_options.ApiTokenInstance))
@@ -118,6 +135,17 @@ public class GreenApiWhatsAppService : IWhatsAppService
             $"اليوزر: /{data.UserName}/\n" +
             $"الباسورد: /{data.Password}/\n\n" +
             $"مع العلم إن ده هيبقى اكونتك لجميع المدرسين، وتقدر تبدل بينهم من خلال الابليكيشن.";
+    }
+
+    private static string BuildDismissalMessageText(DismissalWhatsAppNotification data)
+    {
+        return
+            $"السلام عليكم ورحمة الله وبركاته،\n" +
+            $"نحيط سيادتكم علمًا بانتهاء حصة الاستاذ / {data.TeacherName}،\n" +
+            $"والتي كانت بعنوان/ {data.LessonTitle}\n" +
+            $"لطلاب مجموعة/ {data.GroupName}\n" +
+            $"وذلك يوم/ {data.DismissalLocalTime:dd/MM/yyyy}\n" +
+            $"الساعة/ {data.DismissalLocalTime:HH:mm}";
     }
 
     /// <summary>

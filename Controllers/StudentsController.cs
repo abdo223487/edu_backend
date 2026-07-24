@@ -1833,6 +1833,20 @@ public class StudentsController : ControllerBase
         return Ok(results);
     }
 
+    // GET Students/assignment-results/online  (student, own online-assignment history)
+    [HttpGet("assignment-results/online")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> GetOnlineAssignmentResults()
+    {
+        var studentId = User.GetUserId();
+        var results = await _db.AssignmentSubmissions.AsNoTracking()
+            .Where(r => r.StudentId == studentId)
+            .Select(r => new { id = r.Id, assignmentId = r.AssignmentId, mark = r.Score, totalMarks = r.TotalMarks, date = r.SubmittedAt })
+            .ToListAsync();
+
+        return Ok(results);
+    }
+
     private static string GenerateTempPassword() => Guid.NewGuid().ToString("N")[..8];
 
     // FEATURE: fires the "here's your AcademIQ account" WhatsApp message to

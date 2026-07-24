@@ -60,4 +60,24 @@ public class WhatsAppOptions
     ///    ده هيبقى اكونتك لأي مدرس، وهتقدر تبدل بين المدرسين من خلال الأبليكيشن."
     /// </summary>
     public string WelcomeTemplateName { get; set; } = "student_welcome";
+
+    /// <summary>
+    /// Third approved template — sent to EVERY parent of EVERY student in a
+    /// Group when the teacher marks a lesson as finished ("الانصراف"). 5
+    /// named body variables:
+    ///   {{teacher_name}}
+    ///   {{lesson_title}}
+    ///   {{group_name}}
+    ///   {{date}}              dd/MM/yyyy
+    ///   {{time}}              HH:mm
+    ///
+    /// Approved template body text (Arabic, category "Utility"):
+    ///   "السلام عليكم ورحمة الله وبركاته،
+    ///    نحيط سيادتكم علمًا بانتهاء حصة الاستاذ / {{teacher_name}}،
+    ///    والتي كانت بعنوان/ {{lesson_title}}
+    ///    لطلاب مجموعة/ {{group_name}}
+    ///    وذلك يوم/ {{date}}
+    ///    الساعة/ {{time}}"
+    /// </summary>
+    public string DismissalTemplateName { get; set; } = "dismissal_notification";
 }
