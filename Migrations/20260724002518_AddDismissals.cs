@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -12,18 +12,6 @@ namespace EduApi.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropForeignKey(
-                name: "FK_BankQuestions_Lessons_LessonId",
-                table: "BankQuestions");
-
-            migrationBuilder.DropForeignKey(
-                name: "FK_BankQuestions_Units_UnitId",
-                table: "BankQuestions");
-
-            migrationBuilder.DropIndex(
-                name: "IX_OnlineLessons_TeacherId",
-                table: "OnlineLessons");
-
             migrationBuilder.CreateTable(
                 name: "Dismissals",
                 columns: table => new
@@ -41,56 +29,13 @@ namespace EduApi.Migrations
                 {
                     table.PrimaryKey("PK_Dismissals", x => x.Id);
                 });
-
-            migrationBuilder.AddForeignKey(
-                name: "FK_BankQuestions_Lessons_LessonId",
-                table: "BankQuestions",
-                column: "LessonId",
-                principalTable: "Lessons",
-                principalColumn: "Id");
-
-            migrationBuilder.AddForeignKey(
-                name: "FK_BankQuestions_Units_UnitId",
-                table: "BankQuestions",
-                column: "UnitId",
-                principalTable: "Units",
-                principalColumn: "Id");
         }
 
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
-            migrationBuilder.DropForeignKey(
-                name: "FK_BankQuestions_Lessons_LessonId",
-                table: "BankQuestions");
-
-            migrationBuilder.DropForeignKey(
-                name: "FK_BankQuestions_Units_UnitId",
-                table: "BankQuestions");
-
             migrationBuilder.DropTable(
                 name: "Dismissals");
-
-            migrationBuilder.CreateIndex(
-                name: "IX_OnlineLessons_TeacherId",
-                table: "OnlineLessons",
-                column: "TeacherId");
-
-            migrationBuilder.AddForeignKey(
-                name: "FK_BankQuestions_Lessons_LessonId",
-                table: "BankQuestions",
-                column: "LessonId",
-                principalTable: "Lessons",
-                principalColumn: "Id",
-                onDelete: ReferentialAction.Cascade);
-
-            migrationBuilder.AddForeignKey(
-                name: "FK_BankQuestions_Units_UnitId",
-                table: "BankQuestions",
-                column: "UnitId",
-                principalTable: "Units",
-                principalColumn: "Id",
-                onDelete: ReferentialAction.Cascade);
         }
     }
 }
