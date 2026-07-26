@@ -120,13 +120,34 @@ public class AuthController : ControllerBase
         return Unauthorized(new { message = "Invalid username or password." });
     }
 
+    // How long a just-rotated-out refresh token is still accepted as a replay
+    // of the SAME refresh call (returns the same new pair instead of erroring).
+    // See PreviousRefreshToken doc comment on Teacher/Student for why this exists.
+    private static readonly TimeSpan RefreshGraceWindow = TimeSpan.FromSeconds(20);
+
     // POST api/Auth/refresh
     [HttpPost("refresh")]
     public async Task<IActionResult> Refresh([FromBody] RefreshRequest request)
     {
-        var teacher = await _db.Teachers.FirstOrDefaultAsync(t => t.RefreshToken == request.RefreshToken);
+        var teacher = await _db.Teachers.FirstOrDefaultAsync(t =>
+            t.RefreshToken == request.RefreshToken ||
+            (t.PreviousRefreshToken == request.RefreshToken && t.PreviousRefreshTokenGraceExpiry > DateTime.UtcNow));
         if (teacher != null)
         {
+            // Replay of a token we already rotated out within the grace window:
+            // just hand back the pair that's currently live, don't rotate again.
+            if (teacher.RefreshToken != request.RefreshToken)
+            {
+                var roleClaimsReplay = teacher.Role == Roles.AssistantAdmin
+                    ? new[] { Roles.AssistantAdmin, Roles.Teacher }
+                    : new[] { teacher.Role };
+                int? tenantIdReplay = teacher.Role == Roles.SuperAdmin
+                    ? null
+                    : teacher.TenantOwnerId ?? teacher.Id;
+                var accessReplay = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roleClaimsReplay, tenantId: tenantIdReplay);
+                return Ok(new AuthResponse(accessReplay, teacher.RefreshToken!));
+            }
+
             if (teacher.RefreshTokenExpiry < DateTime.UtcNow)
                 return Unauthorized(new { message = "Refresh token expired." });
 
@@ -141,6 +162,8 @@ public class AuthController : ControllerBase
 
             var access = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roles, tenantId: tenantId);
             var newRefresh = _tokens.CreateRefreshToken();
+            teacher.PreviousRefreshToken = teacher.RefreshToken;
+            teacher.PreviousRefreshTokenGraceExpiry = DateTime.UtcNow.Add(RefreshGraceWindow);
             teacher.RefreshToken = newRefresh;
             teacher.RefreshTokenExpiry = DateTime.UtcNow.AddDays(double.Parse(_config["Jwt:RefreshTokenDays"] ?? "30"));
             await _db.SaveChangesAsync();
@@ -150,9 +173,30 @@ public class AuthController : ControllerBase
         // IgnoreQueryFilters(): refresh happens with an expired/near-expired access
         // token, and we can't rely on the (possibly stale) X-TenantId header alone
         // to find the student — look them up by refresh token directly.
-        var student = await _db.Students.IgnoreQueryFilters().FirstOrDefaultAsync(s => s.RefreshToken == request.RefreshToken);
+        var student = await _db.Students.IgnoreQueryFilters().FirstOrDefaultAsync(s =>
+            s.RefreshToken == request.RefreshToken ||
+            (s.PreviousRefreshToken == request.RefreshToken && s.PreviousRefreshTokenGraceExpiry > DateTime.UtcNow));
         if (student != null)
         {
+            // Same replay short-circuit as teacher above.
+            if (student.RefreshToken != request.RefreshToken)
+            {
+                var unitIdsReplay = await _db.StudentUnitSubscriptions.IgnoreQueryFilters()
+                    .Where(s => s.StudentId == student.Id)
+                    .Select(s => s.UnitId)
+                    .ToListAsync();
+                var groupMembershipsReplay = await GetGroupMembershipsAsync(student.Id);
+                var accessReplay = _tokens.CreateAccessToken(
+                    student.Id.ToString(),
+                    student.UserName ?? student.PhoneNumber,
+                    new[] { Roles.Student },
+                    student.GroupId,
+                    student.SchoolYear,
+                    unitIds: unitIdsReplay,
+                    groupMemberships: groupMembershipsReplay);
+                return Ok(new AuthResponse(accessReplay, student.RefreshToken!));
+            }
+
             if (student.RefreshTokenExpiry < DateTime.UtcNow)
                 return Unauthorized(new { message = "Refresh token expired." });
 
@@ -175,6 +219,8 @@ public class AuthController : ControllerBase
                 unitIds: unitIds,
                 groupMemberships: groupMemberships);
             var newRefresh = _tokens.CreateRefreshToken();
+            student.PreviousRefreshToken = student.RefreshToken;
+            student.PreviousRefreshTokenGraceExpiry = DateTime.UtcNow.Add(RefreshGraceWindow);
             student.RefreshToken = newRefresh;
             student.RefreshTokenExpiry = DateTime.UtcNow.AddDays(double.Parse(_config["Jwt:RefreshTokenDays"] ?? "30"));
             await _db.SaveChangesAsync();

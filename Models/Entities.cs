@@ -45,6 +45,22 @@ public class Teacher
     public DateTime? RefreshTokenExpiry { get; set; }
 
     /// <summary>
+    /// GRACE-PERIOD FIX: refresh tokens rotate on every use (the old value is
+    /// replaced by a new one in RefreshToken above). Flutter can fire more than
+    /// one authenticated request in parallel (e.g. a dashboard loading several
+    /// endpoints via Future.wait); if the access token has just expired, ALL of
+    /// them 401 at nearly the same instant and can each trigger a refresh call
+    /// with the SAME (still valid at the time) refresh token. Without a grace
+    /// window, the first call rotates the token and every other concurrent call
+    /// gets "Invalid refresh token" even though it used a refresh token that was
+    /// genuinely valid a moment earlier. We keep the previous token/expiry pair
+    /// around for a short window so a same-token replay within that window
+    /// returns the SAME newly-issued pair instead of failing.
+    /// </summary>
+    public string? PreviousRefreshToken { get; set; }
+    public DateTime? PreviousRefreshTokenGraceExpiry { get; set; }
+
+    /// <summary>
     /// TENANT LAYER: the "owning" tenant this account acts on behalf of.
     /// - null  => this account IS a tenant root (a real Teacher who owns their own data).
     /// - set   => this account is staff (Assistant / AssistantAdmin) working *for* another
@@ -122,6 +138,10 @@ public class Student
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public string? RefreshToken { get; set; }
     public DateTime? RefreshTokenExpiry { get; set; }
+
+    /// <summary>See Teacher.PreviousRefreshToken for why this exists.</summary>
+    public string? PreviousRefreshToken { get; set; }
+    public DateTime? PreviousRefreshTokenGraceExpiry { get; set; }
 
     public ICollection<StudentUnitSubscription> UnitSubscriptions { get; set; } = new List<StudentUnitSubscription>();
     public ICollection<StateHistoryEntry> StateHistory { get; set; } = new List<StateHistoryEntry>();
