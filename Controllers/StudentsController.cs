@@ -1333,9 +1333,21 @@ public class StudentsController : ControllerBase
                 .Select(g => (int?)g.Id)
                 .FirstOrDefaultAsync();
 
+        // Attendance can be recorded for a lecture the student was never
+        // added to a Group for (autoSubscribe grants a Unit subscription,
+        // not a Group membership -- and Record() doesn't check Group at
+        // all). So the lecture list here must also include anything
+        // reachable via the student's Unit subscriptions, or an already-
+        // recorded Attendance row would silently never show up.
+        var subscribedUnitIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+            .Where(su => su.StudentId == sid.Value)
+            .Select(su => su.UnitId)
+            .ToListAsync();
+
         var lecturesQuery = _db.Lectures.AsNoTracking()
-            .Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == tenantGroupId)
-                && l.AttendanceMethod == AttendanceMethod.Center);
+            .Where(l => l.AttendanceMethod == AttendanceMethod.Center &&
+                (_db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == tenantGroupId)
+                 || (l.UnitId != null && subscribedUnitIds.Contains(l.UnitId.Value))));
         if (unitId.HasValue) lecturesQuery = lecturesQuery.Where(l => l.UnitId == unitId.Value);
 
         var lectures = await lecturesQuery.OrderBy(l => l.CreatedAt).ToListAsync();
