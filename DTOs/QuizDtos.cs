@@ -16,7 +16,13 @@ public record QuizDetailForTeacher(int Id, string Title, int UnitId, int Duratio
 public record SubmitAnswerDto(int QuestionId, string Answer);
 public record GradeQuizRequest(int QuizId, List<SubmitAnswerDto> Answers);
 
-public record GradeQuizResult(int Mark, int QuizTotalMarks);
+// BUGFIX: field was previously named "QuizTotalMarks" (serialized as
+// "quizTotalMarks"), but every other grading response in this API
+// (e.g. SubmitAssignmentResult) uses "totalMarks", and that's what the
+// client's exam-result screen reads. Because "totalMarks" was missing from
+// the JSON, the client couldn't find the total and the score never showed
+// up to the student after submitting the exam. Renamed to match.
+public record GradeQuizResult(int Mark, int TotalMarks);
 
 // POST Quizzes/change-answer-mark
 // body: { "quizResultId"/"studentId"+"quizId", "questionId", "newMark" } (inferred shape)

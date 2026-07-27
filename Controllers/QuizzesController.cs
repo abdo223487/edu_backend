@@ -107,10 +107,12 @@ public class QuizzesController : ControllerBase
         var groupNamesById = await _db.Groups.AsNoTracking().Where(g => allGroupIds.Contains(g.Id))
             .ToDictionaryAsync(g => g.Id, g => g.Name);
 
-        var takenQuizIds = studentId.HasValue
-            ? (await _db.QuizResults.AsNoTracking().Where(r => r.StudentId == studentId.Value && quizIds.Contains(r.QuizId))
-                .Select(r => r.QuizId).ToListAsync()).ToHashSet()
-            : new HashSet<int>();
+        var studentResultsById = studentId.HasValue
+            ? await _db.QuizResults.AsNoTracking()
+                .Where(r => r.StudentId == studentId.Value && quizIds.Contains(r.QuizId))
+                .ToDictionaryAsync(r => r.QuizId, r => (Score: r.Score, TotalMarks: r.TotalMarks))
+            : new Dictionary<int, (int Score, int TotalMarks)>();
+        var takenQuizIds = studentResultsById.Keys.ToHashSet();
 
         var nowUtc = DateTime.UtcNow;
 
@@ -121,6 +123,8 @@ public class QuizzesController : ControllerBase
             var effectiveDuration = studentId.HasValue
                 ? EffectiveRemaining(q, nowUtc)
                 : TimeSpan.FromMinutes(q.DurationInMinutes);
+
+            var result = studentResultsById.TryGetValue(q.Id, out var r) ? r : ((int Score, int TotalMarks)?)null;
 
             return new
             {
@@ -137,7 +141,12 @@ public class QuizzesController : ControllerBase
                 groups = q.GroupIds.Select(gid => groupNamesById.TryGetValue(gid, out var n) ? n : gid.ToString()).ToList(),
                 unit = new { month = unitsById.TryGetValue(q.UnitId, out var m) ? m : (int?)null },
                 grade = q.SchoolYear,
-                isTaken = studentId.HasValue && takenQuizIds.Contains(q.Id)
+                isTaken = studentId.HasValue && takenQuizIds.Contains(q.Id),
+                // BUGFIX: the list endpoint used to only say isTaken=true without
+                // the actual score, so the exam-list card had no way to show the
+                // student's grade after submitting. Now included when available.
+                score = result?.Score,
+                totalMarks = result?.TotalMarks
             };
         });
 
