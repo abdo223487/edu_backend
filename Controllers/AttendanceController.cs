@@ -223,9 +223,19 @@ public class AttendanceController : ControllerBase
         }
     }
 
+    // NOTE: Students carry a tenant-scoped global query filter (visible only
+    // if already linked to this teacher via Group/Unit/Lecture/OnlineLesson).
+    // That filter must be bypassed here with IgnoreQueryFilters(), otherwise
+    // a student who ISN'T subscribed yet can never be resolved -- which
+    // breaks autoSubscribe entirely (its whole purpose is to subscribe
+    // students who aren't subscribed yet). We only use this to confirm the
+    // id is a real student; every downstream write (attendance row, the
+    // auto-subscribe insert) is still scoped correctly to this teacher's
+    // tenant.
     private async Task<int?> ResolveStudentIdAsync(string encodedStudentId)
     {
-        if (int.TryParse(encodedStudentId, out var id) && await _db.Students.AnyAsync(s => s.Id == id))
+        if (int.TryParse(encodedStudentId, out var id) &&
+            await _db.Students.IgnoreQueryFilters().AnyAsync(s => s.Id == id))
             return id;
         return null;
     }
