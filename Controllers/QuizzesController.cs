@@ -107,9 +107,13 @@ public class QuizzesController : ControllerBase
         var groupNamesById = await _db.Groups.AsNoTracking().Where(g => allGroupIds.Contains(g.Id))
             .ToDictionaryAsync(g => g.Id, g => g.Name);
 
+        // Only rows the student actually submitted count as "taken" here — the
+        // auto-zero row GetAsStudent creates for a missed exam (IsAutoSubmitted
+        // = true) must NOT flip isTaken to true just because the student opened
+        // the exam page after the Deadline without ever answering anything.
         var studentResultsById = studentId.HasValue
             ? await _db.QuizResults.AsNoTracking()
-                .Where(r => r.StudentId == studentId.Value && quizIds.Contains(r.QuizId))
+                .Where(r => r.StudentId == studentId.Value && quizIds.Contains(r.QuizId) && !r.IsAutoSubmitted)
                 .ToDictionaryAsync(r => r.QuizId, r => (Score: r.Score, TotalMarks: r.TotalMarks))
             : new Dictionary<int, (int Score, int TotalMarks)>();
         var takenQuizIds = studentResultsById.Keys.ToHashSet();
@@ -283,7 +287,8 @@ public class QuizzesController : ControllerBase
                 StudentId = studentId,
                 TotalMarks = totalMarks,
                 Score = 0,
-                TeacherId = quiz.TeacherId
+                TeacherId = quiz.TeacherId,
+                IsAutoSubmitted = true
             };
             foreach (var q in quiz.Questions)
                 autoZero.Answers.Add(new QuizAnswer { QuestionId = q.Id, Answer = "", MarkAwarded = 0 });

@@ -660,6 +660,16 @@ public class QuizResult
     /// mixed together, since this table was only ever filtered by StudentId.
     /// </summary>
     public int TeacherId { get; set; }
+
+    /// <summary>
+    /// True when this row was created automatically because the student never
+    /// opened/submitted the quiz before the Deadline (see
+    /// QuizzesController.GetAsStudent's "missed" auto-zero). This lets the
+    /// teacher-facing "takers" list keep showing missed students exactly like
+    /// real (zero-scoring) takers, while the student-facing quiz list can tell
+    /// the two apart and only report `isTaken = true` for a genuine submission.
+    /// </summary>
+    public bool IsAutoSubmitted { get; set; } = false;
 }
 
 public class QuizAnswer
