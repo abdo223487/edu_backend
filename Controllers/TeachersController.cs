@@ -527,6 +527,15 @@ public class TeachersController : ControllerBase
             await _db.StudentLectureUnlocks.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
             await _db.StudentUnitSubscriptions.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
 
+            // BUGFIX: the Billing feature (Billings/BillingPayments) was added
+            // after this cascade was written, and BillingPayments.LectureId has
+            // a FK to Lectures with no onDelete action configured (defaults to
+            // NO ACTION/Restrict at the DB level). Without deleting these first,
+            // "DELETE FROM Lectures" below fails with a foreign key violation
+            // whenever the teacher has any billing payment tied to a lecture.
+            await _db.BillingPayments.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.Billings.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+
             // 6) BankAttempts before BankQuestions: BankAttemptQuestion has a
             //    Restrict FK to BankQuestion, but a Cascade FK to BankAttempt --
             //    deleting the attempts first clears those rows automatically.
