@@ -13,6 +13,7 @@ namespace EduApi.Migrations
     /// needed.
     /// </remarks>
     /// 
+    [DbContext(typeof(AppDbContext))]
     [Migration("20260709000000_AddStudentGroupMemberships")]
     public partial class AddStudentGroupMemberships : Migration
     {
