@@ -1,3 +1,6 @@
+using EduApi.Data;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -12,7 +15,6 @@ namespace EduApi.Migrations
     /// automatically via Database.Migrate() at startup -- no manual SQL step
     /// needed.
     /// </remarks>
-    /// 
     [DbContext(typeof(AppDbContext))]
     [Migration("20260709000000_AddStudentGroupMemberships")]
     public partial class AddStudentGroupMemberships : Migration
