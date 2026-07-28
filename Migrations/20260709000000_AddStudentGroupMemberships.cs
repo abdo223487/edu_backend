@@ -12,6 +12,8 @@ namespace EduApi.Migrations
     /// automatically via Database.Migrate() at startup -- no manual SQL step
     /// needed.
     /// </remarks>
+    /// 
+    [Migration("20260709000000_AddStudentGroupMemberships")]
     public partial class AddStudentGroupMemberships : Migration
     {
         /// <inheritdoc />
