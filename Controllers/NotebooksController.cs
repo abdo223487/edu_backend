@@ -23,7 +23,7 @@ public record RenameNotebookRequest(string Name);
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
-[Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+[Authorize] // any authenticated user; each action below narrows further.
 public class NotebooksController : ControllerBase
 {
     private readonly AppDbContext _db;
@@ -35,6 +35,7 @@ public class NotebooksController : ControllerBase
     }
 
     [HttpGet]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetAll([FromQuery] int? schoolYear)
     {
         var query = _db.Notebooks.AsNoTracking().AsQueryable();
@@ -73,6 +74,7 @@ public class NotebooksController : ControllerBase
     }
 
     [HttpPost]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> Create([FromBody] CreateNotebookRequest request)
     {
         var notebook = new Notebook
@@ -102,6 +104,7 @@ public class NotebooksController : ControllerBase
 
     // PATCH Notebooks/{id}  body: { name }
     [HttpPatch("{id:int}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> Rename(int id, [FromBody] RenameNotebookRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
@@ -117,6 +120,7 @@ public class NotebooksController : ControllerBase
     }
 
     [HttpGet("{id:int}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetById(int id)
     {
         var notebook = await _db.Notebooks.AsNoTracking().FirstOrDefaultAsync(e => e.Id == id);
@@ -148,6 +152,7 @@ public class NotebooksController : ControllerBase
     }
 
     [HttpGet("{id:int}/payments")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetPayments(int id)
     {
         var payments = await _db.NotebookPayments.AsNoTracking()
@@ -232,6 +237,7 @@ public class NotebooksController : ControllerBase
     // teacher toggled "إرفاق ملف PDF / صور" while adding the notebook.
     [HttpPost("{id:int}/materials/file")]
     [Consumes("multipart/form-data")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> UploadMaterials(int id, [FromForm(Name = "Files")] List<IFormFile> files)
     {
         var notebook = await _db.Notebooks.FirstOrDefaultAsync(n => n.Id == id);
