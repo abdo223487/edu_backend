@@ -368,6 +368,15 @@ public class Material
     public int? Months { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+    /// <summary>
+    /// Set when this material is a notebook attachment (PDF/image uploaded
+    /// while creating a Notebook). Materials tied to a notebook are gated
+    /// behind full payment for that notebook (see
+    /// NotebooksController.GetMaterials), so they're deliberately excluded
+    /// from the generic MaterialController list/detail endpoints.
+    /// </summary>
+    public int? NotebookId { get; set; }
+
     /// <summary>TENANT LAYER: which teacher (tenant) this material belongs to.</summary>
     public int TeacherId { get; set; }
 }

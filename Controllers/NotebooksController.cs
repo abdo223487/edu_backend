@@ -1,6 +1,7 @@
 using EduApi.Common;
 using EduApi.Data;
 using EduApi.Models;
+using EduApi.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -17,6 +18,8 @@ public record RenameNotebookRequest(string Name);
 ///  PATCH Notebooks/{id}                     -> rename
 ///  GET   Notebooks/{id}                     -> details, "groups"/"units" hydrated with names
 ///  GET   Notebooks/{id}/payments            -> each payment includes "student" + "totalPaid"
+///  GET   Notebooks/{id}/materials           (teacher/admin: all; student: only if fully paid)
+///  POST  Notebooks/{id}/materials/file      (teacher/admin, multipart, field "Files", optional/multiple)
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -24,7 +27,12 @@ public record RenameNotebookRequest(string Name);
 public class NotebooksController : ControllerBase
 {
     private readonly AppDbContext _db;
-    public NotebooksController(AppDbContext db) => _db = db;
+    private readonly IFileStorageService _files;
+    public NotebooksController(AppDbContext db, IFileStorageService files)
+    {
+        _db = db;
+        _files = files;
+    }
 
     [HttpGet]
     public async Task<IActionResult> GetAll([FromQuery] int? schoolYear)
@@ -186,5 +194,77 @@ public class NotebooksController : ControllerBase
         });
 
         return Ok(result);
+    }
+
+    // GET Notebooks/{id}/materials
+    // Teacher/AssistantAdmin: always see every attachment (used by the "add
+    // notebook" screen to review what's uploaded).
+    // Student: only unlocked once they've fully paid for this notebook —
+    // matches the same "paid" rule used in GetAll (a real NotebookPayment
+    // row with no DiscountedPrice). Attaching a PDF is optional, so an
+    // unpaid/no-attachment notebook simply returns an empty list.
+    [HttpGet("{id:int}/materials")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Student}")]
+    public async Task<IActionResult> GetMaterials(int id)
+    {
+        var notebook = await _db.Notebooks.AsNoTracking().FirstOrDefaultAsync(n => n.Id == id);
+        if (notebook == null) return NotFound(new { message = "Notebook not found." });
+
+        if (User.IsInRole(Roles.Student))
+        {
+            var studentId = User.GetUserId();
+            var hasPaid = await _db.NotebookPayments.AsNoTracking()
+                .AnyAsync(p => p.NotebookId == id && p.StudentId == studentId && !p.DiscountedPrice.HasValue);
+            if (!hasPaid)
+                return StatusCode(403, new { message = "لازم تدفع تمن النوتبوك كامل الأول عشان تشوف المذكرات." });
+        }
+
+        var materials = await _db.Materials.AsNoTracking().Where(m => m.NotebookId == id)
+            .Select(m => new { id = m.Id, name = m.Name, type = m.Type, link = m.Link })
+            .ToListAsync();
+
+        return Ok(materials);
+    }
+
+    // POST Notebooks/{id}/materials/file  (multipart, field "Files", supports multiple)
+    // Attaching notebook PDFs/images is entirely optional — same UX as
+    // Lectures/{id}/materials/file — called right after Create() when the
+    // teacher toggled "إرفاق ملف PDF / صور" while adding the notebook.
+    [HttpPost("{id:int}/materials/file")]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> UploadMaterials(int id, [FromForm(Name = "Files")] List<IFormFile> files)
+    {
+        var notebook = await _db.Notebooks.FirstOrDefaultAsync(n => n.Id == id);
+        if (notebook == null) return NotFound(new { message = "Notebook not found." });
+
+        if (files == null || files.Count == 0)
+            return BadRequest(new { message = "At least one file is required." });
+
+        var created = new List<object>();
+        foreach (var file in files)
+        {
+            if (file.Length == 0) continue;
+
+            var url = await _files.SaveAsync(file, "materials");
+            var material = new Material
+            {
+                Name = file.FileName,
+                Type = "File",
+                Link = url,
+                NotebookId = id,
+                SchoolYear = notebook.SchoolYear,
+                TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+            };
+            _db.Materials.Add(material);
+            created.Add(material);
+        }
+
+        await _db.SaveChangesAsync();
+
+        var result = created.Cast<Material>()
+            .Select(m => new { id = m.Id, name = m.Name, type = m.Type, link = m.Link })
+            .ToList();
+
+        return StatusCode(201, result);
     }
 }

@@ -49,7 +49,11 @@ public class MaterialController : ControllerBase
         // already used in UnitsController.
         var year = schoolYear ?? (User.IsInRole(Roles.Student) ? User.GetSchoolYear() : null);
 
-        var query = _db.Materials.AsNoTracking().AsQueryable();
+        // Notebook attachments live in this same table but are payment-gated
+        // (a student must have fully paid for the notebook to see them) via
+        // Notebooks/{id}/materials — they must never leak into this
+        // unrestricted list/detail endpoint.
+        var query = _db.Materials.AsNoTracking().Where(m => m.NotebookId == null).AsQueryable();
         if (year.HasValue) query = query.Where(m => m.SchoolYear == year.Value);
         if (unitId.HasValue) query = query.Where(m => m.UnitId == unitId.Value);
 
@@ -87,7 +91,7 @@ public class MaterialController : ControllerBase
     [HttpGet("{id:int}")]
     public async Task<IActionResult> GetById(int id)
     {
-        var material = await _db.Materials.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (id));
+        var material = await _db.Materials.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (id) && e.NotebookId == null);
         if (material == null) return NotFound(new { message = "Material not found." });
 
         if (User.IsInRole(Roles.Student) && material.UnitId.HasValue &&
