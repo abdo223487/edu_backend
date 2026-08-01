@@ -10,6 +10,7 @@ namespace EduApi.Controllers;
 
 public record CreateNotebookRequest(string Name, int SchoolYear, List<int> GroupIds, int Price, List<int>? UnitIds);
 public record RenameNotebookRequest(string Name);
+public record AddNotebookMaterialLinkRequest(string? Name, string Link);
 
 /// <summary>
 /// Route: api/Notebooks
@@ -20,6 +21,7 @@ public record RenameNotebookRequest(string Name);
 ///  GET   Notebooks/{id}/payments            -> each payment includes "student" + "totalPaid"
 ///  GET   Notebooks/{id}/materials           (teacher/admin: all; student: only if fully paid)
 ///  POST  Notebooks/{id}/materials/file      (teacher/admin, multipart, field "Files", optional/multiple)
+///  POST  Notebooks/{id}/materials/link      (teacher/admin, JSON {name, link} — e.g. a ready Cloudflare R2 URL)
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -272,5 +274,36 @@ public class NotebooksController : ControllerBase
             .ToList();
 
         return StatusCode(201, result);
+    }
+
+    // POST Notebooks/{id}/materials/link  body: { name, link }
+    // For a file already hosted somewhere (e.g. a Cloudflare R2 object the
+    // teacher uploaded outside the app) — no upload needed, we just store
+    // the ready URL. Same "File" type as an uploaded PDF/image (a student
+    // that has paid opens it the exact same way, straight off the link) so
+    // the client doesn't need to special-case it.
+    [HttpPost("{id:int}/materials/link")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> AddMaterialLink(int id, [FromBody] AddNotebookMaterialLinkRequest request)
+    {
+        var notebook = await _db.Notebooks.FirstOrDefaultAsync(n => n.Id == id);
+        if (notebook == null) return NotFound(new { message = "Notebook not found." });
+
+        if (string.IsNullOrWhiteSpace(request.Link))
+            return BadRequest(new { message = "Link is required." });
+
+        var material = new Material
+        {
+            Name = string.IsNullOrWhiteSpace(request.Name) ? "مذكرة" : request.Name,
+            Type = "File",
+            Link = request.Link,
+            NotebookId = id,
+            SchoolYear = notebook.SchoolYear,
+            TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+        };
+        _db.Materials.Add(material);
+        await _db.SaveChangesAsync();
+
+        return StatusCode(201, new { id = material.Id, name = material.Name, type = material.Type, link = material.Link });
     }
 }
