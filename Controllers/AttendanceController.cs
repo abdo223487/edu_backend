@@ -17,9 +17,11 @@ namespace EduApi.Controllers;
 public record RecordAttendanceRequest(string? EncodedStudentId, int? StudentId, DateTime? Date, bool AutoSubscribe = false);
 
 // POST Attendance/bulk?lectureId=..  body: [ { encodedStudentId, date, autoSubscribe }, ... ]
+// OR [ { studentId, date, autoSubscribe }, ... ] — same encodedStudentId/studentId
+// duality as the single Record endpoint, decided per item.
 // "autoSubscribe" is per-item, so a single bulk call can open the lecture's
 // Unit for some students and not others.
-public record BulkAttendanceItem(string EncodedStudentId, DateTime Date, bool AutoSubscribe = false);
+public record BulkAttendanceItem(string? EncodedStudentId, int? StudentId, DateTime Date, bool AutoSubscribe = false);
 
 /// <summary>
 /// Route: api/Attendance
@@ -111,7 +113,26 @@ public class AttendanceController : ControllerBase
         var notifyList = new List<(int StudentId, DateTime Date)>();
         foreach (var item in items)
         {
-            var studentId = await ResolveStudentIdAsync(item.EncodedStudentId);
+            if (string.IsNullOrWhiteSpace(item.EncodedStudentId) && item.StudentId == null) continue;
+
+            int? studentId;
+            string encodedStudentId;
+
+            if (!string.IsNullOrWhiteSpace(item.EncodedStudentId))
+            {
+                // QR-scan path: resolve + validate the encoded payload as before.
+                studentId = await ResolveStudentIdAsync(item.EncodedStudentId);
+                encodedStudentId = item.EncodedStudentId;
+            }
+            else
+            {
+                // Manual teacher-entry path: studentId is given directly, so just
+                // confirm it exists (same as the single Record endpoint).
+                var id = item.StudentId!.Value;
+                studentId = await _db.Students.IgnoreQueryFilters().AnyAsync(s => s.Id == id) ? id : null;
+                encodedStudentId = id.ToString();
+            }
+
             if (studentId == null) continue;
             if (await _db.Attendances.AnyAsync(a => a.LectureId == lectureId && a.StudentId == studentId.Value)) continue;
 
@@ -120,7 +141,7 @@ public class AttendanceController : ControllerBase
                 TeacherId = _tenant.CurrentTenantId.Value,
                 LectureId = lectureId,
                 StudentId = studentId.Value,
-                EncodedStudentId = item.EncodedStudentId,
+                EncodedStudentId = encodedStudentId,
                 Date = item.Date
             });
             if (item.AutoSubscribe)
