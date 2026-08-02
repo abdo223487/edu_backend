@@ -709,12 +709,15 @@ public class StudentsController : ControllerBase
                 }
 
                 var plainPassword = string.IsNullOrEmpty(password) ? GenerateTempPassword() : password;
+                var resolvedUserName = string.IsNullOrEmpty(userName)
+                    ? await GenerateUniqueUserNameAsync(phone)
+                    : userName;
                 var student = new Student
                 {
                     Name = name,
                     PhoneNumber = phone,
                     ParentPhoneNumber = string.IsNullOrEmpty(parentPhone) ? null : parentPhone,
-                    UserName = string.IsNullOrEmpty(userName) ? null : userName,
+                    UserName = resolvedUserName,
                     PasswordHash = BCrypt.Net.BCrypt.HashPassword(plainPassword),
                     GroupId = group.Id,
                     SchoolYear = group.SchoolYear
@@ -2146,6 +2149,31 @@ public class StudentsController : ControllerBase
     }
 
     private static string GenerateTempPassword() => Guid.NewGuid().ToString("N")[..8];
+
+    // FIX: sheet/Google-Sheet imports leave UserName as NULL whenever the
+    // sheet has no UserName column (it's optional). Login still works via
+    // the PhoneNumber fallback, but the student ends up with no explicit
+    // UserName on record and the welcome WhatsApp message shows their phone
+    // number instead of a "real" username, which reads as broken/incomplete.
+    // This auto-generates a short, unique UserName from the student's phone
+    // number so the column is never left empty after an import.
+    private async Task<string> GenerateUniqueUserNameAsync(string phoneNumber)
+    {
+        var digits = new string(phoneNumber.Where(char.IsDigit).ToArray());
+        var tail = digits.Length >= 6 ? digits[^6..] : digits;
+        var baseUserName = $"std{tail}";
+
+        var candidate = baseUserName;
+        var suffix = 0;
+        while (await _db.Students.IgnoreQueryFilters()
+                   .AnyAsync(s => s.UserName == candidate || s.PhoneNumber == candidate))
+        {
+            suffix++;
+            candidate = $"{baseUserName}{suffix}";
+        }
+
+        return candidate;
+    }
 
     // FEATURE: fires the "here's your AcademIQ account" WhatsApp message to
     // the student's own phone right after their Student row is created (via
