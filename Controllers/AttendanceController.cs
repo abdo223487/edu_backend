@@ -111,9 +111,27 @@ public class AttendanceController : ControllerBase
 
         var created = 0;
         var notifyList = new List<(int StudentId, DateTime Date)>();
+        // Per-item outcome so the caller (offline sync in the Flutter app)
+        // can tell exactly which students actually got saved and which
+        // didn't (and why) instead of only seeing an overall 200 OK — a
+        // missing/duplicate student id here used to be silently skipped
+        // and reported back to the teacher as "uploaded successfully".
+        var savedStudentIds = new List<int>();
+        var failed = new List<object>();
+
         foreach (var item in items)
         {
-            if (string.IsNullOrWhiteSpace(item.EncodedStudentId) && item.StudentId == null) continue;
+            // "requestedId" is whatever identifies this item to the caller
+            // (their own studentId if given, otherwise the raw encoded
+            // payload) so a failure can still be reported back even when we
+            // never manage to resolve it to a real student id.
+            object requestedId = item.StudentId.HasValue ? item.StudentId.Value : (item.EncodedStudentId ?? "");
+
+            if (string.IsNullOrWhiteSpace(item.EncodedStudentId) && item.StudentId == null)
+            {
+                failed.Add(new { studentId = requestedId, reason = "Missing encodedStudentId/studentId." });
+                continue;
+            }
 
             int? studentId;
             string encodedStudentId;
@@ -133,8 +151,16 @@ public class AttendanceController : ControllerBase
                 encodedStudentId = id.ToString();
             }
 
-            if (studentId == null) continue;
-            if (await _db.Attendances.AnyAsync(a => a.LectureId == lectureId && a.StudentId == studentId.Value)) continue;
+            if (studentId == null)
+            {
+                failed.Add(new { studentId = requestedId, reason = "Student not found." });
+                continue;
+            }
+            if (await _db.Attendances.AnyAsync(a => a.LectureId == lectureId && a.StudentId == studentId.Value))
+            {
+                failed.Add(new { studentId = requestedId, reason = "Attendance already recorded." });
+                continue;
+            }
 
             _db.Attendances.Add(new Attendance
             {
@@ -148,6 +174,7 @@ public class AttendanceController : ControllerBase
                 await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
             await IssueTriggeredCodesAsync(lectureId, studentId.Value);
             notifyList.Add((studentId.Value, item.Date));
+            savedStudentIds.Add(studentId.Value);
             created++;
         }
 
@@ -156,7 +183,14 @@ public class AttendanceController : ControllerBase
         foreach (var (studentId, date) in notifyList)
             await SendAttendanceWhatsAppAsync(studentId, date);
 
-        return Ok(new { message = $"{created} attendance record(s) saved.", saved = created, total = items.Count });
+        return Ok(new
+        {
+            message = $"{created} attendance record(s) saved.",
+            saved = created,
+            total = items.Count,
+            savedStudentIds,
+            failed
+        });
     }
 
     // FEATURE: "autoSubscribe" is now decided per attendance record (per

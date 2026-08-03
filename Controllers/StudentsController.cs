@@ -2017,6 +2017,14 @@ public class StudentsController : ControllerBase
     {
         if (_tenant.CurrentTenantId == null) return Forbid();
 
+        // SAFETY: CenterQuizResult.StudentId has no FK constraint, so without
+        // this check a mistyped/nonexistent studentId would still save fine
+        // (201) as an orphaned row nobody can ever see — the teacher would be
+        // told "saved" for a mark that isn't attached to any real student.
+        // The Students query filter already scopes this to the current tenant.
+        if (!await _db.Students.AnyAsync(s => s.Id == request.StudentId))
+            return NotFound(new { message = "Student not found." });
+
         var result = new CenterQuizResult
         {
             StudentId = request.StudentId,
@@ -2076,6 +2084,13 @@ public class StudentsController : ControllerBase
     public async Task<IActionResult> AddHomeworkResult([FromBody] AddHomeworkResultRequest request)
     {
         if (_tenant.CurrentTenantId == null) return Forbid();
+
+        // SAFETY: same gap as AddCenterQuizResult — HomeworkResult.StudentId
+        // has no FK constraint, so a bad studentId would otherwise save
+        // silently as an orphaned row and still be reported to the teacher
+        // as a successful save.
+        if (!await _db.Students.AnyAsync(s => s.Id == request.StudentId))
+            return NotFound(new { message = "Student not found." });
 
         var result = new HomeworkResult
         {
