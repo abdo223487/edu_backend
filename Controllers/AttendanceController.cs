@@ -77,6 +77,17 @@ public class AttendanceController : ControllerBase
 
         if (studentId == null) return NotFound(new { message = "Student not found for this code." });
 
+        // VALIDATION: student's school year must match the lecture's school
+        // year. If the lecture has no SchoolYear set, it's not year-specific
+        // so no check is applied.
+        var lectureSchoolYear = await _db.Lectures.Where(l => l.Id == lectureId).Select(l => l.SchoolYear).FirstOrDefaultAsync();
+        if (lectureSchoolYear.HasValue)
+        {
+            var studentSchoolYear = await _db.Students.Where(s => s.Id == studentId.Value).Select(s => (int?)s.SchoolYear).FirstOrDefaultAsync();
+            if (studentSchoolYear.HasValue && studentSchoolYear.Value != lectureSchoolYear.Value)
+                return BadRequest(new { message = "Student's school year does not match the lecture's school year." });
+        }
+
         // NOTE: the Flutter client (onlineScan.dart) checks `statusCode == 400`
         // specifically to show "الطالب مسجل مسبقًا" — it does NOT treat 409 as
         // that case. Must return 400 here, not Conflict(409), or the client
@@ -119,6 +130,10 @@ public class AttendanceController : ControllerBase
         var savedStudentIds = new List<int>();
         var failed = new List<object>();
 
+        // VALIDATION: same school-year check as the single Record endpoint,
+        // fetched once here since lectureId is the same for the whole batch.
+        var lectureSchoolYear = await _db.Lectures.Where(l => l.Id == lectureId).Select(l => l.SchoolYear).FirstOrDefaultAsync();
+
         foreach (var item in items)
         {
             // "requestedId" is whatever identifies this item to the caller
@@ -156,6 +171,17 @@ public class AttendanceController : ControllerBase
                 failed.Add(new { studentId = requestedId, reason = "Student not found." });
                 continue;
             }
+
+            if (lectureSchoolYear.HasValue)
+            {
+                var studentSchoolYear = await _db.Students.Where(s => s.Id == studentId.Value).Select(s => (int?)s.SchoolYear).FirstOrDefaultAsync();
+                if (studentSchoolYear.HasValue && studentSchoolYear.Value != lectureSchoolYear.Value)
+                {
+                    failed.Add(new { studentId = requestedId, reason = "Student's school year does not match the lecture's school year." });
+                    continue;
+                }
+            }
+
             if (await _db.Attendances.AnyAsync(a => a.LectureId == lectureId && a.StudentId == studentId.Value))
             {
                 failed.Add(new { studentId = requestedId, reason = "Attendance already recorded." });
