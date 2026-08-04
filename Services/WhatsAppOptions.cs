@@ -80,4 +80,35 @@ public class WhatsAppOptions
     ///    الساعة/ {{time}}"
     /// </summary>
     public string DismissalTemplateName { get; set; } = "dismissal_notification";
+
+    /// <summary>
+    /// Fourth approved template — sent to the parent right after a student
+    /// submits an ONLINE QUIZ with the teacher (QuizzesController.Grade). 4
+    /// named body variables:
+    ///   {{student_name}}
+    ///   {{exam_title}}
+    ///   {{teacher_name}}
+    ///   {{score}}          "17/20" (already formatted "score/total")
+    ///
+    /// Approved template body text (Arabic, category "Utility"):
+    ///   "السلام عليكم ورحمة الله وبركاته ولي أمر الطالب/ {{student_name}}
+    ///    نحيط علم سيادتكم أن الطالب قد أنهى امتحان {{exam_title}}
+    ///    مع المدرس/ {{teacher_name}} بنجاح، وقد حصل على {{score}}
+    ///    شكرًا لكم."
+    /// </summary>
+    public string QuizResultTemplateName { get; set; } = "quiz_result_notification";
+
+    /// <summary>
+    /// Fifth approved template — same shape as QuizResultTemplateName, sent
+    /// after a student submits an ASSIGNMENT/"واجب" (AssignmentsController.Submit).
+    /// Same 4 named body variables ({{student_name}}, {{exam_title}},
+    /// {{teacher_name}}, {{score}}).
+    ///
+    /// Approved template body text (Arabic, category "Utility"):
+    ///   "السلام عليكم ورحمة الله وبركاته ولي أمر الطالب/ {{student_name}}
+    ///    نحيط علم سيادتكم أن الطالب قد أنهى واجب {{exam_title}}
+    ///    مع المدرس/ {{teacher_name}} بنجاح، وقد حصل على {{score}}
+    ///    شكرًا لكم."
+    /// </summary>
+    public string AssignmentResultTemplateName { get; set; } = "assignment_result_notification";
 }

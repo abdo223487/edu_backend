@@ -74,6 +74,40 @@ public class GreenApiWhatsAppService : IWhatsAppService
         return await SendTextAsync(parentPhoneNumber, BuildDismissalMessageText(data), "dismissal");
     }
 
+    public async Task<bool> SendQuizResultNotificationAsync(string parentPhoneNumber, ExamResultWhatsAppNotification data)
+    {
+        if (!_options.Enabled)
+        {
+            _logger.LogInformation("WhatsApp notifications disabled (GreenApi:Enabled=false); skipping.");
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(parentPhoneNumber))
+        {
+            _logger.LogWarning("Skipping WhatsApp quiz-result notification: no parent phone number.");
+            return false;
+        }
+
+        return await SendTextAsync(parentPhoneNumber, BuildExamResultMessageText(data, "امتحان"), "quiz-result");
+    }
+
+    public async Task<bool> SendAssignmentResultNotificationAsync(string parentPhoneNumber, ExamResultWhatsAppNotification data)
+    {
+        if (!_options.Enabled)
+        {
+            _logger.LogInformation("WhatsApp notifications disabled (GreenApi:Enabled=false); skipping.");
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(parentPhoneNumber))
+        {
+            _logger.LogWarning("Skipping WhatsApp assignment-result notification: no parent phone number.");
+            return false;
+        }
+
+        return await SendTextAsync(parentPhoneNumber, BuildExamResultMessageText(data, "واجب"), "assignment-result");
+    }
+
     private async Task<bool> SendTextAsync(string phoneNumber, string messageText, string kind)
     {
         if (string.IsNullOrWhiteSpace(_options.IdInstance) || string.IsNullOrWhiteSpace(_options.ApiTokenInstance))
@@ -146,6 +180,15 @@ public class GreenApiWhatsAppService : IWhatsAppService
             $"لطلاب مجموعة/ {data.GroupName}\n" +
             $"وذلك يوم/ {data.DismissalLocalTime:dd/MM/yyyy}\n" +
             $"الساعة/ {data.DismissalLocalTime:HH:mm}";
+    }
+
+    private static string BuildExamResultMessageText(ExamResultWhatsAppNotification data, string kindLabel)
+    {
+        return
+            $"السلام عليكم ورحمة الله وبركاته ولي أمر الطالب/ {data.StudentName}\n\n" +
+            $"نحيط علم سيادتكم أن الطالب قد أنهى {kindLabel} {data.ExamTitle} مع المدرس/ {data.TeacherName} بنجاح، " +
+            $"وقد حصل على {data.Score} من إجمالي {data.TotalMarks}.\n\n" +
+            $"شكرًا لكم.";
     }
 
     /// <summary>

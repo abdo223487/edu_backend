@@ -39,12 +39,16 @@ public class AssignmentsController : ControllerBase
     private readonly AppDbContext _db;
     private readonly IFileStorageService _files;
     private readonly Common.ITenantContext _tenant;
+    private readonly IWhatsAppService _whatsApp;
+    private readonly ILogger<AssignmentsController> _logger;
 
-    public AssignmentsController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant)
+    public AssignmentsController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, IWhatsAppService whatsApp, ILogger<AssignmentsController> logger)
     {
         _db = db;
         _files = files;
         _tenant = tenant;
+        _whatsApp = whatsApp;
+        _logger = logger;
     }
 
     [HttpGet]
@@ -281,6 +285,23 @@ public class AssignmentsController : ControllerBase
         submission.Score = score;
         _db.AssignmentSubmissions.Add(submission);
         await _db.SaveChangesAsync();
+
+        // Notify the parent on WhatsApp that the student finished this
+        // assignment. Never let this block/fail the submission itself.
+        try
+        {
+            var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == studentId);
+            var teacher = await _db.Teachers.AsNoTracking().FirstOrDefaultAsync(t => t.Id == assignment.TeacherId);
+            if (student != null && teacher != null && !string.IsNullOrWhiteSpace(student.ParentPhoneNumber))
+            {
+                var data = new ExamResultWhatsAppNotification(student.Name, teacher.Name, assignment.Title, score, totalMarks);
+                await _whatsApp.SendAssignmentResultNotificationAsync(student.ParentPhoneNumber!, data);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send WhatsApp assignment-result notification for AssignmentSubmission {SubmissionId}.", submission.Id);
+        }
 
         // Score/total are computed and stored immediately for grading purposes,
         // but the client should still not surface the solution to the student —

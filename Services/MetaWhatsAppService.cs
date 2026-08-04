@@ -107,6 +107,37 @@ public class MetaWhatsAppService : IWhatsAppService
         return await SendTemplateAsync(parentPhoneNumber, _options.DismissalTemplateName, parameters, "dismissal");
     }
 
+    public async Task<bool> SendQuizResultNotificationAsync(string parentPhoneNumber, ExamResultWhatsAppNotification data)
+        => await SendExamResultNotificationAsync(parentPhoneNumber, data, _options.QuizResultTemplateName, "quiz-result");
+
+    public async Task<bool> SendAssignmentResultNotificationAsync(string parentPhoneNumber, ExamResultWhatsAppNotification data)
+        => await SendExamResultNotificationAsync(parentPhoneNumber, data, _options.AssignmentResultTemplateName, "assignment-result");
+
+    private async Task<bool> SendExamResultNotificationAsync(string parentPhoneNumber, ExamResultWhatsAppNotification data, string templateName, string kind)
+    {
+        if (!_options.Enabled)
+        {
+            _logger.LogInformation("WhatsApp notifications disabled (WhatsApp:Enabled=false); skipping.");
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(parentPhoneNumber))
+        {
+            _logger.LogWarning("Skipping WhatsApp {Kind} notification: student has no parent phone number.", kind);
+            return false;
+        }
+
+        var parameters = new object[]
+        {
+            new { type = "text", parameter_name = "student_name", text = data.StudentName },
+            new { type = "text", parameter_name = "exam_title", text = data.ExamTitle },
+            new { type = "text", parameter_name = "teacher_name", text = data.TeacherName },
+            new { type = "text", parameter_name = "score", text = $"{data.Score}/{data.TotalMarks}" },
+        };
+
+        return await SendTemplateAsync(parentPhoneNumber, templateName, parameters, kind);
+    }
+
     private async Task<bool> SendTemplateAsync(string rawPhoneNumber, string templateName, object[] bodyParameters, string kind)
     {
         if (string.IsNullOrWhiteSpace(_options.PhoneNumberId) || string.IsNullOrWhiteSpace(_options.AccessToken))

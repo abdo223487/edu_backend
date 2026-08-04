@@ -30,14 +30,18 @@ public class QuizzesController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IFileStorageService _files;
+    private readonly IWhatsAppService _whatsApp;
+    private readonly ILogger<QuizzesController> _logger;
 
     private readonly Common.ITenantContext _tenant;
 
-    public QuizzesController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant)
+    public QuizzesController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, IWhatsAppService whatsApp, ILogger<QuizzesController> logger)
     {
         _db = db;
         _files = files;
         _tenant = tenant;
+        _whatsApp = whatsApp;
+        _logger = logger;
     }
 
     private static string FormatDuration(int minutes) => FormatDuration(TimeSpan.FromMinutes(minutes));
@@ -366,6 +370,25 @@ public class QuizzesController : ControllerBase
         result.Score = score;
         _db.QuizResults.Add(result);
         await _db.SaveChangesAsync();
+
+        // Notify the parent on WhatsApp that the student finished this online
+        // quiz. Never let this block/fail the submission itself — the
+        // IWhatsAppService implementations already swallow their own errors,
+        // but we still wrap in try/catch here as a belt-and-braces guard.
+        try
+        {
+            var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == studentId);
+            var teacher = await _db.Teachers.AsNoTracking().FirstOrDefaultAsync(t => t.Id == quiz.TeacherId);
+            if (student != null && teacher != null && !string.IsNullOrWhiteSpace(student.ParentPhoneNumber))
+            {
+                var data = new ExamResultWhatsAppNotification(student.Name, teacher.Name, quiz.Title, score, totalMarks);
+                await _whatsApp.SendQuizResultNotificationAsync(student.ParentPhoneNumber!, data);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to send WhatsApp quiz-result notification for QuizResult {QuizResultId}.", result.Id);
+        }
 
         return Ok(new GradeQuizResult(score, totalMarks));
     }
