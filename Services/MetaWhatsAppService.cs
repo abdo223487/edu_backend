@@ -71,9 +71,10 @@ public class MetaWhatsAppService : IWhatsAppService
 
         var parameters = new object[]
         {
-            new { type = "text", parameter_name = "student_name", text = data.StudentName },
             new { type = "text", parameter_name = "username", text = data.UserName },
             new { type = "text", parameter_name = "password", text = data.Password },
+            new { type = "text", parameter_name = "android_link", text = _options.AndroidStoreUrl },
+            new { type = "text", parameter_name = "ios_link", text = _options.IosStoreUrl },
         };
 
         return await SendTemplateAsync(studentPhoneNumber, _options.WelcomeTemplateName, parameters, "welcome");

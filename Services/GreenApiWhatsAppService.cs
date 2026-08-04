@@ -54,7 +54,7 @@ public class GreenApiWhatsAppService : IWhatsAppService
             return false;
         }
 
-        return await SendTextAsync(studentPhoneNumber, BuildWelcomeMessageText(data), "welcome");
+        return await SendTextAsync(studentPhoneNumber, BuildWelcomeMessageText(data, _options), "welcome");
     }
 
     public async Task<bool> SendDismissalNotificationAsync(string parentPhoneNumber, DismissalWhatsAppNotification data)
@@ -161,14 +161,18 @@ public class GreenApiWhatsAppService : IWhatsAppService
             $"حالة المذكرة: {data.NotebookStatusText}";
     }
 
-    private static string BuildWelcomeMessageText(StudentWelcomeWhatsAppNotification data)
+    private static string BuildWelcomeMessageText(StudentWelcomeWhatsAppNotification data, GreenApiOptions options)
     {
         return
-            $"السلام عليكم يا حبيبي {data.StudentName} 🌟\n\n" +
-            $"ده اكونتك على منصة AcademIQ:\n\n" +
-            $"اليوزر: /{data.UserName}/\n" +
-            $"الباسورد: /{data.Password}/\n\n" +
-            $"مع العلم إن ده هيبقى اكونتك لجميع المدرسين، وتقدر تبدل بينهم من خلال الابليكيشن.";
+            $"السلام عليكم ورحمة الله وبركاته ازيك يا حبيبي\n\n" +
+            $"يشرفنا انضمامك لينا على Ednova وبنتمنالك تجربة سعيدة ومتميزة.\n\n" +
+            $"تقدر تنزل الأبليكيشن:\n" +
+            $"لو انت اندرويد: {options.AndroidStoreUrl}\n" +
+            $"لو انت iOS: {options.IosStoreUrl}\n\n" +
+            $"وبعد ما تخلص تقدر تستخدم:\n" +
+            $"{data.UserName}\n" +
+            $"{data.Password}\n\n" +
+            $"وفي الآخر، نتمنى ليك رحلة تعليمية متميزة.";
     }
 
     private static string BuildDismissalMessageText(DismissalWhatsAppNotification data)

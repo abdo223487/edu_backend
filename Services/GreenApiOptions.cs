@@ -23,4 +23,10 @@ public class GreenApiOptions
     /// <summary>The instance's "apiUrl" shown on its console page (per-instance host,
     /// e.g. "https://7107.api.greenapi.com") — NOT a fixed shared domain.</summary>
     public string ApiUrl { get; set; } = "https://api.greenapi.com";
+
+    /// <summary>Play Store link sent in the welcome message to a newly added student.</summary>
+    public string AndroidStoreUrl { get; set; } = "https://play.google.com/store/apps/details?id=com.AcademIQv2.app";
+
+    /// <summary>App Store link sent in the welcome message to a newly added student.</summary>
+    public string IosStoreUrl { get; set; } = "https://apps.apple.com/app/ednova/id6796147882";
 }

@@ -47,19 +47,38 @@ public class WhatsAppOptions
 
     /// <summary>
     /// Second approved template — sent once, right after a Student row is
-    /// created, to the STUDENT's own phone (not the parent). 3 named body
-    /// variables:
-    ///   {{student_name}}
+    /// created (via manual Create, Excel import, Google Sheet import, or the
+    /// mapped import), to the STUDENT's own phone. 4 named body variables
+    /// (the store links are sent as VARIABLES, not static text, so they can
+    /// be changed here in config without ever touching the approved
+    /// template again):
     ///   {{username}}
     ///   {{password}}
+    ///   {{android_link}}
+    ///   {{ios_link}}
     ///
     /// Approved template body text (Arabic, category "Utility"):
-    ///   "أهلاً بيك في AcademIQ يا {{student_name}} 🌟
-    ///    اليوزر: {{username}}
-    ///    الباسورد: {{password}}
-    ///    ده هيبقى اكونتك لأي مدرس، وهتقدر تبدل بين المدرسين من خلال الأبليكيشن."
+    ///   "السلام عليكم ورحمة الله وبركاته ازيك يا حبيبي
+    ///    يشرفنا انضمامك لينا على Ednova وبنتمنالك تجربة سعيدة ومتميزة.
+    ///    تقدر تنزل الأبليكيشن:
+    ///    لو انت اندرويد: {{android_link}}
+    ///    لو انت iOS: {{ios_link}}
+    ///    وبعد ما تخلص تقدر تستخدم:
+    ///    {{username}}
+    ///    {{password}}
+    ///    وفي الآخر، نتمنى ليك رحلة تعليمية متميزة."
+    ///
+    /// NOTE: deliberately no student name and no emojis on the
+    /// username/password lines, per product requirement — those two lines
+    /// must be sent bare, one under the other.
     /// </summary>
     public string WelcomeTemplateName { get; set; } = "student_welcome";
+
+    /// <summary>Play Store link sent as the {{android_link}} variable in the welcome template/message.</summary>
+    public string AndroidStoreUrl { get; set; } = "https://play.google.com/store/apps/details?id=com.AcademIQv2.app";
+
+    /// <summary>App Store link sent as the {{ios_link}} variable in the welcome template/message.</summary>
+    public string IosStoreUrl { get; set; } = "https://apps.apple.com/app/ednova/id6796147882";
 
     /// <summary>
     /// Third approved template — sent to EVERY parent of EVERY student in a
