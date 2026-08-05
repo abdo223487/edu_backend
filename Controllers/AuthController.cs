@@ -64,7 +64,7 @@ public class AuthController : ControllerBase
                 ? null
                 : teacher.TenantOwnerId ?? teacher.Id;
 
-            var access = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roles, tenantId: tenantId);
+            var access = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roles, tenantId: tenantId, tokenVersion: teacher.TokenVersion);
             var refresh = _tokens.CreateRefreshToken();
             teacher.RefreshToken = refresh;
             teacher.RefreshTokenExpiry = DateTime.UtcNow.AddDays(double.Parse(_config["Jwt:RefreshTokenDays"] ?? "30"));
@@ -107,7 +107,8 @@ public class AuthController : ControllerBase
                 student.GroupId,
                 student.SchoolYear,
                 unitIds: unitIds,
-                groupMemberships: groupMemberships);
+                groupMemberships: groupMemberships,
+                tokenVersion: student.TokenVersion);
 
             var refresh = _tokens.CreateRefreshToken();
             student.RefreshToken = refresh;
@@ -144,7 +145,7 @@ public class AuthController : ControllerBase
                 int? tenantIdReplay = teacher.Role == Roles.SuperAdmin
                     ? null
                     : teacher.TenantOwnerId ?? teacher.Id;
-                var accessReplay = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roleClaimsReplay, tenantId: tenantIdReplay);
+                var accessReplay = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roleClaimsReplay, tenantId: tenantIdReplay, tokenVersion: teacher.TokenVersion);
                 return Ok(new AuthResponse(accessReplay, teacher.RefreshToken!));
             }
 
@@ -160,7 +161,7 @@ public class AuthController : ControllerBase
                 ? null
                 : teacher.TenantOwnerId ?? teacher.Id;
 
-            var access = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roles, tenantId: tenantId);
+            var access = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roles, tenantId: tenantId, tokenVersion: teacher.TokenVersion);
             var newRefresh = _tokens.CreateRefreshToken();
             teacher.PreviousRefreshToken = teacher.RefreshToken;
             teacher.PreviousRefreshTokenGraceExpiry = DateTime.UtcNow.Add(RefreshGraceWindow);
@@ -193,7 +194,8 @@ public class AuthController : ControllerBase
                     student.GroupId,
                     student.SchoolYear,
                     unitIds: unitIdsReplay,
-                    groupMemberships: groupMembershipsReplay);
+                    groupMemberships: groupMembershipsReplay,
+                    tokenVersion: student.TokenVersion);
                 return Ok(new AuthResponse(accessReplay, student.RefreshToken!));
             }
 
@@ -217,7 +219,8 @@ public class AuthController : ControllerBase
                 student.GroupId,
                 student.SchoolYear,
                 unitIds: unitIds,
-                groupMemberships: groupMemberships);
+                groupMemberships: groupMemberships,
+                tokenVersion: student.TokenVersion);
             var newRefresh = _tokens.CreateRefreshToken();
             student.PreviousRefreshToken = student.RefreshToken;
             student.PreviousRefreshTokenGraceExpiry = DateTime.UtcNow.Add(RefreshGraceWindow);

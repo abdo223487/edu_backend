@@ -101,6 +101,18 @@ public class Teacher
 
     /// <summary>Optional note from the SuperAdmin explaining the suspension.</summary>
     public string? SuspensionReason { get; set; }
+
+    /// <summary>
+    /// REVOCATION: bumped whenever every access token issued before "now" for
+    /// this account should stop working immediately, even though it's not
+    /// expired yet — e.g. a password change/reset, or a manual "log out
+    /// everywhere". The value at issuance time is baked into the access
+    /// token's "tokenVersion" claim; TokenVersionMiddleware rejects any
+    /// request whose claim no longer matches the current DB value. Starts at
+    /// 1 (not 0) purely so a missing/blank claim value never accidentally
+    /// matches a fresh account's version.
+    /// </summary>
+    public int TokenVersion { get; set; } = 1;
 }
 
 public class Group
@@ -156,6 +168,10 @@ public class Student
     /// collection instead, filtered by Group.TeacherId == current tenant.
     /// </summary>
     public ICollection<StudentGroupMembership> GroupMemberships { get; set; } = new List<StudentGroupMembership>();
+
+    /// <summary>See Teacher.TokenVersion for the full explanation. Same
+    /// revocation mechanism, applied to students.</summary>
+    public int TokenVersion { get; set; } = 1;
 }
 
 /// <summary>

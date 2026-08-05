@@ -70,6 +70,11 @@ public class StudentsController : ControllerBase
 
         var newPassword = GenerateTempPassword();
         student.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
+        // REVOCATION: invalidate any access token issued before this reset —
+        // otherwise whoever had the OLD password could keep using an
+        // already-issued token for up to Jwt:AccessTokenMinutes after the
+        // password changed. See Student.TokenVersion / TokenVersionMiddleware.
+        student.TokenVersion++;
         await _db.SaveChangesAsync();
         await InvalidateStudentsCacheAsync();
 
@@ -1062,6 +1067,8 @@ public class StudentsController : ControllerBase
 
         var newPassword = GenerateTempPassword();
         student.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
+        // REVOCATION: same reasoning as RecoverCredentials above.
+        student.TokenVersion++;
         await _db.SaveChangesAsync();
 
         return Ok(new { newPassword });
@@ -1196,6 +1203,31 @@ public class StudentsController : ControllerBase
         if (student == null) return NotFound(new { message = "Student not found." });
 
         return Ok(student);
+    }
+
+    // POST Students/logout-everywhere
+    // REVOCATION: student-initiated "log out of every device" — bumps their
+    // own TokenVersion, which invalidates every access token issued before
+    // this call (across all devices) the moment TokenVersionMiddleware sees
+    // the next request from each of them, regardless of how much of the
+    // token's original lifetime was left. The refresh token on THIS device is
+    // also cleared so it can't silently mint a new access token right after.
+    [HttpPost("logout-everywhere")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> LogoutEverywhere()
+    {
+        var studentId = User.GetUserId();
+        var student = await _db.Students.FirstOrDefaultAsync(s => s.Id == studentId);
+        if (student == null) return NotFound(new { message = "Student not found." });
+
+        student.TokenVersion++;
+        student.RefreshToken = null;
+        student.RefreshTokenExpiry = null;
+        student.PreviousRefreshToken = null;
+        student.PreviousRefreshTokenGraceExpiry = null;
+        await _db.SaveChangesAsync();
+
+        return Ok(new { message = "تم تسجيل الخروج من جميع الأجهزة." });
     }
 
     // POST Students/codes  body: { code }  (student redeems a code)

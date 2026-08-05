@@ -332,6 +332,13 @@ app.UseCors();
 
 app.UseAuthentication();
 
+// REVOCATION: must run after UseAuthentication (needs context.User) and before
+// UseAuthorization -- rejects any access token whose "tokenVersion" claim no
+// longer matches the account's current TokenVersion (password changed, forced
+// logout, etc.), even though the token itself hasn't expired yet. See
+// TokenVersionMiddleware.
+app.UseMiddleware<TokenVersionMiddleware>();
+
 // SUPERADMIN CONTROL: must run after UseAuthentication (needs context.User) and
 // before UseAuthorization, so a suspended tenant's request is rejected before
 // it ever reaches a controller action -- see TenantSuspensionMiddleware.

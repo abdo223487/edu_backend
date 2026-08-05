@@ -69,12 +69,16 @@ public class MetaWhatsAppService : IWhatsAppService
             return false;
         }
 
+        // IMPORTANT: order must match the variable order as it appears in the
+        // approved template body (android_link, ios_link, username, password) —
+        // Meta maps values by array position, not by parameter_name, despite
+        // parameter_name being present in the payload.
         var parameters = new object[]
         {
-            new { type = "text", parameter_name = "username", text = data.UserName },
-            new { type = "text", parameter_name = "password", text = data.Password },
             new { type = "text", parameter_name = "android_link", text = _options.AndroidStoreUrl },
             new { type = "text", parameter_name = "ios_link", text = _options.IosStoreUrl },
+            new { type = "text", parameter_name = "username", text = data.UserName },
+            new { type = "text", parameter_name = "password", text = data.Password },
         };
 
         return await SendTemplateAsync(studentPhoneNumber, _options.WelcomeTemplateName, parameters, "welcome");

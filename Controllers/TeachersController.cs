@@ -226,6 +226,28 @@ public class TeachersController : ControllerBase
         });
     }
 
+    // POST Teachers/logout-everywhere
+    // REVOCATION: same as Students/logout-everywhere -- bumps this account's
+    // own TokenVersion (invalidating every access token issued before this
+    // call, on every device) and clears the refresh token on this device.
+    [HttpPost("logout-everywhere")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant},{Roles.SuperAdmin}")]
+    public async Task<IActionResult> LogoutEverywhere()
+    {
+        var myId = User.GetUserId();
+        var teacher = await _db.Teachers.FirstOrDefaultAsync(t => t.Id == myId);
+        if (teacher == null) return NotFound(new { message = "Teacher not found." });
+
+        teacher.TokenVersion++;
+        teacher.RefreshToken = null;
+        teacher.RefreshTokenExpiry = null;
+        teacher.PreviousRefreshToken = null;
+        teacher.PreviousRefreshTokenGraceExpiry = null;
+        await _db.SaveChangesAsync();
+
+        return Ok(new { message = "تم تسجيل الخروج من جميع الأجهزة." });
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // SUPERADMIN-ONLY ENDPOINTS
     // ─────────────────────────────────────────────────────────────────────

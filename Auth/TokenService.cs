@@ -32,7 +32,8 @@ public class TokenService
         int? schoolYear = null,
         int? tenantId = null,
         IEnumerable<int>? unitIds = null,
-        IEnumerable<(int TeacherId, int GroupId)>? groupMemberships = null)
+        IEnumerable<(int TeacherId, int GroupId)>? groupMemberships = null,
+        int tokenVersion = 1)
     {
         var jwtSection = _config.GetSection("Jwt");
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSection["Key"]!));
@@ -42,7 +43,10 @@ public class TokenService
         {
             new(JwtRegisteredClaimNames.Sub, subjectId),
             new(ClaimTypes.Name, username),
-            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            // REVOCATION: see Teacher.TokenVersion / TokenVersionMiddleware.
+            // Snapshot of the account's TokenVersion at issuance time.
+            new("tokenVersion", tokenVersion.ToString())
         };
 
         foreach (var role in roles)
