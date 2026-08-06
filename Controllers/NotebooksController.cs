@@ -11,6 +11,8 @@ namespace EduApi.Controllers;
 public record CreateNotebookRequest(string Name, int SchoolYear, List<int> GroupIds, int Price, List<int>? UnitIds);
 public record RenameNotebookRequest(string Name);
 public record AddNotebookMaterialLinkRequest(string? Name, string Link);
+/// <summary>Body for POST Notebooks/{id}/materials/direct-upload -- see that endpoint's doc comment.</summary>
+public record CreateNotebookDirectUploadMaterialRequest(string? Name, string Link);
 
 /// <summary>
 /// Route: api/Notebooks
@@ -22,6 +24,13 @@ public record AddNotebookMaterialLinkRequest(string? Name, string Link);
 ///  GET   Notebooks/{id}/materials           (teacher/admin: all; student: only if fully paid)
 ///  POST  Notebooks/{id}/materials/file      (teacher/admin, multipart, field "Files", optional/multiple)
 ///  POST  Notebooks/{id}/materials/link      (teacher/admin, JSON {name, link} — e.g. a ready Cloudflare R2 URL)
+///  GET   Notebooks/{id}/materials/pdf-upload-url  (SuperAdmin direct-upload flow -- presigned R2 PUT URL)
+///  POST  Notebooks/{id}/materials/direct-upload   (SuperAdmin direct-upload flow -- register the R2 URL)
+///
+/// SuperAdmin is allowed on GetAll/GetById/GetMaterials/pdf-upload-url/direct-upload
+/// so it can drive the same "رفع ماتريال مباشر" flow used for regular Materials,
+/// but scoped to a specific teacher's notebook (acting on behalf of that teacher
+/// via the X-TenantId header, same mechanism as everywhere else -- see ITenantContext).
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -30,14 +39,16 @@ public class NotebooksController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IFileStorageService _files;
-    public NotebooksController(AppDbContext db, IFileStorageService files)
+    private readonly ITenantContext _tenant;
+    public NotebooksController(AppDbContext db, IFileStorageService files, ITenantContext tenant)
     {
         _db = db;
         _files = files;
+        _tenant = tenant;
     }
 
     [HttpGet]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> GetAll([FromQuery] int? schoolYear)
     {
         var query = _db.Notebooks.AsNoTracking().AsQueryable();
@@ -79,6 +90,8 @@ public class NotebooksController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> Create([FromBody] CreateNotebookRequest request)
     {
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
         var notebook = new Notebook
         {
             Name = request.Name,
@@ -86,7 +99,7 @@ public class NotebooksController : ControllerBase
             GroupIds = request.GroupIds ?? new(),
             Price = request.Price,
             UnitIds = request.UnitIds ?? new(),
-            TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+            TeacherId = _tenant.CurrentTenantId.Value // TENANT LAYER
         };
         _db.Notebooks.Add(notebook);
         await _db.SaveChangesAsync();
@@ -122,7 +135,7 @@ public class NotebooksController : ControllerBase
     }
 
     [HttpGet("{id:int}")]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> GetById(int id)
     {
         var notebook = await _db.Notebooks.AsNoTracking().FirstOrDefaultAsync(e => e.Id == id);
@@ -211,7 +224,7 @@ public class NotebooksController : ControllerBase
     // row with no DiscountedPrice). Attaching a PDF is optional, so an
     // unpaid/no-attachment notebook simply returns an empty list.
     [HttpGet("{id:int}/materials")]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Student}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Student},{Roles.SuperAdmin}")]
     public async Task<IActionResult> GetMaterials(int id)
     {
         var notebook = await _db.Notebooks.AsNoTracking().FirstOrDefaultAsync(n => n.Id == id);
@@ -248,6 +261,8 @@ public class NotebooksController : ControllerBase
         if (files == null || files.Count == 0)
             return BadRequest(new { message = "At least one file is required." });
 
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
         var created = new List<object>();
         foreach (var file in files)
         {
@@ -261,7 +276,7 @@ public class NotebooksController : ControllerBase
                 Link = url,
                 NotebookId = id,
                 SchoolYear = notebook.SchoolYear,
-                TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+                TeacherId = _tenant.CurrentTenantId.Value // TENANT LAYER
             };
             _db.Materials.Add(material);
             created.Add(material);
@@ -292,6 +307,8 @@ public class NotebooksController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.Link))
             return BadRequest(new { message = "Link is required." });
 
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
         var material = new Material
         {
             Name = string.IsNullOrWhiteSpace(request.Name) ? "مذكرة" : request.Name,
@@ -299,7 +316,69 @@ public class NotebooksController : ControllerBase
             Link = request.Link,
             NotebookId = id,
             SchoolYear = notebook.SchoolYear,
-            TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+            TeacherId = _tenant.CurrentTenantId.Value // TENANT LAYER
+        };
+        _db.Materials.Add(material);
+        await _db.SaveChangesAsync();
+
+        return StatusCode(201, new { id = material.Id, name = material.Name, type = material.Type, link = material.Link });
+    }
+
+    // GET Notebooks/{id}/materials/pdf-upload-url?extension=.pdf&contentType=application/pdf
+    // Same "رفع ماتريال مباشر" pattern as Material/pdf-upload-url: returns a
+    // short-lived presigned R2 PUT URL so a PDF can be uploaded straight from
+    // the SuperAdmin's device to Cloudflare R2, never through this API server.
+    // Flow: 1) call this to get {uploadUrl, publicUrl}; 2) PUT the raw PDF
+    // bytes to uploadUrl with the SAME Content-Type header sent here; 3) call
+    // POST Notebooks/{id}/materials/direct-upload with Link = publicUrl.
+    [HttpGet("{id:int}/materials/pdf-upload-url")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
+    public async Task<IActionResult> GetPdfUploadUrl(int id, [FromQuery] string extension = ".pdf", [FromQuery] string contentType = "application/pdf")
+    {
+        var notebookExists = await _db.Notebooks.AsNoTracking().AnyAsync(n => n.Id == id);
+        if (!notebookExists) return NotFound(new { message = "Notebook not found." });
+
+        if (!string.Equals(extension, ".pdf", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { message = "Only .pdf files are supported here." });
+
+        try
+        {
+            var (uploadUrl, publicUrl) = _files.GetPresignedUploadUrl("materials", extension, contentType);
+            return Ok(new { uploadUrl, publicUrl });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (NotSupportedException ex)
+        {
+            return StatusCode(501, new { message = ex.Message });
+        }
+    }
+
+    // POST Notebooks/{id}/materials/direct-upload -- creates a Material row
+    // (Type = "File", NotebookId = id) for a file that was already PUT
+    // directly to R2 via the presigned URL from pdf-upload-url above.
+    [HttpPost("{id:int}/materials/direct-upload")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
+    public async Task<IActionResult> CreateFromDirectUpload(int id, [FromBody] CreateNotebookDirectUploadMaterialRequest request)
+    {
+        var notebook = await _db.Notebooks.FirstOrDefaultAsync(n => n.Id == id);
+        if (notebook == null) return NotFound(new { message = "Notebook not found." });
+
+        if (string.IsNullOrWhiteSpace(request.Link))
+            return BadRequest(new { message = "Link is required." });
+
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
+        var material = new Material
+        {
+            Name = string.IsNullOrWhiteSpace(request.Name) ? "مذكرة" : request.Name,
+            Type = "File",
+            Link = request.Link,
+            NotebookId = id,
+            SchoolYear = notebook.SchoolYear,
+            TeacherId = _tenant.CurrentTenantId.Value // TENANT LAYER
         };
         _db.Materials.Add(material);
         await _db.SaveChangesAsync();
