@@ -324,7 +324,7 @@ public class StudentsController : ControllerBase
         using var stream = new MemoryStream();
         await file.CopyToAsync(stream);
         stream.Position = 0;
-        return await ImportStudentsFromWorkbookStream(stream, form.GroupId);
+        return await ImportStudentsFromWorkbookStream(stream, form.GroupId, form.SchoolYear, form.UnitId);
     }
 
     // POST Students/import/google-sheet  body: { url, groupId }
@@ -378,7 +378,7 @@ public class StudentsController : ControllerBase
         using var stream = new MemoryStream();
         await response.Content.CopyToAsync(stream);
         stream.Position = 0;
-        return await ImportStudentsFromWorkbookStream(stream, request.GroupId);
+        return await ImportStudentsFromWorkbookStream(stream, request.GroupId, request.SchoolYear, request.UnitId);
     }
 
     // POST Students/import/preview  multipart/form-data: { file }
@@ -513,7 +513,7 @@ public class StudentsController : ControllerBase
         using var stream = new MemoryStream();
         await file.CopyToAsync(stream);
         stream.Position = 0;
-        return await ImportStudentsFromWorkbookStream(stream, form.GroupId, mapping, form.HasHeaderRow ?? true);
+        return await ImportStudentsFromWorkbookStream(stream, form.GroupId, form.SchoolYear, form.UnitId, mapping, form.HasHeaderRow ?? true);
     }
 
     // Shared core for Students/import and Students/import/google-sheet: both
@@ -531,20 +531,52 @@ public class StudentsController : ControllerBase
     // to match a fixed expected layout. When null (the normal case), header
     // auto-detection runs exactly as before.
     private async Task<IActionResult> ImportStudentsFromWorkbookStream(
-        Stream xlsxStream, int? groupId,
+        Stream xlsxStream, int? groupId, int schoolYear, int? unitId,
         Dictionary<string, int>? explicitColumnMap = null, bool hasHeaderRow = true)
     {
+        if (schoolYear <= 0)
+            return BadRequest(new { message = "SchoolYear is required -- pick which year this batch of students/groups belongs to, exactly like adding a student manually." });
+
         // Tenant-scoped by the standard Groups query filter — a teacher can
         // only ever resolve their own groups here, by id or by name.
         var myGroups = await _db.Groups.ToListAsync();
         if (myGroups.Count == 0)
             return BadRequest(new { message = "You have no groups yet. Create a group first." });
 
-        Group? defaultGroup = groupId.HasValue ? myGroups.FirstOrDefault(g => g.Id == groupId.Value) : null;
-        if (groupId.HasValue && defaultGroup == null)
-            return BadRequest(new { message = "Group not found." });
+        // AMBIGUOUS-NAME FIX: a teacher can have two groups with the exact
+        // same Name in different school years (e.g. "الصفوة" in both أولى
+        // ثانوي and تانية ثانوي). Resolving GroupName/GroupId against ALL of
+        // the teacher's groups used to silently pick whichever one happened
+        // to come first, landing rows in the wrong year without any error.
+        // Every lookup below is scoped to THIS import's schoolYear instead.
+        var myGroupsThisYear = myGroups.Where(g => g.SchoolYear == schoolYear).ToList();
+        if (myGroupsThisYear.Count == 0)
+            return BadRequest(new { message = $"You have no groups in school year {schoolYear}. Create one first, or pick a different year." });
 
-        var groupsByName = myGroups
+        Group? defaultGroup = null;
+        if (groupId.HasValue)
+        {
+            defaultGroup = myGroups.FirstOrDefault(g => g.Id == groupId.Value);
+            if (defaultGroup == null)
+                return BadRequest(new { message = "Group not found." });
+            if (defaultGroup.SchoolYear != schoolYear)
+                return BadRequest(new { message = $"'{defaultGroup.Name}' belongs to school year {defaultGroup.SchoolYear}, not {schoolYear} -- pick the matching group for the year you selected." });
+        }
+
+        // OPTIONAL "آخر كورس" AUTO-SUBSCRIBE: resolved and validated ONCE,
+        // up front, so a bad UnitId fails fast with a clear message instead
+        // of halfway through a 500-row sheet.
+        Unit? targetUnit = null;
+        if (unitId.HasValue)
+        {
+            targetUnit = await _db.Units.FirstOrDefaultAsync(u => u.Id == unitId.Value);
+            if (targetUnit == null)
+                return BadRequest(new { message = "The selected course (Unit) was not found." });
+            if (targetUnit.SchoolYear != schoolYear)
+                return BadRequest(new { message = $"'{targetUnit.Name}' belongs to school year {targetUnit.SchoolYear}, not {schoolYear} -- pick a course from the same year." });
+        }
+
+        var groupsByName = myGroupsThisYear
             .GroupBy(g => NormalizeHeader(g.Name))
             .ToDictionary(g => g.Key, g => g.First());
 
@@ -554,7 +586,7 @@ public class StudentsController : ControllerBase
             var ws = workbook.Worksheets.First();
 
             var results = new List<ImportStudentsRowResult>();
-            int created = 0, linked = 0, failed = 0;
+            int created = 0, linked = 0, failed = 0, subscribed = 0;
 
             int nameCol, phoneCol, parentPhoneCol, userNameCol, passwordCol, groupIdCol, groupNameCol;
 
@@ -638,7 +670,10 @@ public class StudentsController : ControllerBase
                 }
 
                 // Resolve this row's group: explicit GroupId column wins, then
-                // GroupName column, then the sheet-wide default groupId.
+                // GroupName column, then the sheet-wide default groupId. Every
+                // path is scoped to `schoolYear` (see comment on myGroupsThisYear
+                // above) so a same-named/same-numbered group from a DIFFERENT
+                // year can never be silently used.
                 Group? group = defaultGroup;
                 if (!string.IsNullOrEmpty(rowGroupIdRaw))
                 {
@@ -649,10 +684,17 @@ public class StudentsController : ControllerBase
                         results.Add(new ImportStudentsRowResult(r, name, phone, "Failed", $"GroupId '{rowGroupIdRaw}' was not found among your groups.", null));
                         continue;
                     }
+                    if (group.SchoolYear != schoolYear)
+                    {
+                        failed++;
+                        results.Add(new ImportStudentsRowResult(r, name, phone, "Failed",
+                            $"GroupId '{rowGroupIdRaw}' ('{group.Name}') belongs to school year {group.SchoolYear}, not the {schoolYear} you selected for this import.", null));
+                        continue;
+                    }
                 }
                 else if (!string.IsNullOrEmpty(rowGroupName))
                 {
-                    var (resolvedGroup, error) = ResolveGroupByName(rowGroupName, myGroups, groupsByName);
+                    var (resolvedGroup, error) = ResolveGroupByName(rowGroupName, myGroupsThisYear, groupsByName);
                     if (resolvedGroup == null)
                     {
                         failed++;
@@ -707,6 +749,13 @@ public class StudentsController : ControllerBase
                         _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = existing.Id, Action = "Reactivated", Reason = "Re-added via import" });
                     }
 
+                    if (targetUnit != null
+                        && !await _db.StudentUnitSubscriptions.AnyAsync(s => s.StudentId == existing.Id && s.UnitId == targetUnit.Id))
+                    {
+                        _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = targetUnit.TeacherId, StudentId = existing.Id, UnitId = targetUnit.Id });
+                        subscribed++;
+                    }
+
                     await _db.SaveChangesAsync();
                     linked++;
                     results.Add(new ImportStudentsRowResult(r, name, phone, "Linked", $"A student with this phone number already existed, so they were linked to group '{group.Name}' instead of creating a duplicate.", existing.Id));
@@ -731,6 +780,13 @@ public class StudentsController : ControllerBase
                 await _db.SaveChangesAsync();
 
                 _db.StudentGroupMemberships.Add(new StudentGroupMembership { StudentId = student.Id, GroupId = group.Id });
+
+                if (targetUnit != null)
+                {
+                    _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = targetUnit.TeacherId, StudentId = student.Id, UnitId = targetUnit.Id });
+                    subscribed++;
+                }
+
                 await _db.SaveChangesAsync();
 
                 await SendWelcomeWhatsAppAsync(student, plainPassword);
@@ -742,7 +798,13 @@ public class StudentsController : ControllerBase
             if (created > 0 || linked > 0)
                 await InvalidateStudentsCacheAsync();
 
-            return Ok(new ImportStudentsResponse(results.Count, created, linked, failed, results));
+            return Ok(new ImportStudentsResponse(results.Count, created, linked, failed, results)
+            {
+                SchoolYear = schoolYear,
+                SubscribedToUnitId = targetUnit?.Id,
+                SubscribedToUnitName = targetUnit?.Name,
+                SubscribedCount = subscribed
+            });
         }
         catch (Exception ex)
         {

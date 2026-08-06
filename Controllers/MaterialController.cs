@@ -10,6 +10,9 @@ namespace EduApi.Controllers;
 
 public record CreateGoogleDriveMaterialRequest(string? Name, string Link, int? SchoolYear, int? UnitId, int? Months);
 
+/// <summary>Body for POST Material/direct-upload -- see that endpoint's doc comment.</summary>
+public record CreateDirectUploadMaterialRequest(string? Name, string Link, int? SchoolYear, int? UnitId, int? Months);
+
 /// <summary>
 /// Route: api/Material (singular, matching Flutter's "Material" endpoint - NOT renamed to "Materials").
 ///  GET    Material?schoolYear=..&unitId=..     (teacher) -> each item includes "unitName"
@@ -17,6 +20,8 @@ public record CreateGoogleDriveMaterialRequest(string? Name, string Link, int? S
 ///  GET    Material/{id}
 ///  POST   Material/google-drive
 ///  POST   Material/file                        (multipart, field name "Files", supports multiple)
+///  GET    Material/pdf-upload-url               (presigned R2 PUT URL for direct client-side upload)
+///  POST   Material/direct-upload                (create a Material row from an already-R2-uploaded file)
 ///  POST   Material/delete?materialId=..
 /// </summary>
 [ApiController]
@@ -123,6 +128,78 @@ public class MaterialController : ControllerBase
         {
             Name = string.IsNullOrWhiteSpace(request.Name) ? "Google Drive Material" : request.Name,
             Type = "GoogleDrive",
+            Link = request.Link,
+            SchoolYear = request.SchoolYear,
+            UnitId = request.UnitId,
+            Months = request.Months,
+            TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+        };
+        _db.Materials.Add(material);
+        await _db.SaveChangesAsync();
+
+        var unitName = request.UnitId.HasValue
+            ? await _db.Units.Where(u => u.Id == request.UnitId.Value).Select(u => u.Name).FirstOrDefaultAsync()
+            : null;
+
+        return StatusCode(201, new
+        {
+            id = material.Id,
+            name = material.Name,
+            type = material.Type,
+            link = material.Link,
+            unitId = material.UnitId,
+            unitName
+        });
+    }
+
+    // GET Material/pdf-upload-url?extension=.pdf&contentType=application/pdf
+    // Same pattern as Lectures/video-upload-url: returns a short-lived
+    // presigned R2 PUT URL so a PDF can be uploaded straight from the device
+    // to Cloudflare R2, never through this API server. Flow: 1) call this to
+    // get {uploadUrl, publicUrl}; 2) PUT the raw PDF bytes to uploadUrl with
+    // the SAME Content-Type header sent here; 3) call POST Material/direct-upload
+    // with Link = publicUrl to actually create the Material row.
+    //
+    // Used primarily by the SuperAdmin "رفع ماتريال مباشر" (optional, direct
+    // upload) flow -- it deliberately skips the multipart Material/file
+    // endpoint entirely so large PDFs never round-trip through the API
+    // server's own bandwidth/memory.
+    [HttpGet("pdf-upload-url")]
+    public IActionResult GetPdfUploadUrl([FromQuery] string extension = ".pdf", [FromQuery] string contentType = "application/pdf")
+    {
+        if (!string.Equals(extension, ".pdf", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { message = "Only .pdf files are supported here." });
+
+        try
+        {
+            var (uploadUrl, publicUrl) = _files.GetPresignedUploadUrl("materials", extension, contentType);
+            return Ok(new { uploadUrl, publicUrl });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+        catch (NotSupportedException ex)
+        {
+            return StatusCode(501, new { message = ex.Message });
+        }
+    }
+
+    // POST Material/direct-upload -- creates a Material row (Type = "File",
+    // exactly like a real multipart upload would) for a file that was
+    // already PUT directly to R2 via the presigned URL from pdf-upload-url
+    // above. The file itself never touches this endpoint -- only its
+    // already-hosted public URL does.
+    [HttpPost("direct-upload")]
+    public async Task<IActionResult> CreateFromDirectUpload([FromBody] CreateDirectUploadMaterialRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Link))
+            return BadRequest(new { message = "Link is required." });
+
+        var material = new Material
+        {
+            Name = string.IsNullOrWhiteSpace(request.Name) ? "Material" : request.Name,
+            Type = "File",
             Link = request.Link,
             SchoolYear = request.SchoolYear,
             UnitId = request.UnitId,

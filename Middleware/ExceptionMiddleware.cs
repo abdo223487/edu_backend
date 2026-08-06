@@ -35,6 +35,17 @@ public class ExceptionMiddleware
                     : null
             });
 
+            // SUPERADMIN LOGS FEATURE: persist this 500 so it shows up in the
+            // SuperAdmin's Logs screen (see RequestLoggingMiddleware, which
+            // handles every OTHER status code -- this is the one exception
+            // path it never sees, since the exception propagates past it).
+            var db = context.RequestServices.GetService<EduApi.Data.AppDbContext>();
+            if (db != null)
+            {
+                await EduApi.Middleware.RequestLoggingMiddleware.LogAsync(
+                    context, db, context.Response.StatusCode, ex.Message);
+            }
+
             await context.Response.WriteAsync(payload);
         }
     }

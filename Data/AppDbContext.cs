@@ -1,16 +1,21 @@
 using EduApi.Common;
 using EduApi.Models;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
+using System.Security.Claims;
+using System.Text.Json;
 
 namespace EduApi.Data;
 
 public class AppDbContext : DbContext
 {
     private readonly ITenantContext _tenant;
+    private readonly IHttpContextAccessor? _httpContextAccessor;
 
-    public AppDbContext(DbContextOptions<AppDbContext> options, ITenantContext tenant) : base(options)
+    public AppDbContext(DbContextOptions<AppDbContext> options, ITenantContext tenant, IHttpContextAccessor? httpContextAccessor = null) : base(options)
     {
         _tenant = tenant;
+        _httpContextAccessor = httpContextAccessor;
     }
 
     public DbSet<Teacher> Teachers => Set<Teacher>();
@@ -48,6 +53,8 @@ public class AppDbContext : DbContext
     public DbSet<HomeworkResult> HomeworkResults => Set<HomeworkResult>();
     public DbSet<StateHistoryEntry> StateHistoryEntries => Set<StateHistoryEntry>();
     public DbSet<AppVersion> AppVersions => Set<AppVersion>();
+    public DbSet<RequestErrorLog> RequestErrorLogs => Set<RequestErrorLog>();
+    public DbSet<DeletedItemLog> DeletedItemLogs => Set<DeletedItemLog>();
 
     // Real join tables backing the *IdsCsv columns' filtering. See the
     // SaveChangesAsync override below for how these stay in sync with
@@ -329,6 +336,17 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<QuizGroupLink>().HasIndex(x => new { x.QuizId, x.GroupId }).IsUnique();
         modelBuilder.Entity<QuizGroupLink>().HasIndex(x => x.GroupId);
 
+        // SUPERADMIN LOGS FEATURE: this is exactly how LogsController queries
+        // it (a given teacher's logs, optionally filtered by role and always
+        // ordered by/filtered on time), so index all four together.
+        modelBuilder.Entity<RequestErrorLog>()
+            .HasIndex(x => new { x.TenantId, x.Role, x.StatusCode, x.CreatedAtUtc });
+
+        // SUPERADMIN DELETED-ITEMS FEATURE: DeletedItemsController groups by
+        // teacher + hour, so index those together too.
+        modelBuilder.Entity<DeletedItemLog>()
+            .HasIndex(x => new { x.TenantId, x.DeletedAtUtc });
+
         base.OnModelCreating(modelBuilder);
     }
 
@@ -349,6 +367,11 @@ public class AppDbContext : DbContext
             .Select(e => e.Entity)
             .Where(e => e is Lecture or Assignment or Notification or Quiz)
             .ToList();
+
+        // SUPERADMIN DELETED-ITEMS FEATURE: must run BEFORE base.SaveChangesAsync
+        // below -- once the delete actually happens, EntityState.Deleted entries
+        // go Detached and their values are gone.
+        var pendingDeletions = CaptureDeletedEntitySnapshots();
 
         var result = await base.SaveChangesAsync(cancellationToken);
 
@@ -391,6 +414,98 @@ public class AppDbContext : DbContext
             await base.SaveChangesAsync(cancellationToken);
         }
 
+        if (pendingDeletions.Count > 0)
+        {
+            DeletedItemLogs.AddRange(pendingDeletions);
+            await base.SaveChangesAsync(cancellationToken);
+        }
+
         return result;
+    }
+
+    /// <summary>Sync counterpart of the above -- DbSeeder and a couple of other
+    /// call sites use the sync SaveChanges(), which routes through this single
+    /// overload (SaveChanges() with no args calls SaveChanges(true) internally),
+    /// so overriding just this one covers all of them.</summary>
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        var pendingDeletions = CaptureDeletedEntitySnapshots();
+
+        var result = base.SaveChanges(acceptAllChangesOnSuccess);
+
+        if (pendingDeletions.Count > 0)
+        {
+            DeletedItemLogs.AddRange(pendingDeletions);
+            base.SaveChanges(acceptAllChangesOnSuccess);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// SUPERADMIN "الممسوحات" (Deleted Items) FEATURE: right before any actual
+    /// DELETE hits the database, snapshot every tracked entity in
+    /// EntityState.Deleted that carries a "TeacherId" property (i.e. genuine
+    /// tenant-owned content -- Group/Unit/Lecture/Quiz/Assignment/etc; NOT the
+    /// two audit-log tables themselves, which use "TenantId" instead, or any
+    /// join table without a TeacherId of its own) into an in-memory
+    /// DeletedItemLog, so a SuperAdmin can later see exactly what a teacher
+    /// deleted and restore it with its original Id intact.
+    ///
+    /// Deliberately reflection/metadata-based (not a hardcoded entity list) so
+    /// any NEW entity that gains a TeacherId property down the line is
+    /// automatically covered too, with zero changes needed in whichever
+    /// controller deletes it. Trade-off: entities whose tenant is only
+    /// resolvable indirectly (e.g. Student, via GroupMemberships, has no
+    /// TeacherId of its own) are NOT captured by this generic mechanism.
+    /// </summary>
+    private List<DeletedItemLog> CaptureDeletedEntitySnapshots()
+    {
+        var role = "Unknown";
+        int? userId = null;
+        var httpUser = _httpContextAccessor?.HttpContext?.User;
+        if (httpUser?.Identity?.IsAuthenticated == true)
+        {
+            role = httpUser.FindFirstValue(ClaimTypes.Role) ?? "Unknown";
+            userId = httpUser.GetUserId();
+        }
+
+        var logs = new List<DeletedItemLog>();
+
+        foreach (var entry in ChangeTracker.Entries().Where(e => e.State == EntityState.Deleted).ToList())
+        {
+            if (entry.Entity is RequestErrorLog or DeletedItemLog) continue;
+
+            var teacherIdProp = entry.Metadata.FindProperty("TeacherId");
+            if (teacherIdProp == null) continue; // not a tenant-owned content entity -- skip
+
+            var pkProp = entry.Metadata.FindPrimaryKey()?.Properties.FirstOrDefault();
+            if (pkProp == null || entry.OriginalValues[pkProp] is not int entityId) continue;
+
+            // Snapshot every scalar (EF-mapped, non-navigation) property's
+            // ORIGINAL value -- navigation properties are deliberately
+            // excluded: they're separate rows/entities with their own rules,
+            // and would risk circular references on serialization anyway.
+            var snapshot = new Dictionary<string, object?>();
+            foreach (var prop in entry.Metadata.GetProperties())
+                snapshot[prop.Name] = entry.OriginalValues[prop];
+
+            var displayNameProp = entry.Metadata.FindProperty("Name") ?? entry.Metadata.FindProperty("Title");
+            var displayName = displayNameProp != null ? entry.OriginalValues[displayNameProp]?.ToString() : null;
+
+            logs.Add(new DeletedItemLog
+            {
+                TenantId = entry.OriginalValues[teacherIdProp] as int?,
+                EntityType = entry.Metadata.ClrType.Name,
+                EntityId = entityId,
+                DisplayName = displayName,
+                SnapshotJson = JsonSerializer.Serialize(snapshot),
+                DeletedByRole = role,
+                DeletedByUserId = userId,
+                DeletedAtUtc = DateTime.UtcNow
+            });
+        }
+
+        return logs;
     }
 }

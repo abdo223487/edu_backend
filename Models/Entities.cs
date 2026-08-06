@@ -203,6 +203,83 @@ public class StudentGroupMembership
 }
 
 /// <summary>History log for suspend/reactivate/cancel/delete actions on a student.</summary>
+/// <summary>
+/// SUPERADMIN LOGS FEATURE: one row per HTTP response with a 4xx/5xx status
+/// code, written by RequestLoggingMiddleware (non-exception 4xx) and
+/// ExceptionMiddleware (500s). Lets a SuperAdmin drill into "what's been
+/// failing for teacher X" / "what's been failing for teacher X's students"
+/// without needing external log tooling. Intentionally NOT tenant-filtered
+/// via a global query filter (see AppDbContext) -- SuperAdmin endpoints
+/// filter by an explicit teacherId route parameter instead, since a
+/// SuperAdmin has no single active tenant of its own.
+/// </summary>
+public class RequestErrorLog
+{
+    public int Id { get; set; }
+
+    /// <summary>The tenant (Teacher.Id) this request happened under, resolved
+    /// the same way as everywhere else (ITenantContext.CurrentTenantId) --
+    /// null for requests that never resolved to a tenant (e.g. login itself).</summary>
+    public int? TenantId { get; set; }
+
+    /// <summary>Role of the caller: Teacher / Assistant / AssistantAdmin /
+    /// Student / SuperAdmin / Anonymous / Unknown.</summary>
+    public string Role { get; set; } = "Unknown";
+
+    /// <summary>Id of the caller (Teacher.Id or Student.Id depending on Role), from the "sub" claim.</summary>
+    public int? UserId { get; set; }
+
+    public string Method { get; set; } = default!;
+    public string Path { get; set; } = default!;
+    public int StatusCode { get; set; }
+
+    /// <summary>Best-effort human-readable reason: the response body's "message"/"title"
+    /// field if JSON, the exception message for 500s, or a truncated raw body otherwise.</summary>
+    public string? Message { get; set; }
+
+    public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>
+/// SUPERADMIN "الممسوحات" (Deleted Items) FEATURE: one row per entity that
+/// got hard-deleted from a "TeacherId"-owned table (see
+/// AppDbContext.CaptureDeletedEntitySnapshots), storing enough of a snapshot
+/// to fully re-insert the row later with its ORIGINAL Id intact. Lets a
+/// SuperAdmin browse "everything teacher X deleted", grouped by hour, and
+/// restore any of it -- individually or a whole hour at once.
+/// </summary>
+public class DeletedItemLog
+{
+    public int Id { get; set; }
+
+    /// <summary>The teacher (tenant) this deleted row belonged to.</summary>
+    public int? TenantId { get; set; }
+
+    /// <summary>CLR type name of the deleted entity (e.g. "Lecture", "Quiz", "Group").</summary>
+    public string EntityType { get; set; } = default!;
+
+    /// <summary>The deleted row's ORIGINAL primary key -- reused verbatim on restore.</summary>
+    public int EntityId { get; set; }
+
+    /// <summary>Best-effort human label for the card/list UI (that row's Name/Title, if it had one).</summary>
+    public string? DisplayName { get; set; }
+
+    /// <summary>JSON dictionary of every scalar (non-navigation) column -> original value,
+    /// captured right before the delete hit the database. This is the entire
+    /// restore payload -- re-insert exactly these values and the row is back
+    /// exactly as it was.</summary>
+    public string SnapshotJson { get; set; } = default!;
+
+    public string DeletedByRole { get; set; } = "Unknown";
+    public int? DeletedByUserId { get; set; }
+    public DateTime DeletedAtUtc { get; set; } = DateTime.UtcNow;
+
+    /// <summary>Once restored, kept around (not deleted) as history -- just flagged so
+    /// it doesn't show up as "still deleted" / get restored twice.</summary>
+    public bool IsRestored { get; set; }
+    public DateTime? RestoredAtUtc { get; set; }
+}
+
 public class StateHistoryEntry
 {
     public int Id { get; set; }
