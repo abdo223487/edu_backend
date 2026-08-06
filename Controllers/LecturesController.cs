@@ -294,6 +294,18 @@ public class LecturesController : ControllerBase
         var lecture = await _db.Lectures.FirstOrDefaultAsync(e => e.Id == (lectureId));
         if (lecture == null) return NotFound(new { message = "Lecture not found." });
 
+        // GUARD: NotebookPayment.LectureId points at this row with no
+        // cascade/set-null configured (see AppDbContext) -- deleting a
+        // lecture that a payment is recorded against is deliberately
+        // blocked, since the payment is a financial record that must keep
+        // its "which lecture" reference. Without this check, the FK
+        // violation from SaveChangesAsync below would still stop the
+        // delete, just as an opaque unhandled 500 instead of a clear
+        // message the teacher can actually act on.
+        var hasPayments = await _db.NotebookPayments.AnyAsync(p => p.LectureId == lectureId);
+        if (hasPayments)
+            return BadRequest(new { message = "لا يمكن حذف المحاضرة لأن فيها مدفوعات مذكرة مسجلة عليها." });
+
         // Best-effort: remove the recorded video AND its generated thumbnail
         // from R2 too, so deleting a lecture doesn't leave orphaned files
         // sitting in the bucket forever. Does nothing for a YoutubeLink-only

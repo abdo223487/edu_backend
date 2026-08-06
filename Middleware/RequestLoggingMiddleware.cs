@@ -3,6 +3,7 @@ using System.Text.Json;
 using EduApi.Common;
 using EduApi.Data;
 using EduApi.Models;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace EduApi.Middleware;
 
@@ -93,8 +94,23 @@ public class RequestLoggingMiddleware
         => string.IsNullOrEmpty(s) ? s : (s.Length > MaxMessageLength ? s[..MaxMessageLength] : s);
 
     /// <summary>Shared by both this middleware (4xx) and ExceptionMiddleware (5xx).
-    /// Never throws -- logging must never break the actual request/response.</summary>
-    public static async Task LogAsync(HttpContext context, AppDbContext db, int statusCode, string? message)
+    /// Never throws -- logging must never break the actual request/response.
+    ///
+    /// BUGFIX: this used to reuse the SAME AppDbContext instance that was
+    /// active when the error happened. For a 500 caused by SaveChangesAsync
+    /// itself failing (e.g. a DB constraint violation like deleting a Lecture
+    /// that still has Materials pointing at it), Npgsql leaves that
+    /// connection's transaction in an "aborted" state -- Postgres refuses ANY
+    /// further command on it until a ROLLBACK. Reusing that same (poisoned)
+    /// context to then INSERT the RequestErrorLog row silently failed too
+    /// (swallowed by the catch below), so the very errors this feature most
+    /// needs to surface -- ones from failed writes -- never made it into the
+    /// SuperAdmin's Logs screen at all.
+    ///
+    /// Fix: always log through a BRAND NEW scope/DbContext, completely
+    /// independent of whatever connection/transaction state the original
+    /// request left behind.</summary>
+    public static async Task LogAsync(HttpContext context, AppDbContext _, int statusCode, string? message)
     {
         try
         {
@@ -108,9 +124,15 @@ public class RequestLoggingMiddleware
                 userId = user.GetUserId();
             }
 
-            var tenant = context.RequestServices.GetService<ITenantContext>();
+            // Fresh scope -> fresh ITenantContext -> fresh AppDbContext, all
+            // on a brand new connection. Deliberately NOT the AppDbContext
+            // passed in by the caller (see the BUGFIX note above) or its
+            // ITenantContext -- either could belong to the same broken scope.
+            using var scope = context.RequestServices.GetRequiredService<IServiceScopeFactory>().CreateScope();
+            var freshDb = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var tenant = scope.ServiceProvider.GetService<ITenantContext>();
 
-            db.RequestErrorLogs.Add(new RequestErrorLog
+            freshDb.RequestErrorLogs.Add(new RequestErrorLog
             {
                 TenantId = tenant?.CurrentTenantId,
                 Role = role,
@@ -121,7 +143,7 @@ public class RequestLoggingMiddleware
                 Message = message,
                 CreatedAtUtc = DateTime.UtcNow
             });
-            await db.SaveChangesAsync();
+            await freshDb.SaveChangesAsync();
         }
         catch
         {
