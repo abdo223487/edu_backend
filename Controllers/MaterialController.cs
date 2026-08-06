@@ -31,11 +31,13 @@ public class MaterialController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly IFileStorageService _files;
+    private readonly ITenantContext _tenant;
 
-    public MaterialController(AppDbContext db, IFileStorageService files)
+    public MaterialController(AppDbContext db, IFileStorageService files, ITenantContext tenant)
     {
         _db = db;
         _files = files;
+        _tenant = tenant;
     }
 
     [HttpGet]
@@ -124,6 +126,8 @@ public class MaterialController : ControllerBase
     [HttpPost("google-drive")]
     public async Task<IActionResult> CreateGoogleDrive([FromBody] CreateGoogleDriveMaterialRequest request)
     {
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
         var material = new Material
         {
             Name = string.IsNullOrWhiteSpace(request.Name) ? "Google Drive Material" : request.Name,
@@ -132,7 +136,7 @@ public class MaterialController : ControllerBase
             SchoolYear = request.SchoolYear,
             UnitId = request.UnitId,
             Months = request.Months,
-            TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+            TeacherId = _tenant.CurrentTenantId.Value // TENANT LAYER
         };
         _db.Materials.Add(material);
         await _db.SaveChangesAsync();
@@ -196,6 +200,8 @@ public class MaterialController : ControllerBase
         if (string.IsNullOrWhiteSpace(request.Link))
             return BadRequest(new { message = "Link is required." });
 
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
         var material = new Material
         {
             Name = string.IsNullOrWhiteSpace(request.Name) ? "Material" : request.Name,
@@ -204,7 +210,7 @@ public class MaterialController : ControllerBase
             SchoolYear = request.SchoolYear,
             UnitId = request.UnitId,
             Months = request.Months,
-            TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+            TeacherId = _tenant.CurrentTenantId.Value // TENANT LAYER
         };
         _db.Materials.Add(material);
         await _db.SaveChangesAsync();
@@ -238,6 +244,8 @@ public class MaterialController : ControllerBase
         if (files == null || files.Count == 0)
             return BadRequest(new { message = "At least one file is required." });
 
+        if (_tenant.CurrentTenantId == null) return Forbid();
+
         var created = new List<object>();
 
         foreach (var file in files)
@@ -252,7 +260,7 @@ public class MaterialController : ControllerBase
                 Link = url,
                 SchoolYear = schoolYear,
                 UnitId = unitId,
-                TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+                TeacherId = _tenant.CurrentTenantId.Value // TENANT LAYER
             };
             _db.Materials.Add(material);
             created.Add(material);
