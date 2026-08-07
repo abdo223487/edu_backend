@@ -30,6 +30,23 @@ public class DeletedItemsController : ControllerBase
         _db = db;
     }
 
+    // BUGFIX: the Flutter date picker sends a plain calendar date chosen
+    // against the DEVICE's local clock (Egypt, UTC+2), but DeletedAtUtc is
+    // stored in UTC. Comparing the local date directly against UTC
+    // timestamps meant anything deleted late at night local time (which is
+    // still "yesterday" in UTC) silently landed one day earlier than where
+    // the SuperAdmin was looking -- it looked like it never got captured at
+    // all. Converting the requested local day to its real UTC start/end
+    // fixes that. Egypt has used a fixed UTC+2 offset (no DST) since 2014;
+    // update this if that policy ever changes again.
+    private static readonly TimeSpan EgyptUtcOffset = TimeSpan.FromHours(2);
+
+    private static (DateTime startUtc, DateTime endUtc) LocalDayToUtcRange(DateTime localDate)
+    {
+        var startUtc = localDate.Date - EgyptUtcOffset;
+        return (startUtc, startUtc.AddDays(1));
+    }
+
     /// <summary>GET DeletedItems/teachers/{teacherId}/buckets?date=yyyy-MM-dd
     /// Hourly cards of everything deleted for this teacher's tenant on the
     /// given day (defaults to today), not-yet-restored only.</summary>
@@ -40,17 +57,19 @@ public class DeletedItemsController : ControllerBase
             .AnyAsync(t => t.Id == teacherId);
         if (!teacherExists) return NotFound(new { message = "Teacher not found." });
 
-        var day = (date ?? DateTime.UtcNow).Date;
-        var nextDay = day.AddDays(1);
+        var localDay = (date ?? DateTime.UtcNow + EgyptUtcOffset).Date;
+        var (dayStartUtc, dayEndUtc) = LocalDayToUtcRange(localDay);
 
         var dayLogs = await _db.DeletedItemLogs.AsNoTracking()
             .Where(l => l.TenantId == teacherId && !l.IsRestored
-                        && l.DeletedAtUtc >= day && l.DeletedAtUtc < nextDay)
+                        && l.DeletedAtUtc >= dayStartUtc && l.DeletedAtUtc < dayEndUtc)
             .Select(l => new { l.DeletedAtUtc })
             .ToListAsync();
 
         var buckets = dayLogs
-            .GroupBy(l => l.DeletedAtUtc.Hour)
+            // Group by the HOUR IN LOCAL TIME too, so a card labeled "٩:٠٠ -
+            // ١٠:٠٠" actually matches what the SuperAdmin would call that hour.
+            .GroupBy(l => (l.DeletedAtUtc + EgyptUtcOffset).Hour)
             .Select(g => new
             {
                 hour = g.Key,
@@ -63,7 +82,7 @@ public class DeletedItemsController : ControllerBase
         return Ok(new
         {
             teacherId,
-            date = day.ToString("yyyy-MM-dd"),
+            date = localDay.ToString("yyyy-MM-dd"),
             buckets
         });
     }
@@ -79,7 +98,11 @@ public class DeletedItemsController : ControllerBase
     {
         if (hour is < 0 or > 23) return BadRequest(new { message = "hour must be between 0 and 23." });
 
-        var bucketStart = date.Date.AddHours(hour);
+        // hour here is a LOCAL hour (see GetBuckets above) -- convert the
+        // whole [date 00:00local, date+1 00:00local) window's worth of UTC
+        // start, then offset by `hour` local hours, same fix as GetBuckets.
+        var (dayStartUtc, _) = LocalDayToUtcRange(date.Date);
+        var bucketStart = dayStartUtc.AddHours(hour);
         var bucketEnd = bucketStart.AddHours(1);
 
         var items = await _db.DeletedItemLogs.AsNoTracking()
@@ -200,7 +223,8 @@ public class DeletedItemsController : ControllerBase
     {
         if (hour is < 0 or > 23) return BadRequest(new { message = "hour must be between 0 and 23." });
 
-        var bucketStart = date.Date.AddHours(hour);
+        var (dayStartUtc, _) = LocalDayToUtcRange(date.Date);
+        var bucketStart = dayStartUtc.AddHours(hour);
         var bucketEnd = bucketStart.AddHours(1);
 
         var logs = await _db.DeletedItemLogs
