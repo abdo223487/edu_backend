@@ -68,7 +68,7 @@ public class StudentsController : ControllerBase
         if (student == null)
             return NotFound(new { message = "لا يوجد طالب مطابق لهذا الرقم ورقم ولي الأمر." });
 
-        var newPassword = GenerateTempPassword();
+        var newPassword = await GenerateTempPasswordAsync();
         student.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
         // REVOCATION: invalidate any access token issued before this reset —
         // otherwise whoever had the OLD password could keep using an
@@ -175,13 +175,16 @@ public class StudentsController : ControllerBase
             });
         }
 
-        var plainPassword = string.IsNullOrEmpty(request.Password) ? GenerateTempPassword() : request.Password;
+        var plainPassword = string.IsNullOrEmpty(request.Password) ? await GenerateTempPasswordAsync() : request.Password;
+        var resolvedUserName = string.IsNullOrEmpty(request.UserName)
+            ? await GenerateUniqueUserNameAsync()
+            : request.UserName;
         var student = new Student
         {
             Name = request.Name,
             PhoneNumber = request.PhoneNumber,
             ParentPhoneNumber = request.ParentPhoneNumber,
-            UserName = request.UserName,
+            UserName = resolvedUserName,
             PasswordHash = BCrypt.Net.BCrypt.HashPassword(plainPassword),
             GroupId = request.GroupId,
             SchoolYear = group.SchoolYear
@@ -762,9 +765,9 @@ public class StudentsController : ControllerBase
                     continue;
                 }
 
-                var plainPassword = string.IsNullOrEmpty(password) ? GenerateTempPassword() : password;
+                var plainPassword = string.IsNullOrEmpty(password) ? await GenerateTempPasswordAsync() : password;
                 var resolvedUserName = string.IsNullOrEmpty(userName)
-                    ? await GenerateUniqueUserNameAsync(phone)
+                    ? await GenerateUniqueUserNameAsync()
                     : userName;
                 var student = new Student
                 {
@@ -1127,7 +1130,7 @@ public class StudentsController : ControllerBase
         var student = await _db.Students.FirstOrDefaultAsync(e => e.Id == (studentId));
         if (student == null) return NotFound(new { message = "Student not found." });
 
-        var newPassword = GenerateTempPassword();
+        var newPassword = await GenerateTempPasswordAsync();
         student.PasswordHash = BCrypt.Net.BCrypt.HashPassword(newPassword);
         // REVOCATION: same reasoning as RecoverCredentials above.
         student.TokenVersion++;
@@ -2116,12 +2119,16 @@ public class StudentsController : ControllerBase
         // (201) as an orphaned row nobody can ever see — the teacher would be
         // told "saved" for a mark that isn't attached to any real student.
         // The Students query filter already scopes this to the current tenant.
-        if (!await _db.Students.AnyAsync(s => s.Id == request.StudentId))
+        // FIX: a teacher typing this by hand very often types the student's
+        // PHONE NUMBER instead of their internal id (they look the same to
+        // a human). Try it as an Id first, then fall back to PhoneNumber.
+        var resolvedStudentId = await ResolveManualStudentIdAsync(request.StudentId);
+        if (resolvedStudentId == null)
             return NotFound(new { message = "Student not found." });
 
         var result = new CenterQuizResult
         {
-            StudentId = request.StudentId,
+            StudentId = resolvedStudentId.Value,
             Title = "Center Quiz",
             Marks = request.Mark,
             TotalMarks = request.QuizTotalMarks,
@@ -2183,12 +2190,15 @@ public class StudentsController : ControllerBase
         // has no FK constraint, so a bad studentId would otherwise save
         // silently as an orphaned row and still be reported to the teacher
         // as a successful save.
-        if (!await _db.Students.AnyAsync(s => s.Id == request.StudentId))
+        // FIX: same Id-or-PhoneNumber fallback as AddCenterQuizResult — see
+        // ResolveManualStudentIdAsync.
+        var resolvedStudentId = await ResolveManualStudentIdAsync(request.StudentId);
+        if (resolvedStudentId == null)
             return NotFound(new { message = "Student not found." });
 
         var result = new HomeworkResult
         {
-            StudentId = request.StudentId,
+            StudentId = resolvedStudentId.Value,
             Title = "Homework",
             Marks = request.Mark,
             TotalMarks = request.TotalMarks,
@@ -2257,29 +2267,71 @@ public class StudentsController : ControllerBase
         return Ok(results);
     }
 
-    private static string GenerateTempPassword() => Guid.NewGuid().ToString("N")[..8];
+    // FIX: manual entry (typed studentId) treated the number as a hard
+    // student.Id lookup. In practice a teacher typing by hand very often
+    // types the STUDENT'S PHONE NUMBER instead of their internal id — the
+    // two look identical to them. Try it as an Id first, and if that
+    // misses, fall back to treating the same number as a PhoneNumber and
+    // resolve to that student's real Id. Same helper/behavior as
+    // AttendanceController.ResolveManualStudentIdAsync.
+    private async Task<int?> ResolveManualStudentIdAsync(int idOrPhone)
+    {
+        if (await _db.Students.AnyAsync(s => s.Id == idOrPhone))
+            return idOrPhone;
+
+        var byPhone = await _db.Students
+            .Where(s => s.PhoneNumber == idOrPhone.ToString())
+            .Select(s => (int?)s.Id)
+            .FirstOrDefaultAsync();
+
+        return byPhone;
+    }
+
+    // Both auto-generated UserName and Password are now 10-digit numeric
+    // strings (digits 0-9 only), e.g. "9878934576". This applies whenever a
+    // student is added without an explicit UserName/Password — via manual
+    // Create, Excel import, or Google Sheet import. If the teacher supplied
+    // their own UserName/Password, that value is kept exactly as given and
+    // none of this generation logic runs.
+    private static readonly Random _rng = new();
+
+    private static string GenerateNumericCode(int length = 10)
+    {
+        var chars = new char[length];
+        for (var i = 0; i < length; i++)
+            chars[i] = (char)('0' + _rng.Next(0, 10));
+        return new string(chars);
+    }
+
+    private async Task<string> GenerateTempPasswordAsync()
+    {
+        // No uniqueness constraint needed on Password (it's hashed and not
+        // looked up directly), but we still avoid an all-zero edge case.
+        string candidate;
+        do
+        {
+            candidate = GenerateNumericCode();
+        } while (candidate.All(c => c == '0'));
+
+        return candidate;
+    }
 
     // FIX: sheet/Google-Sheet imports leave UserName as NULL whenever the
     // sheet has no UserName column (it's optional). Login still works via
     // the PhoneNumber fallback, but the student ends up with no explicit
     // UserName on record and the welcome WhatsApp message shows their phone
     // number instead of a "real" username, which reads as broken/incomplete.
-    // This auto-generates a short, unique UserName from the student's phone
-    // number so the column is never left empty after an import.
-    private async Task<string> GenerateUniqueUserNameAsync(string phoneNumber)
+    // This auto-generates a unique 10-digit numeric UserName so the column
+    // is never left empty after an import (or a manual/Create add).
+    private async Task<string> GenerateUniqueUserNameAsync()
     {
-        var digits = new string(phoneNumber.Where(char.IsDigit).ToArray());
-        var tail = digits.Length >= 6 ? digits[^6..] : digits;
-        var baseUserName = $"std{tail}";
-
-        var candidate = baseUserName;
-        var suffix = 0;
-        while (await _db.Students.IgnoreQueryFilters()
-                   .AnyAsync(s => s.UserName == candidate || s.PhoneNumber == candidate))
+        string candidate;
+        do
         {
-            suffix++;
-            candidate = $"{baseUserName}{suffix}";
+            candidate = GenerateNumericCode();
         }
+        while (await _db.Students.IgnoreQueryFilters()
+                   .AnyAsync(s => s.UserName == candidate || s.PhoneNumber == candidate));
 
         return candidate;
     }

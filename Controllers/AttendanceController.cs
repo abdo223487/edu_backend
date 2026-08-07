@@ -67,11 +67,14 @@ public class AttendanceController : ControllerBase
         }
         else
         {
-            // Manual teacher-entry path: studentId is given directly, so just
-            // confirm it exists. We still store it as the "encoded" value too,
-            // since that column is required and a plain id is a valid QR payload.
+            // Manual teacher-entry path: studentId is given directly. Resolve
+            // it as either a real student Id or (fallback) that student's
+            // PhoneNumber — see ResolveManualStudentIdAsync. We still store
+            // the originally-typed value as the "encoded" value too, since
+            // that column is required and a plain id/phone is a valid QR
+            // payload shape.
             var id = request.StudentId!.Value;
-            studentId = await _db.Students.AnyAsync(s => s.Id == id) ? id : null;
+            studentId = await ResolveManualStudentIdAsync(id);
             encodedStudentId = id.ToString();
         }
 
@@ -159,10 +162,11 @@ public class AttendanceController : ControllerBase
             }
             else
             {
-                // Manual teacher-entry path: studentId is given directly, so just
-                // confirm it exists (same as the single Record endpoint).
+                // Manual teacher-entry path: studentId is given directly.
+                // Same Id-or-PhoneNumber fallback as the single Record
+                // endpoint — see ResolveManualStudentIdAsync.
                 var id = item.StudentId!.Value;
-                studentId = await _db.Students.IgnoreQueryFilters().AnyAsync(s => s.Id == id) ? id : null;
+                studentId = await ResolveManualStudentIdAsync(id);
                 encodedStudentId = id.ToString();
             }
 
@@ -257,6 +261,28 @@ public class AttendanceController : ControllerBase
     // exactly as if they'd redeemed a one-off code themselves, without ever
     // exposing a shared code string another student could grab. Visible to
     // the student via Students/codes (GetStudentCodes); never to anyone else.
+    // FIX: manual entry (typed studentId, not scanned via QR) treated the
+    // number as a hard student.Id lookup. In practice a teacher typing by
+    // hand very often types the STUDENT'S PHONE NUMBER instead of their
+    // internal id — the two look identical to them. Previously that just
+    // failed as "Student not found." Now: try it as an Id first, and if
+    // that misses, fall back to treating the same number as a PhoneNumber
+    // and resolve to that student's real Id. IgnoreQueryFilters so this
+    // still works the same way manual-entry lookups already did (matches
+    // any tenant, same as the existing Id check above).
+    private async Task<int?> ResolveManualStudentIdAsync(int idOrPhone)
+    {
+        if (await _db.Students.IgnoreQueryFilters().AnyAsync(s => s.Id == idOrPhone))
+            return idOrPhone;
+
+        var byPhone = await _db.Students.IgnoreQueryFilters()
+            .Where(s => s.PhoneNumber == idOrPhone.ToString())
+            .Select(s => (int?)s.Id)
+            .FirstOrDefaultAsync();
+
+        return byPhone;
+    }
+
     private async Task IssueTriggeredCodesAsync(int lectureId, int studentId)
     {
         var templates = await _db.Codes
