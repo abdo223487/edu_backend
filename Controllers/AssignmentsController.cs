@@ -103,11 +103,27 @@ public class AssignmentsController : ControllerBase
 
     // Multipart create — Title, GroupIds[i], UnitIds[i], Deadline,
     // Questions[i][type|text|answer|mark|choices[j]], Questions[i].image (file)
+    //
+    // SUPERADMIN: also allowed here so a SuperAdmin can create an assignment
+    // "on behalf of" a specific teacher (e.g. from a Google Form the teacher
+    // sent instead of filling the questions in-app themselves). Which teacher
+    // is picked the same way it is for Material: the SuperAdmin sends
+    // X-TenantId = that teacher's id, resolved via ITenantContext below —
+    // NOT via User.GetStaffTenantId(), which is only ever populated for
+    // Teacher/Assistant/AssistantAdmin tokens and is always null for
+    // SuperAdmin (see ClaimsExtensions.GetStaffTenantId).
     [HttpPost]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     [Consumes("multipart/form-data")]
     public async Task<IActionResult> Create()
     {
+        // Resolve the target teacher up front so we can 400 cleanly instead of
+        // crashing on ".Value" — a SuperAdmin who forgets to send X-TenantId
+        // (or sends a bad one) has CurrentTenantId == null, same as any other
+        // unresolved-tenant request.
+        if (_tenant.CurrentTenantId == null)
+            return BadRequest(new { message = "No teacher selected. Send X-TenantId with the target teacher's id." });
+
         var form = await Request.ReadFormAsync();
 
         var title = form["Title"].ToString();
@@ -135,7 +151,12 @@ public class AssignmentsController : ControllerBase
             GroupIds = groupIds,
             UnitIds = unitIds,
             SchoolYear = schoolYear,
-            TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+            // TENANT LAYER: _tenant.CurrentTenantId is the correct source for
+            // BOTH cases now — for Teacher/AssistantAdmin it's the same value
+            // GetStaffTenantId() would give (ITenantContext falls back to it
+            // internally), and for SuperAdmin it's whichever teacher was
+            // picked via X-TenantId (GetStaffTenantId() would be null here).
+            TeacherId = _tenant.CurrentTenantId!.Value
         };
 
         for (var i = 0; form.ContainsKey($"Questions[{i}][type]"); i++)
@@ -167,7 +188,7 @@ public class AssignmentsController : ControllerBase
     }
 
     [HttpGet("as-teacher/{assignmentId:int}")]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> GetAsTeacher(int assignmentId)
     {
         var assignment = await _db.Assignments.AsNoTracking().Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == assignmentId);
@@ -310,7 +331,7 @@ public class AssignmentsController : ControllerBase
     }
 
     [HttpGet("takers")]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> GetTakers([FromQuery] int assignmentId)
     {
         var assignment = await _db.Assignments.AsNoTracking().FirstOrDefaultAsync(a => a.Id == assignmentId);
@@ -345,7 +366,7 @@ public class AssignmentsController : ControllerBase
     // Teacher-only detail view for a specific student's submission — teachers
     // always see the correct answer, regardless of the Deadline.
     [HttpGet("student-answers")]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> GetStudentAnswers([FromQuery] int assignmentId, [FromQuery] int studentId)
     {
         var assignment = await _db.Assignments.AsNoTracking().Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == assignmentId);
@@ -382,7 +403,7 @@ public class AssignmentsController : ControllerBase
     }
 
     [HttpPost("change-mark")]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> ChangeMark([FromBody] ChangeAssignmentMarkRequest request)
     {
         var submission = await _db.AssignmentSubmissions.Include(s => s.Answers)
@@ -401,7 +422,7 @@ public class AssignmentsController : ControllerBase
     }
 
     [HttpPost("delete/{assignmentId:int}")]
-    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> Delete(int assignmentId)
     {
         var assignment = await _db.Assignments.FirstOrDefaultAsync(a => a.Id == assignmentId);
