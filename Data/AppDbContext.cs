@@ -46,6 +46,10 @@ public class AppDbContext : DbContext
     public DbSet<AssignmentQuestion> AssignmentQuestions => Set<AssignmentQuestion>();
     public DbSet<AssignmentSubmission> AssignmentSubmissions => Set<AssignmentSubmission>();
     public DbSet<AssignmentAnswer> AssignmentAnswers => Set<AssignmentAnswer>();
+    public DbSet<AssignmentCenter> AssignmentCenters => Set<AssignmentCenter>();
+    public DbSet<AssignmentCenterQuestion> AssignmentCenterQuestions => Set<AssignmentCenterQuestion>();
+    public DbSet<AssignmentCenterSubmission> AssignmentCenterSubmissions => Set<AssignmentCenterSubmission>();
+    public DbSet<AssignmentCenterAnswer> AssignmentCenterAnswers => Set<AssignmentCenterAnswer>();
     public DbSet<BankQuestion> BankQuestions => Set<BankQuestion>();
     public DbSet<BankAttempt> BankAttempts => Set<BankAttempt>();
     public DbSet<BankAttemptQuestion> BankAttemptQuestions => Set<BankAttemptQuestion>();
@@ -62,6 +66,8 @@ public class AppDbContext : DbContext
     public DbSet<LectureGroupLink> LectureGroupLinks => Set<LectureGroupLink>();
     public DbSet<AssignmentGroupLink> AssignmentGroupLinks => Set<AssignmentGroupLink>();
     public DbSet<AssignmentUnitLink> AssignmentUnitLinks => Set<AssignmentUnitLink>();
+    public DbSet<AssignmentCenterGroupLink> AssignmentCenterGroupLinks => Set<AssignmentCenterGroupLink>();
+    public DbSet<AssignmentCenterUnitLink> AssignmentCenterUnitLinks => Set<AssignmentCenterUnitLink>();
     public DbSet<NotificationGroupLink> NotificationGroupLinks => Set<NotificationGroupLink>();
     public DbSet<QuizGroupLink> QuizGroupLinks => Set<QuizGroupLink>();
 
@@ -99,6 +105,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Notification>().HasQueryFilter(n => n.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Quiz>().HasQueryFilter(q => q.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Assignment>().HasQueryFilter(a => a.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<AssignmentCenter>().HasQueryFilter(a => a.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<BankQuestion>().HasQueryFilter(bq => bq.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<BankAttempt>().HasQueryFilter(ba => ba.TeacherId == _tenant.CurrentTenantId);
 
@@ -123,6 +130,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Notification>().HasIndex(n => n.TeacherId);
         modelBuilder.Entity<Quiz>().HasIndex(q => q.TeacherId);
         modelBuilder.Entity<Assignment>().HasIndex(a => a.TeacherId);
+        modelBuilder.Entity<AssignmentCenter>().HasIndex(a => a.TeacherId);
         modelBuilder.Entity<BankQuestion>().HasIndex(bq => bq.TeacherId);
         modelBuilder.Entity<BankAttempt>().HasIndex(ba => ba.TeacherId);
 
@@ -161,6 +169,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Attendance>().HasQueryFilter(a => a.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Dismissal>().HasQueryFilter(d => d.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<AssignmentSubmission>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<AssignmentCenterSubmission>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<NotebookPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<BillingPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentLectureUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
@@ -169,6 +178,7 @@ public class AppDbContext : DbContext
 
         modelBuilder.Entity<Attendance>().HasIndex(a => a.TeacherId);
         modelBuilder.Entity<AssignmentSubmission>().HasIndex(s => s.TeacherId);
+        modelBuilder.Entity<AssignmentCenterSubmission>().HasIndex(s => s.TeacherId);
         modelBuilder.Entity<NotebookPayment>().HasIndex(p => p.TeacherId);
         modelBuilder.Entity<BillingPayment>().HasIndex(p => p.TeacherId);
         modelBuilder.Entity<StudentLectureUnlock>().HasIndex(u => u.TeacherId);
@@ -280,6 +290,22 @@ public class AppDbContext : DbContext
             .HasIndex(s => new { s.AssignmentId, s.StudentId })
             .IsUnique();
 
+        modelBuilder.Entity<AssignmentCenterQuestion>()
+            .HasOne(q => q.AssignmentCenter)
+            .WithMany(a => a.Questions)
+            .HasForeignKey(q => q.AssignmentCenterId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<AssignmentCenterAnswer>()
+            .HasOne(a => a.AssignmentCenterSubmission)
+            .WithMany(s => s.Answers)
+            .HasForeignKey(a => a.AssignmentCenterSubmissionId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<AssignmentCenterSubmission>()
+            .HasIndex(s => new { s.AssignmentCenterId, s.StudentId })
+            .IsUnique();
+
         modelBuilder.Entity<StudentLectureUnlock>()
             .HasIndex(u => new { u.StudentId, u.LectureId })
             .IsUnique();
@@ -326,6 +352,16 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<AssignmentUnitLink>().HasIndex(x => new { x.AssignmentId, x.UnitId }).IsUnique();
         modelBuilder.Entity<AssignmentUnitLink>().HasIndex(x => x.UnitId);
 
+        modelBuilder.Entity<AssignmentCenterGroupLink>()
+            .HasOne<AssignmentCenter>().WithMany().HasForeignKey(x => x.AssignmentCenterId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<AssignmentCenterGroupLink>().HasIndex(x => new { x.AssignmentCenterId, x.GroupId }).IsUnique();
+        modelBuilder.Entity<AssignmentCenterGroupLink>().HasIndex(x => x.GroupId);
+
+        modelBuilder.Entity<AssignmentCenterUnitLink>()
+            .HasOne<AssignmentCenter>().WithMany().HasForeignKey(x => x.AssignmentCenterId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<AssignmentCenterUnitLink>().HasIndex(x => new { x.AssignmentCenterId, x.UnitId }).IsUnique();
+        modelBuilder.Entity<AssignmentCenterUnitLink>().HasIndex(x => x.UnitId);
+
         modelBuilder.Entity<NotificationGroupLink>()
             .HasOne<Notification>().WithMany().HasForeignKey(x => x.NotificationId).OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<NotificationGroupLink>().HasIndex(x => new { x.NotificationId, x.GroupId }).IsUnique();
@@ -365,7 +401,7 @@ public class AppDbContext : DbContext
         var touched = ChangeTracker.Entries()
             .Where(e => e.State is EntityState.Added or EntityState.Modified)
             .Select(e => e.Entity)
-            .Where(e => e is Lecture or Assignment or Notification or Quiz)
+            .Where(e => e is Lecture or Assignment or AssignmentCenter or Notification or Quiz)
             .ToList();
 
         // SUPERADMIN DELETED-ITEMS FEATURE: must run BEFORE base.SaveChangesAsync
@@ -395,6 +431,16 @@ public class AppDbContext : DbContext
                         await AssignmentUnitLinks.Where(x => x.AssignmentId == a.Id).ExecuteDeleteAsync(cancellationToken);
                         if (a.UnitIds.Count > 0)
                             AssignmentUnitLinks.AddRange(a.UnitIds.Distinct().Select(uid => new AssignmentUnitLink { AssignmentId = a.Id, UnitId = uid }));
+                        break;
+
+                    case AssignmentCenter ac:
+                        await AssignmentCenterGroupLinks.Where(x => x.AssignmentCenterId == ac.Id).ExecuteDeleteAsync(cancellationToken);
+                        if (ac.GroupIds.Count > 0)
+                            AssignmentCenterGroupLinks.AddRange(ac.GroupIds.Distinct().Select(gid => new AssignmentCenterGroupLink { AssignmentCenterId = ac.Id, GroupId = gid }));
+
+                        await AssignmentCenterUnitLinks.Where(x => x.AssignmentCenterId == ac.Id).ExecuteDeleteAsync(cancellationToken);
+                        if (ac.UnitIds.Count > 0)
+                            AssignmentCenterUnitLinks.AddRange(ac.UnitIds.Distinct().Select(uid => new AssignmentCenterUnitLink { AssignmentCenterId = ac.Id, UnitId = uid }));
                         break;
 
                     case Notification n:
