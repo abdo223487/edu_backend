@@ -931,7 +931,7 @@ public class StudentsController : ControllerBase
 
     private enum StudentStatusFilter { Active, Suspended, Cancelled }
 
-    private record StudentRow(int Id, string Name, string? PhoneNumber, string? UserName, int? GroupId);
+    private record StudentRow(int Id, string Name, string? PhoneNumber, string? UserName, int GroupId);
 
     // ARABIC-AWARE SEARCH: Arabic has several letters that get typed
     // interchangeably by real users depending on keyboard/habit/dialect --
