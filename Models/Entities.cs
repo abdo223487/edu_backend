@@ -793,7 +793,9 @@ public class CenterQuizResult
     public int Id { get; set; }
     public int StudentId { get; set; }
     public string Title { get; set; } = default!;
-    public int Marks { get; set; }
+    // decimal so a teacher can enter half marks (e.g. 9.5), not just whole
+    // numbers. Stored/serialized as-is: 9 stays 9, 9.5 stays 9.5.
+    public decimal Marks { get; set; }
     public int TotalMarks { get; set; }
     public DateTime Date { get; set; } = DateTime.UtcNow;
 
@@ -811,7 +813,9 @@ public class HomeworkResult
     public int Id { get; set; }
     public int StudentId { get; set; }
     public string Title { get; set; } = default!;
-    public int Marks { get; set; }
+    // decimal so a teacher can enter half marks (e.g. 9.5), not just whole
+    // numbers. Stored/serialized as-is: 9 stays 9, 9.5 stays 9.5.
+    public decimal Marks { get; set; }
     public int TotalMarks { get; set; }
     public DateTime Date { get; set; } = DateTime.UtcNow;
 

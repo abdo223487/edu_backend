@@ -14,14 +14,18 @@ namespace EduApi.Controllers;
 // "autoSubscribe": when true and the lecture has a UnitId, recording this
 // student's attendance also subscribes them to that Unit (if not already
 // subscribed). Decided per-request/per-student, not per-lecture.
-public record RecordAttendanceRequest(string? EncodedStudentId, int? StudentId, DateTime? Date, bool AutoSubscribe = false);
+// StudentIdentifier (optional): a hand-typed ID, phone number, or name for
+// the manual-entry path -- see StudentIdentifierResolver. When present it
+// takes priority over StudentId, which stays available for backward
+// compatibility with older clients that only ever send the numeric id.
+public record RecordAttendanceRequest(string? EncodedStudentId, int? StudentId, DateTime? Date, bool AutoSubscribe = false, string? StudentIdentifier = null);
 
 // POST Attendance/bulk?lectureId=..  body: [ { encodedStudentId, date, autoSubscribe }, ... ]
 // OR [ { studentId, date, autoSubscribe }, ... ] — same encodedStudentId/studentId
 // duality as the single Record endpoint, decided per item.
 // "autoSubscribe" is per-item, so a single bulk call can open the lecture's
 // Unit for some students and not others.
-public record BulkAttendanceItem(string? EncodedStudentId, int? StudentId, DateTime Date, bool AutoSubscribe = false);
+public record BulkAttendanceItem(string? EncodedStudentId, int? StudentId, DateTime Date, bool AutoSubscribe = false, string? StudentIdentifier = null);
 
 /// <summary>
 /// Route: api/Attendance
@@ -53,8 +57,8 @@ public class AttendanceController : ControllerBase
     {
         if (_tenant.CurrentTenantId == null) return Forbid();
 
-        if (string.IsNullOrWhiteSpace(request.EncodedStudentId) && request.StudentId == null)
-            return BadRequest(new { message = "Either encodedStudentId or studentId must be provided." });
+        if (string.IsNullOrWhiteSpace(request.EncodedStudentId) && request.StudentId == null && string.IsNullOrWhiteSpace(request.StudentIdentifier))
+            return BadRequest(new { message = "Either encodedStudentId or studentId/studentIdentifier must be provided." });
 
         int? studentId;
         string encodedStudentId;
@@ -67,15 +71,18 @@ public class AttendanceController : ControllerBase
         }
         else
         {
-            // Manual teacher-entry path: studentId is given directly. Resolve
-            // it as either a real student Id or (fallback) that student's
-            // PhoneNumber — see ResolveManualStudentIdAsync. We still store
-            // the originally-typed value as the "encoded" value too, since
-            // that column is required and a plain id/phone is a valid QR
-            // payload shape.
-            var id = request.StudentId!.Value;
-            studentId = await ResolveManualStudentIdAsync(id);
-            encodedStudentId = id.ToString();
+            // Manual teacher-entry path: StudentIdentifier (a hand-typed ID,
+            // phone number, or name -- used by the offline attendance flow)
+            // resolves via ResolveManualStudentIdAsync; older clients that
+            // only send the numeric StudentId keep working via the
+            // fallback. We still store the originally-typed value as the
+            // "encoded" value too, since that column is required and a
+            // plain id/phone/name is a valid QR payload shape.
+            var identifier = !string.IsNullOrWhiteSpace(request.StudentIdentifier)
+                ? request.StudentIdentifier
+                : request.StudentId!.Value.ToString();
+            studentId = await ResolveManualStudentIdAsync(identifier);
+            encodedStudentId = identifier;
         }
 
         if (studentId == null) return NotFound(new { message = "Student not found for this code." });
@@ -131,6 +138,15 @@ public class AttendanceController : ControllerBase
         // missing/duplicate student id here used to be silently skipped
         // and reported back to the teacher as "uploaded successfully".
         var savedStudentIds = new List<int>();
+        // Same content as savedStudentIds but keyed to whatever the CALLER
+        // originally sent for each saved item (their StudentIdentifier, or
+        // numeric StudentId, or raw encoded payload -- same value as
+        // "requestedId" below) instead of the resolved DB id. Needed because
+        // a manually-typed identifier (phone/name) does not equal the
+        // resolved Student.Id, so the offline client can't reconcile its
+        // local cache against savedStudentIds alone once StudentIdentifier
+        // is in use.
+        var savedIdentifiers = new List<object>();
         var failed = new List<object>();
 
         // VALIDATION: same school-year check as the single Record endpoint,
@@ -140,14 +156,16 @@ public class AttendanceController : ControllerBase
         foreach (var item in items)
         {
             // "requestedId" is whatever identifies this item to the caller
-            // (their own studentId if given, otherwise the raw encoded
-            // payload) so a failure can still be reported back even when we
-            // never manage to resolve it to a real student id.
-            object requestedId = item.StudentId.HasValue ? item.StudentId.Value : (item.EncodedStudentId ?? "");
+            // (their own StudentIdentifier/studentId if given, otherwise the
+            // raw encoded payload) so a failure can still be reported back
+            // even when we never manage to resolve it to a real student id.
+            object requestedId = !string.IsNullOrWhiteSpace(item.StudentIdentifier)
+                ? item.StudentIdentifier
+                : item.StudentId.HasValue ? item.StudentId.Value : (item.EncodedStudentId ?? "");
 
-            if (string.IsNullOrWhiteSpace(item.EncodedStudentId) && item.StudentId == null)
+            if (string.IsNullOrWhiteSpace(item.EncodedStudentId) && item.StudentId == null && string.IsNullOrWhiteSpace(item.StudentIdentifier))
             {
-                failed.Add(new { studentId = requestedId, reason = "Missing encodedStudentId/studentId." });
+                failed.Add(new { studentId = requestedId, reason = "Missing encodedStudentId/studentId/studentIdentifier." });
                 continue;
             }
 
@@ -162,12 +180,16 @@ public class AttendanceController : ControllerBase
             }
             else
             {
-                // Manual teacher-entry path: studentId is given directly.
-                // Same Id-or-PhoneNumber fallback as the single Record
-                // endpoint — see ResolveManualStudentIdAsync.
-                var id = item.StudentId!.Value;
-                studentId = await ResolveManualStudentIdAsync(id);
-                encodedStudentId = id.ToString();
+                // Manual teacher-entry path: StudentIdentifier (a hand-typed
+                // ID, phone number, or name -- used by the offline bulk sync
+                // flow) resolves via ResolveManualStudentIdAsync; older
+                // clients that only send the numeric StudentId keep working
+                // via the fallback.
+                var identifier = !string.IsNullOrWhiteSpace(item.StudentIdentifier)
+                    ? item.StudentIdentifier
+                    : item.StudentId!.Value.ToString();
+                studentId = await ResolveManualStudentIdAsync(identifier);
+                encodedStudentId = identifier;
             }
 
             if (studentId == null)
@@ -205,6 +227,7 @@ public class AttendanceController : ControllerBase
             await IssueTriggeredCodesAsync(lectureId, studentId.Value);
             notifyList.Add((studentId.Value, item.Date));
             savedStudentIds.Add(studentId.Value);
+            savedIdentifiers.Add(requestedId);
             created++;
         }
 
@@ -219,6 +242,7 @@ public class AttendanceController : ControllerBase
             saved = created,
             total = items.Count,
             savedStudentIds,
+            savedIdentifiers,
             failed
         });
     }
@@ -263,25 +287,15 @@ public class AttendanceController : ControllerBase
     // the student via Students/codes (GetStudentCodes); never to anyone else.
     // FIX: manual entry (typed studentId, not scanned via QR) treated the
     // number as a hard student.Id lookup. In practice a teacher typing by
-    // hand very often types the STUDENT'S PHONE NUMBER instead of their
-    // internal id — the two look identical to them. Previously that just
-    // failed as "Student not found." Now: try it as an Id first, and if
-    // that misses, fall back to treating the same number as a PhoneNumber
-    // and resolve to that student's real Id. IgnoreQueryFilters so this
-    // still works the same way manual-entry lookups already did (matches
-    // any tenant, same as the existing Id check above).
-    private async Task<int?> ResolveManualStudentIdAsync(int idOrPhone)
-    {
-        if (await _db.Students.IgnoreQueryFilters().AnyAsync(s => s.Id == idOrPhone))
-            return idOrPhone;
-
-        var byPhone = await _db.Students.IgnoreQueryFilters()
-            .Where(s => s.PhoneNumber == idOrPhone.ToString())
-            .Select(s => (int?)s.Id)
-            .FirstOrDefaultAsync();
-
-        return byPhone;
-    }
+    // hand very often types the STUDENT'S PHONE NUMBER — or even their name
+    // — instead of their internal id. This now goes through the shared
+    // StudentIdentifierResolver (ID -> PhoneNumber -> Arabic-normalized
+    // name; see its doc comment), called with ignoreTenantFilter: true to
+    // preserve this method's original cross-tenant behavior (a manually
+    // entered identifier can resolve to a student under ANY tenant, same
+    // as the existing Id check always did here).
+    private Task<int?> ResolveManualStudentIdAsync(string? identifier)
+        => Common.StudentIdentifierResolver.ResolveAsync(_db, identifier, ignoreTenantFilter: true);
 
     private async Task IssueTriggeredCodesAsync(int lectureId, int studentId)
     {
@@ -378,11 +392,17 @@ public class AttendanceController : ControllerBase
                 .OrderByDescending(q => q.GradedAt)
                 .Select(q => new { Text = $"{q.Score}/{q.TotalMarks}", When = q.GradedAt })
                 .FirstOrDefaultAsync();
-            var lastCenterQuiz = await _db.CenterQuizResults.AsNoTracking()
+            var lastCenterQuizRaw = await _db.CenterQuizResults.AsNoTracking()
                 .Where(q => q.StudentId == studentId)
                 .OrderByDescending(q => q.Date)
-                .Select(q => new { Text = $"{q.Title}: {q.Marks}/{q.TotalMarks}", When = q.Date })
+                .Select(q => new { q.Title, q.Marks, q.TotalMarks, q.Date })
                 .FirstOrDefaultAsync();
+            // Formatted in memory (not inside the SQL-translated Select above)
+            // because MarksFormatter isn't translatable to SQL -- it just
+            // trims a whole mark's trailing ".0" (9.0 -> "9", 9.5 stays "9.5").
+            var lastCenterQuiz = lastCenterQuizRaw == null
+                ? null
+                : new { Text = $"{lastCenterQuizRaw.Title}: {MarksFormatter.Format(lastCenterQuizRaw.Marks)}/{lastCenterQuizRaw.TotalMarks}", When = lastCenterQuizRaw.Date };
             var lastGradeCandidates = new[] { lastQuiz, lastCenterQuiz }
                 .Where(x => x != null)
                 .OrderByDescending(x => x!.When)
@@ -390,11 +410,14 @@ public class AttendanceController : ControllerBase
             var lastGradeText = lastGradeCandidates.FirstOrDefault()?.Text ?? "لا يوجد";
 
             // Last homework: most recent of HomeworkResult / AssignmentSubmission.
-            var lastHomework = await _db.HomeworkResults.AsNoTracking()
+            var lastHomeworkRaw = await _db.HomeworkResults.AsNoTracking()
                 .Where(h => h.StudentId == studentId)
                 .OrderByDescending(h => h.Date)
-                .Select(h => new { Text = $"{h.Title}: {h.Marks}/{h.TotalMarks}", When = h.Date })
+                .Select(h => new { h.Title, h.Marks, h.TotalMarks, h.Date })
                 .FirstOrDefaultAsync();
+            var lastHomework = lastHomeworkRaw == null
+                ? null
+                : new { Text = $"{lastHomeworkRaw.Title}: {MarksFormatter.Format(lastHomeworkRaw.Marks)}/{lastHomeworkRaw.TotalMarks}", When = lastHomeworkRaw.Date };
             var lastAssignment = await _db.AssignmentSubmissions.AsNoTracking()
                 .Where(a => a.StudentId == studentId)
                 .OrderByDescending(a => a.SubmittedAt)

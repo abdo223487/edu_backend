@@ -493,8 +493,8 @@ namespace EduApi.Migrations
                     b.Property<DateTime>("Date")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<int>("Marks")
-                        .HasColumnType("integer");
+                    b.Property<decimal>("Marks")
+                        .HasColumnType("numeric(5,1)");
 
                     b.Property<int>("StudentId")
                         .HasColumnType("integer");
@@ -692,8 +692,8 @@ namespace EduApi.Migrations
                     b.Property<DateTime>("Date")
                         .HasColumnType("timestamp with time zone");
 
-                    b.Property<int>("Marks")
-                        .HasColumnType("integer");
+                    b.Property<decimal>("Marks")
+                        .HasColumnType("numeric(5,1)");
 
                     b.Property<int>("StudentId")
                         .HasColumnType("integer");

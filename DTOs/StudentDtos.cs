@@ -37,14 +37,20 @@ public record LinkStudentRequest(string PhoneNumber, int GroupId, List<int>? Uni
 public record RedeemCodeRequest(string Code);
 
 // POST Students/{notebookId}/pay body: { studentId, amount, lectureId }
-public record PayNotebookRequest(int StudentId, int Amount, int? LectureId);
-public record PayBillingRequest(int StudentId, int Amount, int? LectureId);
+// StudentIdentifier (optional): a hand-typed ID, phone number, or name --
+// see StudentIdentifierResolver. When present it takes priority over
+// StudentId, which stays required for backward compatibility with older
+// clients that only ever send the numeric id.
+public record PayNotebookRequest(int StudentId, int Amount, int? LectureId, string? StudentIdentifier = null);
+public record PayBillingRequest(int StudentId, int Amount, int? LectureId, string? StudentIdentifier = null);
 
 // POST Students/quiz-results/center/add body: { studentId, quizTotalMarks, mark }
-public record AddCenterQuizResultRequest(int StudentId, int QuizTotalMarks, int Mark);
+// Mark is decimal so a teacher can send half marks, e.g. 9.5.
+public record AddCenterQuizResultRequest(int StudentId, int QuizTotalMarks, decimal Mark, string? StudentIdentifier = null);
 
 // POST Students/homework-results/add body: { studentId, totalMarks, mark }
-public record AddHomeworkResultRequest(int StudentId, int TotalMarks, int Mark);
+// Mark is decimal so a teacher can send half marks, e.g. 9.5.
+public record AddHomeworkResultRequest(int StudentId, int TotalMarks, decimal Mark, string? StudentIdentifier = null);
 
 public record QrCodeResponse(string StudentId, string QrPayload);
 

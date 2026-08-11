@@ -92,9 +92,9 @@ public class AnalyticsController : ControllerBase
                 id = s.Id,
                 name = s.Name,
                 groupName = s.GroupName,
-                lastQuizMarks = lastQuiz != null ? $"{lastQuiz.Marks}/{lastQuiz.TotalMarks}" : null,
+                lastQuizMarks = lastQuiz != null ? $"{MarksFormatter.Format(lastQuiz.Marks)}/{lastQuiz.TotalMarks}" : null,
                 lastQuizResultId = lastQuiz?.Id,
-                lastHomeworkMarks = lastHomework != null ? $"{lastHomework.Marks}/{lastHomework.TotalMarks}" : null,
+                lastHomeworkMarks = lastHomework != null ? $"{MarksFormatter.Format(lastHomework.Marks)}/{lastHomework.TotalMarks}" : null,
                 lastHomeworkResultId = lastHomework?.Id
             };
         }).ToList();
@@ -134,11 +134,11 @@ public class AnalyticsController : ControllerBase
             var resultsForStudent = allResults.Where(r => r.StudentId == s.Id).ToList();
             if (resultsForStudent.Count == 0) continue;
 
-            var averagePercent = resultsForStudent.Average(r => r.TotalMarks > 0 ? r.Marks * 100.0 / r.TotalMarks : 0);
+            var averagePercent = resultsForStudent.Average(r => r.TotalMarks > 0 ? (double)r.Marks * 100.0 / r.TotalMarks : 0);
             if (averagePercent >= passMarkPercent) continue;
 
             var lastQuiz = resultsForStudent.OrderByDescending(r => r.Date).First();
-            var failedCount = resultsForStudent.Count(r => r.TotalMarks > 0 && (r.Marks * 100.0 / r.TotalMarks) < passMarkPercent);
+            var failedCount = resultsForStudent.Count(r => r.TotalMarks > 0 && ((double)r.Marks * 100.0 / r.TotalMarks) < passMarkPercent);
 
             items.Add(new
             {
@@ -146,7 +146,7 @@ public class AnalyticsController : ControllerBase
                 groupName = s.GroupName,
                 averageMarks = Math.Round(averagePercent, 1),
                 failedQuizzesCount = failedCount,
-                lastQuizMarks = $"{lastQuiz.Marks}/{lastQuiz.TotalMarks}"
+                lastQuizMarks = $"{MarksFormatter.Format(lastQuiz.Marks)}/{lastQuiz.TotalMarks}"
             });
         }
 
@@ -190,7 +190,7 @@ public class AnalyticsController : ControllerBase
             {
                 var resultsForStudent = allResultsByStudent.Where(r => r.StudentId == t.StudentId).ToList();
                 var averagePercent = resultsForStudent.Count == 0 ? 0 :
-                    resultsForStudent.Average(r => r.TotalMarks > 0 ? r.Marks * 100.0 / r.TotalMarks : 0);
+                    resultsForStudent.Average(r => r.TotalMarks > 0 ? (double)r.Marks * 100.0 / r.TotalMarks : 0);
                 var lastQuiz = resultsForStudent.OrderByDescending(r => r.Date).FirstOrDefault();
 
                 return new
@@ -201,7 +201,7 @@ public class AnalyticsController : ControllerBase
                     groupName = students[t.StudentId].GroupName,
                     totalMarks = t.TotalMarks,
                     averageMarks = Math.Round(averagePercent, 1),
-                    lastQuizMarks = lastQuiz != null ? $"{lastQuiz.Marks}/{lastQuiz.TotalMarks}" : null
+                    lastQuizMarks = lastQuiz != null ? $"{MarksFormatter.Format(lastQuiz.Marks)}/{lastQuiz.TotalMarks}" : null
                 };
             });
 

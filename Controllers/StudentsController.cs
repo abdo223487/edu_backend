@@ -933,42 +933,12 @@ public class StudentsController : ControllerBase
 
     private record StudentRow(int Id, string Name, string? PhoneNumber, string? UserName, int GroupId);
 
-    // ARABIC-AWARE SEARCH: Arabic has several letters that get typed
-    // interchangeably by real users depending on keyboard/habit/dialect --
-    // e.g. a name spelled "أحمد" in the database should still be found by a
-    // teacher searching "احمد". This maps every "shape variant" of a letter
-    // down to one canonical form (and strips tashkeel/diacritics, which are
-    // often present in imported data but never typed in a search box) before
-    // comparing, so the two spellings become byte-identical:
-    //   - أ / إ / آ / ٱ  -> ا   (any hamza-on-alef, or alef wasla)
-    //   - ة              -> ه   (taa marbuta / haa)
-    //   - ى / ئ          -> ي   (alef maksura / yaa with hamza -> yaa)
-    //   - ؤ              -> و   (waw with hamza -> waw)
-    private static readonly Dictionary<char, char> ArabicNormalizationMap = new()
-    {
-        ['أ'] = 'ا', ['إ'] = 'ا', ['آ'] = 'ا', ['ٱ'] = 'ا',
-        ['ة'] = 'ه',
-        ['ى'] = 'ي', ['ئ'] = 'ي',
-        ['ؤ'] = 'و',
-    };
-
-    private static string NormalizeArabic(string? input)
-    {
-        if (string.IsNullOrEmpty(input)) return string.Empty;
-
-        var sb = new StringBuilder(input.Length);
-        foreach (var ch in input)
-        {
-            // Strip Arabic diacritics/tashkeel (fatha, damma, kasra, shadda,
-            // sukun, tanween, superscript alef) -- these are never part of
-            // what someone types when searching.
-            if (ch is >= '\u064B' and <= '\u0652' or '\u0670')
-                continue;
-
-            sb.Append(ArabicNormalizationMap.TryGetValue(ch, out var mapped) ? mapped : ch);
-        }
-        return sb.ToString().Trim();
-    }
+    // ARABIC-AWARE SEARCH: delegates to the same NormalizeArabic used by
+    // StudentIdentifierResolver (grades/payments/attendance manual entry),
+    // so a name search here and a hand-typed identifier resolve elsewhere
+    // treat letter-shape variants (أ/إ/آ vs ا, ة vs ه, ى/ئ vs ي, ؤ vs و)
+    // identically instead of drifting out of sync.
+    private static string NormalizeArabic(string? input) => Common.StudentIdentifierResolver.NormalizeArabic(input);
 
     // PER-TENANT FIX: statusFilter now runs against StudentGroupMembership
     // (IsSuspended/IsCancelled per teacher-relationship), not against a global
@@ -1649,14 +1619,22 @@ public class StudentsController : ControllerBase
         var notebook = await _db.Notebooks.FirstOrDefaultAsync(e => e.Id == (notebookId));
         if (notebook == null) return NotFound(new { message = "Notebook not found." });
 
-        // SAFETY: make sure request.StudentId is actually a real student who
-        // belongs to a group this notebook targets, under the CURRENT tenant.
-        // StudentGroupMemberships already carries a tenant query filter, so
-        // this can't match a membership from another teacher. Without this
-        // check a stale/incorrect StudentId from the client would silently
+        // FIX: StudentIdentifier (a hand-typed ID, phone number, or name --
+        // used by the offline payment flow) resolves via
+        // ResolveManualStudentIdAsync; older clients that only send the
+        // numeric StudentId keep working via the fallback.
+        var resolvedStudentId = await ResolveManualStudentIdAsync(request.StudentIdentifier, request.StudentId);
+        if (resolvedStudentId == null)
+            return NotFound(new { message = "Student not found." });
+
+        // SAFETY: make sure the resolved student actually belongs to a group
+        // this notebook targets, under the CURRENT tenant. StudentGroupMemberships
+        // already carries a tenant query filter, so this can't match a
+        // membership from another teacher. Without this check a
+        // stale/incorrect/mistyped identifier from the client would silently
         // get recorded as a payment for the wrong student.
         var studentGroupId = await _db.StudentGroupMemberships.AsNoTracking()
-            .Where(m => m.StudentId == request.StudentId)
+            .Where(m => m.StudentId == resolvedStudentId.Value)
             .Select(m => (int?)m.GroupId)
             .FirstOrDefaultAsync();
         if (studentGroupId == null || !notebook.GroupIds.Contains(studentGroupId.Value))
@@ -1669,7 +1647,7 @@ public class StudentsController : ControllerBase
         // (or their applied discounted price, if any). Cap the accepted
         // amount to whatever is actually still owed.
         var existingPayments = await _db.NotebookPayments.AsNoTracking()
-            .Where(p => p.NotebookId == notebookId && p.StudentId == request.StudentId)
+            .Where(p => p.NotebookId == notebookId && p.StudentId == resolvedStudentId.Value)
             .ToListAsync();
         var alreadyPaid = existingPayments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
         var owedTotal = existingPayments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
@@ -1684,7 +1662,7 @@ public class StudentsController : ControllerBase
         {
             TeacherId = notebook.TeacherId,
             NotebookId = notebookId,
-            StudentId = request.StudentId,
+            StudentId = resolvedStudentId.Value,
             Price = request.Amount,
             LectureId = request.LectureId,
         };
@@ -1724,15 +1702,23 @@ public class StudentsController : ControllerBase
     // POST Students/{notebookId}/discount?studentId=..&discountedPrice=..
     [HttpPost("{notebookId:int}/discount")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public async Task<IActionResult> ApplyDiscount(int notebookId, [FromQuery] int studentId, [FromQuery] decimal discountedPrice)
+    public async Task<IActionResult> ApplyDiscount(int notebookId, [FromQuery] int studentId, [FromQuery] decimal discountedPrice, [FromQuery] string? studentIdentifier = null)
     {
         var notebook = await _db.Notebooks.FirstOrDefaultAsync(e => e.Id == (notebookId));
         if (notebook == null) return NotFound(new { message = "Notebook not found." });
 
+        // FIX: studentIdentifier (a hand-typed ID, phone number, or name --
+        // used by the offline payment flow) resolves via
+        // ResolveManualStudentIdAsync; older clients that only send the
+        // numeric studentId keep working via the fallback.
+        var resolvedStudentId = await ResolveManualStudentIdAsync(studentIdentifier, studentId);
+        if (resolvedStudentId == null)
+            return NotFound(new { message = "Student not found." });
+
         // SAFETY: same tenant-scoped membership check as PayNotebook -- make
-        // sure this studentId actually belongs to a group this notebook applies to.
+        // sure the resolved student actually belongs to a group this notebook applies to.
         var studentGroupId = await _db.StudentGroupMemberships.AsNoTracking()
-            .Where(m => m.StudentId == studentId)
+            .Where(m => m.StudentId == resolvedStudentId.Value)
             .Select(m => (int?)m.GroupId)
             .FirstOrDefaultAsync();
         if (studentGroupId == null || !notebook.GroupIds.Contains(studentGroupId.Value))
@@ -1756,7 +1742,7 @@ public class StudentsController : ControllerBase
         {
             TeacherId = notebook.TeacherId,
             NotebookId = notebookId,
-            StudentId = studentId,
+            StudentId = resolvedStudentId.Value,
             Price = 0,
             DiscountedPrice = roundedDiscountedPrice
         };
@@ -1925,8 +1911,16 @@ public class StudentsController : ControllerBase
         var billing = await _db.Billings.FirstOrDefaultAsync(e => e.Id == (billingId));
         if (billing == null) return NotFound(new { message = "Billing not found." });
 
+        // FIX: StudentIdentifier (a hand-typed ID, phone number, or name --
+        // used by the offline payment flow) resolves via
+        // ResolveManualStudentIdAsync; older clients that only send the
+        // numeric StudentId keep working via the fallback.
+        var resolvedStudentId = await ResolveManualStudentIdAsync(request.StudentIdentifier, request.StudentId);
+        if (resolvedStudentId == null)
+            return NotFound(new { message = "Student not found." });
+
         var studentGroupId = await _db.StudentGroupMemberships.AsNoTracking()
-            .Where(m => m.StudentId == request.StudentId)
+            .Where(m => m.StudentId == resolvedStudentId.Value)
             .Select(m => (int?)m.GroupId)
             .FirstOrDefaultAsync();
         if (studentGroupId == null || !billing.GroupIds.Contains(studentGroupId.Value))
@@ -1936,7 +1930,7 @@ public class StudentsController : ControllerBase
             return BadRequest(new { message = "Payment amount must be greater than zero." });
 
         var existingPayments = await _db.BillingPayments.AsNoTracking()
-            .Where(p => p.BillingId == billingId && p.StudentId == request.StudentId)
+            .Where(p => p.BillingId == billingId && p.StudentId == resolvedStudentId.Value)
             .ToListAsync();
         var alreadyPaid = existingPayments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
         var owedTotal = existingPayments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
@@ -1951,7 +1945,7 @@ public class StudentsController : ControllerBase
         {
             TeacherId = billing.TeacherId,
             BillingId = billingId,
-            StudentId = request.StudentId,
+            StudentId = resolvedStudentId.Value,
             Price = request.Amount,
             LectureId = request.LectureId,
         };
@@ -1988,13 +1982,21 @@ public class StudentsController : ControllerBase
     // POST Students/billing/{billingId}/discount?studentId=..&discountedPrice=..
     [HttpPost("billing/{billingId:int}/discount")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public async Task<IActionResult> ApplyBillingDiscount(int billingId, [FromQuery] int studentId, [FromQuery] decimal discountedPrice)
+    public async Task<IActionResult> ApplyBillingDiscount(int billingId, [FromQuery] int studentId, [FromQuery] decimal discountedPrice, [FromQuery] string? studentIdentifier = null)
     {
         var billing = await _db.Billings.FirstOrDefaultAsync(e => e.Id == (billingId));
         if (billing == null) return NotFound(new { message = "Billing not found." });
 
+        // FIX: studentIdentifier (a hand-typed ID, phone number, or name --
+        // used by the offline payment flow) resolves via
+        // ResolveManualStudentIdAsync; older clients that only send the
+        // numeric studentId keep working via the fallback.
+        var resolvedStudentId = await ResolveManualStudentIdAsync(studentIdentifier, studentId);
+        if (resolvedStudentId == null)
+            return NotFound(new { message = "Student not found." });
+
         var studentGroupId = await _db.StudentGroupMemberships.AsNoTracking()
-            .Where(m => m.StudentId == studentId)
+            .Where(m => m.StudentId == resolvedStudentId.Value)
             .Select(m => (int?)m.GroupId)
             .FirstOrDefaultAsync();
         if (studentGroupId == null || !billing.GroupIds.Contains(studentGroupId.Value))
@@ -2008,7 +2010,7 @@ public class StudentsController : ControllerBase
         {
             TeacherId = billing.TeacherId,
             BillingId = billingId,
-            StudentId = studentId,
+            StudentId = resolvedStudentId.Value,
             Price = 0,
             DiscountedPrice = roundedDiscountedPrice
         };
@@ -2191,9 +2193,12 @@ public class StudentsController : ControllerBase
         // told "saved" for a mark that isn't attached to any real student.
         // The Students query filter already scopes this to the current tenant.
         // FIX: a teacher typing this by hand very often types the student's
-        // PHONE NUMBER instead of their internal id (they look the same to
-        // a human). Try it as an Id first, then fall back to PhoneNumber.
-        var resolvedStudentId = await ResolveManualStudentIdAsync(request.StudentId);
+        // PHONE NUMBER (or even their name) instead of their internal id
+        // (they look the same to a human). StudentIdentifier, when sent,
+        // resolves via ID -> PhoneNumber -> Arabic-normalized name (see
+        // ResolveManualStudentIdAsync); older clients that only send the
+        // numeric StudentId still work via the fallback.
+        var resolvedStudentId = await ResolveManualStudentIdAsync(request.StudentIdentifier, request.StudentId);
         if (resolvedStudentId == null)
             return NotFound(new { message = "Student not found." });
 
@@ -2213,7 +2218,7 @@ public class StudentsController : ControllerBase
     // POST Students/quiz-results/change?studentId=..&quizResultId=..&newMark=..  body: {}
     [HttpPost("quiz-results/change")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public async Task<IActionResult> ChangeCenterQuizMark([FromQuery] int studentId, [FromQuery] int quizResultId, [FromQuery] int newMark)
+    public async Task<IActionResult> ChangeCenterQuizMark([FromQuery] int studentId, [FromQuery] int quizResultId, [FromQuery] decimal newMark)
     {
         var result = await _db.CenterQuizResults.FirstOrDefaultAsync(r => r.Id == quizResultId && r.StudentId == studentId);
         if (result == null) return NotFound(new { message = "Result not found." });
@@ -2261,9 +2266,9 @@ public class StudentsController : ControllerBase
         // has no FK constraint, so a bad studentId would otherwise save
         // silently as an orphaned row and still be reported to the teacher
         // as a successful save.
-        // FIX: same Id-or-PhoneNumber fallback as AddCenterQuizResult — see
-        // ResolveManualStudentIdAsync.
-        var resolvedStudentId = await ResolveManualStudentIdAsync(request.StudentId);
+        // FIX: same StudentIdentifier (ID/phone/name) resolution as
+        // AddCenterQuizResult — see ResolveManualStudentIdAsync.
+        var resolvedStudentId = await ResolveManualStudentIdAsync(request.StudentIdentifier, request.StudentId);
         if (resolvedStudentId == null)
             return NotFound(new { message = "Student not found." });
 
@@ -2283,7 +2288,7 @@ public class StudentsController : ControllerBase
     // POST Students/homework-results/change?studentId=..&homeworkResultId=..&newMark=..  body: {}
     [HttpPost("homework-results/change")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public async Task<IActionResult> ChangeHomeworkMark([FromQuery] int studentId, [FromQuery] int homeworkResultId, [FromQuery] int newMark)
+    public async Task<IActionResult> ChangeHomeworkMark([FromQuery] int studentId, [FromQuery] int homeworkResultId, [FromQuery] decimal newMark)
     {
         var result = await _db.HomeworkResults.FirstOrDefaultAsync(r => r.Id == homeworkResultId && r.StudentId == studentId);
         if (result == null) return NotFound(new { message = "Result not found." });
@@ -2340,23 +2345,17 @@ public class StudentsController : ControllerBase
 
     // FIX: manual entry (typed studentId) treated the number as a hard
     // student.Id lookup. In practice a teacher typing by hand very often
-    // types the STUDENT'S PHONE NUMBER instead of their internal id — the
-    // two look identical to them. Try it as an Id first, and if that
-    // misses, fall back to treating the same number as a PhoneNumber and
-    // resolve to that student's real Id. Same helper/behavior as
-    // AttendanceController.ResolveManualStudentIdAsync.
-    private async Task<int?> ResolveManualStudentIdAsync(int idOrPhone)
-    {
-        if (await _db.Students.AnyAsync(s => s.Id == idOrPhone))
-            return idOrPhone;
-
-        var byPhone = await _db.Students
-            .Where(s => s.PhoneNumber == idOrPhone.ToString())
-            .Select(s => (int?)s.Id)
-            .FirstOrDefaultAsync();
-
-        return byPhone;
-    }
+    // types the STUDENT'S PHONE NUMBER — or even their name — instead of
+    // their internal id. This now goes through the shared
+    // StudentIdentifierResolver (ID -> PhoneNumber -> Arabic-normalized
+    // name, in that order; see its doc comment) instead of a plain int
+    // id-or-phone fallback, so the exact same matching rules apply here as
+    // in AttendanceController's manual entry / offline bulk sync.
+    // `fallbackId` is only used when `identifier` itself is empty, to stay
+    // compatible with older clients that only ever send the numeric field.
+    private Task<int?> ResolveManualStudentIdAsync(string? identifier, int fallbackId = 0)
+        => Common.StudentIdentifierResolver.ResolveAsync(
+            _db, string.IsNullOrWhiteSpace(identifier) ? fallbackId.ToString() : identifier);
 
     // Both auto-generated UserName and Password are now 10-digit numeric
     // strings (digits 0-9 only), e.g. "9878934576". This applies whenever a
