@@ -931,6 +931,45 @@ public class StudentsController : ControllerBase
 
     private enum StudentStatusFilter { Active, Suspended, Cancelled }
 
+    private record StudentRow(int Id, string Name, string? PhoneNumber, string? UserName, int? GroupId);
+
+    // ARABIC-AWARE SEARCH: Arabic has several letters that get typed
+    // interchangeably by real users depending on keyboard/habit/dialect --
+    // e.g. a name spelled "أحمد" in the database should still be found by a
+    // teacher searching "احمد". This maps every "shape variant" of a letter
+    // down to one canonical form (and strips tashkeel/diacritics, which are
+    // often present in imported data but never typed in a search box) before
+    // comparing, so the two spellings become byte-identical:
+    //   - أ / إ / آ / ٱ  -> ا   (any hamza-on-alef, or alef wasla)
+    //   - ة              -> ه   (taa marbuta / haa)
+    //   - ى / ئ          -> ي   (alef maksura / yaa with hamza -> yaa)
+    //   - ؤ              -> و   (waw with hamza -> waw)
+    private static readonly Dictionary<char, char> ArabicNormalizationMap = new()
+    {
+        ['أ'] = 'ا', ['إ'] = 'ا', ['آ'] = 'ا', ['ٱ'] = 'ا',
+        ['ة'] = 'ه',
+        ['ى'] = 'ي', ['ئ'] = 'ي',
+        ['ؤ'] = 'و',
+    };
+
+    private static string NormalizeArabic(string? input)
+    {
+        if (string.IsNullOrEmpty(input)) return string.Empty;
+
+        var sb = new StringBuilder(input.Length);
+        foreach (var ch in input)
+        {
+            // Strip Arabic diacritics/tashkeel (fatha, damma, kasra, shadda,
+            // sukun, tanween, superscript alef) -- these are never part of
+            // what someone types when searching.
+            if (ch is >= '\u064B' and <= '\u0652' or '\u0670')
+                continue;
+
+            sb.Append(ArabicNormalizationMap.TryGetValue(ch, out var mapped) ? mapped : ch);
+        }
+        return sb.ToString().Trim();
+    }
+
     // PER-TENANT FIX: statusFilter now runs against StudentGroupMembership
     // (IsSuspended/IsCancelled per teacher-relationship), not against a global
     // flag on Student -- StudentGroupMemberships is already tenant-scoped via
@@ -955,6 +994,8 @@ public class StudentsController : ControllerBase
                 StudentStatusFilter.Cancelled => _db.Students.AsNoTracking().Where(s => s.GroupMemberships.Any(m => m.IsCancelled)),
                 _ => _db.Students.AsNoTracking().Where(s => s.GroupMemberships.Any(m => !m.IsSuspended && !m.IsCancelled)),
             };
+            var trimmedQ = q?.Trim();
+            var isNumericQuery = !string.IsNullOrEmpty(trimmedQ) && trimmedQ.All(char.IsDigit);
             if (groupId.HasValue)
                 query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
             else if (schoolYear.HasValue)
@@ -970,14 +1011,44 @@ public class StudentsController : ControllerBase
                 // StudentGroupMemberships already reflected it), only this filter was
                 // reading the wrong field.
                 query = query.Where(s => s.GroupMemberships.Any(m => m.Group!.SchoolYear == schoolYear.Value));
-            if (!string.IsNullOrWhiteSpace(q)) query = query.Where(s => s.Name.Contains(q) || s.PhoneNumber.Contains(q));
 
-            var students = await query
-                .OrderBy(s => s.Name)
-                .Skip((p - 1) * PagingDefaults.PageSize)
-                .Take(PagingDefaults.PageSize)
-                .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId })
-                .ToListAsync();
+            // SEARCH: "q" matches Name (Arabic-normalized, so common
+            // letter-shape variants are treated as identical -- see
+            // NormalizeArabic), PhoneNumber (substring), or Id (substring on
+            // the numeric id, and exact when the id itself matches). Because
+            // the normalized-name comparison can't be translated to SQL, we
+            // pull the (already status/group/year-filtered, still
+            // tenant-scoped) candidate rows into memory first and filter/page
+            // there whenever a search term is present. Without a search term
+            // we keep the original all-SQL path (paged in the database) for
+            // best performance on the common "just browse the list" case.
+            List<StudentRow> students;
+            if (!string.IsNullOrWhiteSpace(trimmedQ))
+            {
+                var normalizedQ = NormalizeArabic(trimmedQ);
+                var candidates = await query
+                    .Select(s => new StudentRow(s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId))
+                    .ToListAsync();
+
+                students = candidates
+                    .Where(s =>
+                        NormalizeArabic(s.Name).Contains(normalizedQ, StringComparison.OrdinalIgnoreCase) ||
+                        (s.PhoneNumber != null && s.PhoneNumber.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)) ||
+                        (isNumericQuery && s.Id.ToString().Contains(trimmedQ)))
+                    .OrderBy(s => s.Name)
+                    .Skip((p - 1) * PagingDefaults.PageSize)
+                    .Take(PagingDefaults.PageSize)
+                    .ToList();
+            }
+            else
+            {
+                students = await query
+                    .OrderBy(s => s.Name)
+                    .Skip((p - 1) * PagingDefaults.PageSize)
+                    .Take(PagingDefaults.PageSize)
+                    .Select(s => new StudentRow(s.Id, s.Name, s.PhoneNumber, s.UserName, s.GroupId))
+                    .ToListAsync();
+            }
 
             var studentIds = students.Select(s => s.Id).ToList();
             var tenantGroupNames = await _db.GetTenantGroupNamesAsync(studentIds);
