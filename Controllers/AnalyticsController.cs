@@ -161,19 +161,27 @@ public class AnalyticsController : ControllerBase
         // Priority: explicit groupId > explicit schoolYear/byYear > student's own group from JWT.
         var effectiveGroupId = groupId ?? (User.IsInRole(Roles.Student) ? User.GetGroupId(_tenant.CurrentTenantId) : null);
 
+        // Scope the student pool FIRST (by group / school year), then rank
+        // within that scope. Ranking globally and only filtering afterwards
+        // (the old behavior) meant a student's group/year would come back
+        // empty unless one of the world's top-5 scorers happened to be in it.
+        var scopedStudentsQuery = _db.Students.AsNoTracking().AsQueryable();
+        if (effectiveGroupId.HasValue) scopedStudentsQuery = scopedStudentsQuery.Where(s => s.GroupMemberships.Any(m => m.GroupId == effectiveGroupId.Value));
+        else if (schoolYear.HasValue) scopedStudentsQuery = scopedStudentsQuery.Where(s => s.SchoolYear == schoolYear.Value);
+
+        var scopedStudentIds = await scopedStudentsQuery.Select(s => s.Id).ToListAsync();
+
         var query = from result in _db.CenterQuizResults.AsNoTracking()
+                     where scopedStudentIds.Contains(result.StudentId)
                      group result by result.StudentId into g
                      select new { StudentId = g.Key, TotalMarks = g.Sum(x => x.Marks) };
 
         var top = await query.OrderByDescending(x => x.TotalMarks).Take(5).ToListAsync();
         var ids = top.Select(t => t.StudentId).ToList();
 
-        var studentsQuery = _db.Students.AsNoTracking().Where(s => ids.Contains(s.Id));
-        if (effectiveGroupId.HasValue) studentsQuery = studentsQuery.Where(s => s.GroupMemberships.Any(m => m.GroupId == effectiveGroupId.Value));
-        else if (schoolYear.HasValue) studentsQuery = studentsQuery.Where(s => s.SchoolYear == schoolYear.Value);
-
         // Only Id/Name/Group name are read below -- project at the SQL level.
-        var students = await studentsQuery
+        var students = await _db.Students.AsNoTracking()
+            .Where(s => ids.Contains(s.Id))
             .Select(s => new { s.Id, s.Name, GroupName = s.Group!.Name })
             .ToDictionaryAsync(s => s.Id);
 
