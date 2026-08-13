@@ -17,6 +17,10 @@ public record SubmitAssignmentResult(int Mark, int TotalMarks);
 // POST Assignments/change-mark
 public record ChangeAssignmentMarkRequest(int AssignmentId, int StudentId, int QuestionId, int Mark);
 
+// POST Assignments/edit-question
+// body: { "assignmentId": int, "questionId": int, "text": "...", "mark": int, "choices": ["..."], "answer": "..." }
+public record EditAssignmentQuestionRequest(int AssignmentId, int QuestionId, string Text, int Mark, List<string>? Choices, string Answer);
+
 public record AssignmentTakerDto(
     int StudentId,
     string StudentName,

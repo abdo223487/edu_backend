@@ -421,6 +421,36 @@ public class AssignmentsController : ControllerBase
         return Ok(new { message = "Mark updated.", newScore = submission.Score });
     }
 
+    // Same fix-a-question-in-place capability as Quizzes/edit-question.
+    [HttpPost("edit-question")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
+    public async Task<IActionResult> EditQuestion([FromBody] EditAssignmentQuestionRequest request)
+    {
+        var assignment = await _db.Assignments.Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == request.AssignmentId);
+        if (assignment == null) return NotFound(new { message = "Assignment not found." });
+
+        var question = assignment.Questions.FirstOrDefault(q => q.Id == request.QuestionId);
+        if (question == null) return NotFound(new { message = "Question not found." });
+
+        if (string.IsNullOrWhiteSpace(request.Text))
+            return BadRequest(new { message = "نص السؤال مطلوب." });
+        if (request.Mark <= 0)
+            return BadRequest(new { message = "درجة السؤال لازم تكون أكبر من صفر." });
+        if (string.IsNullOrWhiteSpace(request.Answer))
+            return BadRequest(new { message = "الإجابة الصحيحة مطلوبة." });
+
+        question.Text = request.Text;
+        question.Mark = request.Mark;
+        question.Answer = request.Answer;
+        if (request.Choices != null)
+            question.Choices = request.Choices;
+
+        await _db.SaveChangesAsync();
+
+        return Ok(new AssignmentQuestionTeacherDto(
+            question.Id, question.Type, question.Text, question.Choices, question.Answer, question.Mark, question.ImageUrl));
+    }
+
     [HttpPost("delete/{assignmentId:int}")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> Delete(int assignmentId)

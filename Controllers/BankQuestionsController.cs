@@ -182,6 +182,38 @@ public class BankQuestionsController : ControllerBase
         return Ok(items);
     }
 
+    // Fix a bank question's text/mark/choices/correct-answer in place. Note this
+    // is deliberately NOT scoped by TeacherId here (same as Delete above) —
+    // matches the existing tenant behavior of this endpoint family.
+    [HttpPost("edit")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> EditQuestion([FromBody] EditBankQuestionRequest request)
+    {
+        var question = await _db.BankQuestions.Include(q => q.Lesson).ThenInclude(l => l!.Unit)
+            .Include(q => q.Unit).FirstOrDefaultAsync(q => q.Id == request.QuestionId);
+        if (question == null) return NotFound(new { message = "Question not found." });
+
+        if (string.IsNullOrWhiteSpace(request.Text))
+            return BadRequest(new { message = "نص السؤال مطلوب." });
+        if (request.Mark <= 0)
+            return BadRequest(new { message = "درجة السؤال لازم تكون أكبر من صفر." });
+        if (string.IsNullOrWhiteSpace(request.Answer))
+            return BadRequest(new { message = "الإجابة الصحيحة مطلوبة." });
+
+        question.Text = request.Text;
+        question.Mark = request.Mark;
+        question.Answer = request.Answer;
+        if (request.Choices != null)
+            question.Choices = request.Choices;
+
+        await _db.SaveChangesAsync();
+
+        return Ok(new BankQuestionDto(
+            question.Id, question.LessonId, question.Lesson?.Name,
+            question.Lesson?.UnitId ?? question.UnitId ?? 0, question.Lesson?.Unit?.Name ?? question.Unit?.Name ?? "",
+            question.Type, question.Text, question.Choices, question.Answer, question.Mark, question.ImageUrl, question.Difficulty));
+    }
+
     [HttpPost("delete/{id:int}")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> Delete(int id)

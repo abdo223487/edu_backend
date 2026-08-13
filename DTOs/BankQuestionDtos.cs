@@ -8,6 +8,10 @@ public record BankQuestionDto(
 
 // POST BankQuestions (multipart): exactly one of LessonId or UnitId, Type, Text, Answer, Mark, Difficulty, Choices[], image
 
+// POST BankQuestions/edit
+// body: { "questionId": int, "text": "...", "mark": int, "choices": ["..."], "answer": "..." }
+public record EditBankQuestionRequest(int QuestionId, string Text, int Mark, List<string>? Choices, string Answer);
+
 // ── Student: scope picker (units → lessons → per-difficulty counts) ──
 public record BankLessonScopeDto(int LessonId, string LessonName, int Easy, int Medium, int Hard);
 // Direct = questions the teacher attached to the unit itself (no lesson picked).

@@ -362,6 +362,34 @@ public class AssignmentCentersController : ControllerBase
         return Ok(new { message = "Mark updated.", newScore = submission.Score });
     }
 
+    // Same fix-a-question-in-place capability as Assignments/edit-question,
+    // but the answer must stay one of the 4 fixed bubble letters.
+    [HttpPost("edit-question")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
+    public async Task<IActionResult> EditQuestion([FromBody] EditAssignmentCenterQuestionRequest request)
+    {
+        var assignment = await _db.AssignmentCenters.Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == request.AssignmentCenterId);
+        if (assignment == null) return NotFound(new { message = "Assignment not found." });
+
+        var question = assignment.Questions.FirstOrDefault(q => q.Id == request.QuestionId);
+        if (question == null) return NotFound(new { message = "Question not found." });
+
+        if (string.IsNullOrWhiteSpace(request.Text))
+            return BadRequest(new { message = "نص السؤال مطلوب." });
+        if (request.Mark <= 0)
+            return BadRequest(new { message = "درجة السؤال لازم تكون أكبر من صفر." });
+        if (!AssignmentCenterChoices.IsValid(request.Answer))
+            return BadRequest(new { message = "اختر الإجابة الصحيحة (أ/ب/ج/د)." });
+
+        question.Text = request.Text;
+        question.Mark = request.Mark;
+        question.Answer = request.Answer;
+
+        await _db.SaveChangesAsync();
+
+        return Ok(new AssignmentCenterQuestionTeacherDto(question.Id, question.Text, question.Answer, question.Mark));
+    }
+
     [HttpPost("delete/{assignmentCenterId:int}")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
     public async Task<IActionResult> Delete(int assignmentCenterId)

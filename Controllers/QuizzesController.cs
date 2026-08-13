@@ -473,6 +473,48 @@ public class QuizzesController : ControllerBase
         return Ok(new { message = "Mark updated.", newScore = result.Score });
     }
 
+    // Lets a teacher fix a single question's text/mark/choices/correct-answer
+    // on an already-created quiz, without deleting and recreating the whole
+    // exam. Only fields that make sense for the question's Type are actually
+    // used by the client, but we accept/persist whatever is sent so a Written
+    // question editing just its Answer (with Choices == null) still works.
+    [HttpPost("edit-question")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> EditQuestion([FromBody] EditQuestionRequest request)
+    {
+        var quiz = await _db.Quizzes.Include(q => q.Questions).FirstOrDefaultAsync(q => q.Id == request.QuizId);
+        if (quiz == null) return NotFound(new { message = "Quiz not found." });
+
+        var question = quiz.Questions.FirstOrDefault(q => q.Id == request.QuestionId);
+        if (question == null) return NotFound(new { message = "Question not found." });
+
+        if (string.IsNullOrWhiteSpace(request.Text))
+            return BadRequest(new { message = "نص السؤال مطلوب." });
+        if (request.Mark <= 0)
+            return BadRequest(new { message = "درجة السؤال لازم تكون أكبر من صفر." });
+        if (string.IsNullOrWhiteSpace(request.Answer))
+            return BadRequest(new { message = "الإجابة الصحيحة مطلوبة." });
+
+        question.Text = request.Text;
+        question.Mark = request.Mark;
+        question.Answer = request.Answer;
+        if (request.Choices != null)
+            question.Choices = request.Choices;
+
+        await _db.SaveChangesAsync();
+
+        return Ok(new
+        {
+            id = question.Id,
+            text = question.Text,
+            mark = question.Mark,
+            imageUrl = question.ImageUrl,
+            questionType = question.Type,
+            choices = question.Choices,
+            correctAnswer = question.Answer
+        });
+    }
+
     [HttpPost("delete/{quizId:int}")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> Delete(int quizId)

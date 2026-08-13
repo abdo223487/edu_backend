@@ -23,6 +23,10 @@ public record SubmitAssignmentCenterResult(int Mark, int TotalMarks);
 // POST AssignmentCenters/change-mark
 public record ChangeAssignmentCenterMarkRequest(int AssignmentCenterId, int StudentId, int QuestionId, int Mark);
 
+// POST AssignmentCenters/edit-question
+// body: { "assignmentCenterId": int, "questionId": int, "text": "...", "mark": int, "answer": "أ" }
+public record EditAssignmentCenterQuestionRequest(int AssignmentCenterId, int QuestionId, string Text, int Mark, string Answer);
+
 public record AssignmentCenterTakerDto(
     int StudentId,
     string StudentName,

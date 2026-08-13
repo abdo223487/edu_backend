@@ -28,6 +28,12 @@ public record GradeQuizResult(int Mark, int TotalMarks);
 // body: { "quizResultId"/"studentId"+"quizId", "questionId", "newMark" } (inferred shape)
 public record ChangeAnswerMarkRequest(int QuizId, int StudentId, int QuestionId, int Mark);
 
+// POST Quizzes/edit-question
+// body: { "quizId": int, "questionId": int, "text": "...", "mark": int, "choices": ["..."], "answer": "..." }
+// Lets a teacher fix a typo/mark/choice/correct-answer on an already-created
+// exam question without deleting and recreating the whole quiz.
+public record EditQuestionRequest(int QuizId, int QuestionId, string Text, int Mark, List<string>? Choices, string Answer);
+
 // Field names match Takers.dart's expected JSON exactly: quizMark (not
 // "score"), totalQuizMarks (not "totalMarks"), date, groupName.
 // StudentId is sent as a STRING (not int) — ExamReview_for_Taker.dart's
