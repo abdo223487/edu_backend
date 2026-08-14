@@ -14,6 +14,7 @@ namespace EduApi.Controllers;
 ///
 ///  Teacher side:
 ///   POST BankQuestions                          (multipart, one question at a time: LessonId, Type, Text, Answer, Mark, Difficulty, Choices[], image)
+///   POST BankQuestions/bulk                     (multipart, like the single Create above but N questions + optional per-question image — all-or-nothing batch import)
 ///   GET  BankQuestions?lessonId=..&difficulty=..&p=..
 ///   POST BankQuestions/delete/{id}
 ///   GET  BankQuestions/attempts?p=..             (roster of every student practice attempt)
@@ -95,6 +96,115 @@ public class BankQuestionsController : ControllerBase
         await _db.SaveChangesAsync();
 
         return Ok(new { id = question.Id });
+    }
+
+    // multipart/form-data, exactly like the single-question Create() above, but
+    // for N questions at once. Fields are indexed per question:
+    //   LessonId or UnitId                          (shared by every question, top-level)
+    //   Questions[0].Type / .Text / .Answer / .Mark / .Difficulty
+    //   Questions[0].Choices[0], Questions[0].Choices[1], ...
+    //   Questions[0].Image                           (file, optional — same as "image" in Create())
+    [HttpPost("bulk")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> CreateBulk()
+    {
+        var form = await Request.ReadFormAsync();
+
+        var lessonIdRaw = form["LessonId"].ToString();
+        var unitIdRaw = form["UnitId"].ToString();
+        var hasLessonId = int.TryParse(lessonIdRaw, out var lessonId);
+        var hasUnitId = int.TryParse(unitIdRaw, out var unitId);
+
+        if (hasLessonId == hasUnitId)
+            return BadRequest(new { message = "Provide exactly one of LessonId or UnitId." });
+
+        if (hasLessonId)
+        {
+            var lesson = await _db.Lessons.FirstOrDefaultAsync(l => l.Id == lessonId);
+            if (lesson == null) return NotFound(new { message = "Lesson not found." });
+        }
+        else
+        {
+            var unit = await _db.Units.FirstOrDefaultAsync(u => u.Id == unitId);
+            if (unit == null) return NotFound(new { message = "Unit not found." });
+        }
+
+        // Parse every "Questions[i].*" field found in the form, stopping at
+        // the first index with no Text field (marks the end of the list).
+        var parsed = new List<(string Type, string Text, string Answer, int Mark,
+            string Difficulty, List<string> Choices, IFormFile? Image)>();
+
+        for (var i = 0; form.ContainsKey($"Questions[{i}].Text"); i++)
+        {
+            var prefix = $"Questions[{i}]";
+            var choices = new List<string>();
+            for (var j = 0; form.ContainsKey($"{prefix}.Choices[{j}]"); j++)
+                choices.Add(form[$"{prefix}.Choices[{j}]"].ToString());
+
+            int.TryParse(form[$"{prefix}.Mark"].ToString(), out var mark);
+
+            parsed.Add((
+                Type: form[$"{prefix}.Type"].ToString(),
+                Text: form[$"{prefix}.Text"].ToString(),
+                Answer: form[$"{prefix}.Answer"].ToString(),
+                Mark: mark,
+                Difficulty: form[$"{prefix}.Difficulty"].ToString(),
+                Choices: choices,
+                Image: form.Files[$"{prefix}.Image"]
+            ));
+        }
+
+        if (parsed.Count == 0)
+            return BadRequest(new { message = "No questions found in the request." });
+
+        // Validate every item up front so the batch is all-or-nothing —
+        // no half-imported bank left behind if one question is malformed.
+        var errors = new List<string>();
+        for (var i = 0; i < parsed.Count; i++)
+        {
+            var q = parsed[i];
+            if (string.IsNullOrWhiteSpace(q.Text)) errors.Add($"Question {i + 1}: Text is required.");
+            if (string.IsNullOrWhiteSpace(q.Answer)) errors.Add($"Question {i + 1}: Answer is required.");
+            if (string.IsNullOrWhiteSpace(q.Type)) errors.Add($"Question {i + 1}: Type is required.");
+            if (string.IsNullOrWhiteSpace(q.Difficulty)) errors.Add($"Question {i + 1}: Difficulty is required.");
+            if (q.Mark <= 0) errors.Add($"Question {i + 1}: Mark must be greater than 0.");
+            if (string.Equals(q.Type, "MCQ", StringComparison.OrdinalIgnoreCase) && q.Choices.Count < 2)
+                errors.Add($"Question {i + 1}: MCQ questions need at least 2 choices.");
+        }
+        if (errors.Count > 0)
+            return BadRequest(new { message = "Some questions failed validation.", errors });
+
+        var teacherId = User.GetStaffTenantId()!.Value; // TENANT LAYER
+        var entities = new List<BankQuestion>();
+
+        // Images are uploaded one at a time (each is its own await), same as
+        // Create() above — the storage service has no batch-upload variant.
+        foreach (var q in parsed)
+        {
+            var question = new BankQuestion
+            {
+                LessonId = hasLessonId ? lessonId : null,
+                UnitId = hasUnitId ? unitId : null,
+                Type = q.Type,
+                Text = q.Text,
+                Answer = q.Answer,
+                Mark = q.Mark,
+                Difficulty = q.Difficulty,
+                Choices = q.Choices,
+                TeacherId = teacherId
+            };
+
+            if (q.Image != null)
+                question.ImageUrl = await _files.SaveAsync(q.Image, "bank-questions");
+
+            entities.Add(question);
+        }
+
+        _db.BankQuestions.AddRange(entities);
+        await _db.SaveChangesAsync();
+
+        return Ok(new BulkCreateBankQuestionsResult(entities.Count, entities.Select(e => e.Id).ToList()));
     }
 
     [HttpGet]

@@ -8,6 +8,14 @@ public record BankQuestionDto(
 
 // POST BankQuestions (multipart): exactly one of LessonId or UnitId, Type, Text, Answer, Mark, Difficulty, Choices[], image
 
+// POST BankQuestions/bulk (multipart, same shape as the single Create() above,
+// just N questions in one request). Exactly one of LessonId or UnitId at the
+// top level, shared by every question. Per question (indexed 0..n-1):
+//   Questions[i].Type / .Text / .Answer / .Mark / .Difficulty
+//   Questions[i].Choices[0], Questions[i].Choices[1], ...
+//   Questions[i].Image   (file, optional)
+public record BulkCreateBankQuestionsResult(int Created, List<int> Ids);
+
 // POST BankQuestions/edit
 // body: { "questionId": int, "text": "...", "mark": int, "choices": ["..."], "answer": "..." }
 public record EditBankQuestionRequest(int QuestionId, string Text, int Mark, List<string>? Choices, string Answer);
