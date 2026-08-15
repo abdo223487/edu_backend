@@ -386,53 +386,92 @@ public class AttendanceController : ControllerBase
                 .Select(t => t.Name)
                 .FirstOrDefaultAsync() ?? "المدرس";
 
-            // Last grade: most recent of Quiz / CenterQuiz / Assignment results for this student.
-            var lastQuiz = await _db.QuizResults.AsNoTracking()
-                .Where(q => q.StudentId == studentId)
-                .OrderByDescending(q => q.GradedAt)
-                .Select(q => new { Text = $"{q.Score}/{q.TotalMarks}", When = q.GradedAt })
-                .FirstOrDefaultAsync();
+            // Last grade: from CenterQuizResults ONLY -- this is exactly the
+            // "امتحان" column recorded via the teacher's "درجات الطالب"
+            // screen (Students/quiz-results/center/add), same source
+            // StudentGradesPage reads from. Deliberately NOT the online-quiz
+            // QuizResults table -- that's a different feature (online exams
+            // with the teacher), not what shows up on this grades screen.
+            // TENANT FIX: also filtered by TeacherId == current tenant -- a
+            // student can be enrolled with more than one teacher, and
+            // CenterQuizResult/HomeworkResult both carry a TeacherId
+            // specifically so one teacher's marks never leak into another's
+            // attendance notification for the same shared student.
             var lastCenterQuizRaw = await _db.CenterQuizResults.AsNoTracking()
-                .Where(q => q.StudentId == studentId)
+                .Where(q => q.StudentId == studentId && q.TeacherId == _tenant.CurrentTenantId!.Value)
                 .OrderByDescending(q => q.Date)
-                .Select(q => new { q.Title, q.Marks, q.TotalMarks, q.Date })
+                .Select(q => new { q.Marks, q.TotalMarks, q.Date })
                 .FirstOrDefaultAsync();
             // Formatted in memory (not inside the SQL-translated Select above)
             // because MarksFormatter isn't translatable to SQL -- it just
             // trims a whole mark's trailing ".0" (9.0 -> "9", 9.5 stays "9.5").
-            var lastCenterQuiz = lastCenterQuizRaw == null
-                ? null
-                : new { Text = $"{lastCenterQuizRaw.Title}: {MarksFormatter.Format(lastCenterQuizRaw.Marks)}/{lastCenterQuizRaw.TotalMarks}", When = lastCenterQuizRaw.Date };
-            var lastGradeCandidates = new[] { lastQuiz, lastCenterQuiz }
-                .Where(x => x != null)
-                .OrderByDescending(x => x!.When)
-                .ToList();
-            var lastGradeText = lastGradeCandidates.FirstOrDefault()?.Text ?? "لا يوجد";
+            var lastGradeText = lastCenterQuizRaw == null
+                ? "لا يوجد"
+                : $"{MarksFormatter.Format(lastCenterQuizRaw.Marks)}/{lastCenterQuizRaw.TotalMarks}";
 
-            // Last homework: most recent of HomeworkResult / AssignmentSubmission.
+            // Last homework: from HomeworkResults ONLY -- the "الواجب" column
+            // on the same "درجات الطالب" screen (Students/homework-results/add).
+            // Deliberately NOT AssignmentSubmissions -- that's the separate
+            // Assignment Centers feature, not this grades screen. Same
+            // TeacherId tenant filter as above, same reason.
             var lastHomeworkRaw = await _db.HomeworkResults.AsNoTracking()
-                .Where(h => h.StudentId == studentId)
+                .Where(h => h.StudentId == studentId && h.TeacherId == _tenant.CurrentTenantId!.Value)
                 .OrderByDescending(h => h.Date)
-                .Select(h => new { h.Title, h.Marks, h.TotalMarks, h.Date })
+                .Select(h => new { h.Marks, h.TotalMarks, h.Date })
                 .FirstOrDefaultAsync();
-            var lastHomework = lastHomeworkRaw == null
-                ? null
-                : new { Text = $"{lastHomeworkRaw.Title}: {MarksFormatter.Format(lastHomeworkRaw.Marks)}/{lastHomeworkRaw.TotalMarks}", When = lastHomeworkRaw.Date };
-            var lastAssignment = await _db.AssignmentSubmissions.AsNoTracking()
-                .Where(a => a.StudentId == studentId)
-                .OrderByDescending(a => a.SubmittedAt)
-                .Select(a => new { Text = $"{a.Score}/{a.TotalMarks}", When = a.SubmittedAt })
-                .FirstOrDefaultAsync();
-            var lastHomeworkCandidates = new[] { lastHomework, lastAssignment }
-                .Where(x => x != null)
-                .OrderByDescending(x => x!.When)
-                .ToList();
-            var lastHomeworkText = lastHomeworkCandidates.FirstOrDefault()?.Text ?? "لا يوجد";
+            var lastHomeworkText = lastHomeworkRaw == null
+                ? "لا يوجد"
+                : $"{MarksFormatter.Format(lastHomeworkRaw.Marks)}/{lastHomeworkRaw.TotalMarks}";
 
-            // Notebook status: whether the student has paid for at least one notebook.
-            var hasPaidNotebook = await _db.NotebookPayments.AsNoTracking()
-                .AnyAsync(p => p.StudentId == studentId);
-            var notebookStatusText = hasPaidNotebook ? "تم الدفع" : "لم يتم الدفع";
+            // Notebook status: only mention a notebook if the teacher actually
+            // uploaded one for a group this student belongs to. Previously this
+            // just checked NotebookPayments -- so a student with no notebook at
+            // all (teacher never created one for their group) still silently
+            // got "لم يتم الدفع", which is misleading. Now: resolve the
+            // student's groups, find the teacher's most relevant notebook for
+            // those groups (most recently created), and only then report a
+            // paid/unpaid status that includes the notebook's name. If the
+            // teacher hasn't uploaded/created a notebook for this student's
+            // group(s) at all, leave the text empty -- nothing to report.
+            var studentGroupIds = await _db.StudentGroupMemberships.AsNoTracking()
+                .Where(m => m.StudentId == studentId && m.Group!.TeacherId == _tenant.CurrentTenantId!.Value)
+                .Select(m => m.GroupId)
+                .ToListAsync();
+
+            var candidateNotebooks = await _db.Notebooks.AsNoTracking()
+                .Where(n => n.TeacherId == _tenant.CurrentTenantId!.Value)
+                .Select(n => new { n.Id, n.Name, n.GroupIdsCsv, n.CreatedAt })
+                .ToListAsync();
+            var relevantNotebook = candidateNotebooks
+                .Where(n => n.GroupIdsCsv.Length > 0
+                    && n.GroupIdsCsv.Split(',').Select(int.Parse).Any(studentGroupIds.Contains))
+                .OrderByDescending(n => n.CreatedAt)
+                .FirstOrDefault();
+
+            // The WhatsApp template's last line is just {{notebook_line}} on
+            // its own (no surrounding static text -- see WhatsAppOptions
+            // doc comment), so we compose the WHOLE line here. It always ends
+            // with the same encouraging closing sentence (with the teacher's
+            // name baked in) -- with a notebook mention prepended only when
+            // one actually exists. Never empty, so no need for the old
+            // Meta-rejects-empty-string workaround.
+            const string closingText =
+                "🤝 احنا دايمًا مع حضرتك خطوة بخطوة، " +
+                "و{0} دايمًا مع ابن/ة حضراتكم لحد باب الامتحان 🎯📚";
+            var closing = string.Format(closingText, teacherName);
+
+            string notebookLineText;
+            if (relevantNotebook == null)
+            {
+                notebookLineText = closing;
+            }
+            else
+            {
+                var hasPaidNotebook = await _db.NotebookPayments.AsNoTracking()
+                    .AnyAsync(p => p.StudentId == studentId && p.NotebookId == relevantNotebook.Id);
+                var status = hasPaidNotebook ? "✅ تم الدفع" : "❌ لم يتم الدفع";
+                notebookLineText = $"📒 حالة المذكرة: {relevantNotebook.Name} - {status}\n\n{closing}";
+            }
 
             var data = new AttendanceWhatsAppNotification(
                 StudentName: student.Name,
@@ -440,7 +479,7 @@ public class AttendanceController : ControllerBase
                 AttendanceLocalTime: attendanceDate,
                 LastGradeText: lastGradeText,
                 LastHomeworkText: lastHomeworkText,
-                NotebookStatusText: notebookStatusText
+                NotebookLineText: notebookLineText
             );
 
             var sent = await _whatsApp.SendAttendanceNotificationAsync(student.ParentPhoneNumber!, data);

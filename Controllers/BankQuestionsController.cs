@@ -15,6 +15,7 @@ namespace EduApi.Controllers;
 ///  Teacher side:
 ///   POST BankQuestions                          (multipart, one question at a time: LessonId, Type, Text, Answer, Mark, Difficulty, Choices[], image)
 ///   POST BankQuestions/bulk                     (multipart, like the single Create above but N questions + optional per-question image — all-or-nothing batch import)
+///   POST BankQuestions/sync-from-history        (auto-imports questions from every past quiz/assignment not already in the bank)
 ///   GET  BankQuestions?lessonId=..&difficulty=..&p=..
 ///   POST BankQuestions/delete/{id}
 ///   GET  BankQuestions/attempts?p=..             (roster of every student practice attempt)
@@ -205,6 +206,153 @@ public class BankQuestionsController : ControllerBase
         await _db.SaveChangesAsync();
 
         return Ok(new BulkCreateBankQuestionsResult(entities.Count, entities.Select(e => e.Id).ToList()));
+    }
+
+    // Scans EVERY past (Deadline already passed) quiz and assignment the
+    // teacher owns, and auto-imports any question that isn't already in the
+    // bank (tracked via SourceQuizId/SourceAssignmentId + SourceQuestionId, so
+    // it's always safe to call again later — already-imported questions and
+    // still-upcoming quizzes/assignments are just skipped).
+    //
+    // Placement: a unit with lessons -> its LAST lesson (by LessonIndex); a
+    // unit with no lessons -> attached directly to the unit. An assignment
+    // covering more than one unit is skipped (a question isn't tagged with
+    // which of the assignment's units it belongs to, so it can't be placed
+    // automatically) and listed under "skippedMultiUnitAssignments".
+    //
+    // Difficulty: a question the majority of takers got wrong (MarkAwarded ==
+    // 0 for more than half the graded answers) is forced to "Hard"; otherwise
+    // it's assigned at random across Easy/Medium/Hard.
+    [HttpPost("sync-from-history")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> SyncFromHistory()
+    {
+        var teacherId = User.GetStaffTenantId()!.Value; // TENANT LAYER
+        var now = DateTime.UtcNow;
+        var created = new List<BankQuestion>();
+        var skippedMultiUnitAssignments = new List<int>();
+
+        // Cache unit -> (lessonId, unitId) placement lookups so a repeated
+        // unit across many quizzes only hits the DB once.
+        var placementCache = new Dictionary<int, (int? lessonId, int? unitId)>();
+        async Task<(int? lessonId, int? unitId)?> GetPlacementAsync(int unitId)
+        {
+            if (placementCache.TryGetValue(unitId, out var cached)) return cached;
+            var unit = await _db.Units.Include(u => u.Lessons).FirstOrDefaultAsync(u => u.Id == unitId);
+            if (unit == null) return null;
+            var placement = unit.Lessons.Count > 0
+                ? ((int?)unit.Lessons.OrderByDescending(l => l.LessonIndex).First().Id, (int?)null)
+                : ((int?)null, (int?)unit.Id);
+            placementCache[unitId] = placement;
+            return placement;
+        }
+
+        // ── Quizzes ──
+        var pastQuizzes = await _db.Quizzes.Include(q => q.Questions)
+            .Where(q => q.Deadline < now).ToListAsync();
+        var importedQuizQuestionIds = (await _db.BankQuestions
+                .Where(bq => bq.SourceQuizId != null)
+                .Select(bq => new { bq.SourceQuizId, bq.SourceQuestionId })
+                .ToListAsync())
+            .Select(x => (x.SourceQuizId, x.SourceQuestionId)).ToHashSet();
+
+        foreach (var quiz in pastQuizzes)
+        {
+            var placement = await GetPlacementAsync(quiz.UnitId);
+            if (placement == null) continue;
+
+            foreach (var q in quiz.Questions)
+            {
+                if (importedQuizQuestionIds.Contains((quiz.Id, q.Id))) continue;
+
+                var answers = await _db.QuizAnswers
+                    .Where(a => a.QuestionId == q.Id && a.QuizResult!.QuizId == quiz.Id)
+                    .Select(a => a.MarkAwarded)
+                    .ToListAsync();
+                var graded = answers.Where(m => m.HasValue).Select(m => m!.Value).ToList();
+                var wrongRate = graded.Count > 0 ? graded.Count(m => m == 0) / (double)graded.Count : 0;
+
+                created.Add(new BankQuestion
+                {
+                    LessonId = placement.Value.lessonId,
+                    UnitId = placement.Value.unitId,
+                    Type = q.Type,
+                    Text = q.Text,
+                    Answer = q.Answer,
+                    Mark = q.Mark,
+                    Choices = q.Choices,
+                    ImageUrl = q.ImageUrl,
+                    Difficulty = QuizzesController.PickDifficulty(wrongRate),
+                    TeacherId = teacherId,
+                    SourceQuizId = quiz.Id,
+                    SourceQuestionId = q.Id
+                });
+            }
+        }
+
+        // ── Assignments ──
+        var pastAssignments = await _db.Assignments.Include(a => a.Questions)
+            .Where(a => a.Deadline < now).ToListAsync();
+        var importedAssignmentQuestionIds = (await _db.BankQuestions
+                .Where(bq => bq.SourceAssignmentId != null)
+                .Select(bq => new { bq.SourceAssignmentId, bq.SourceQuestionId })
+                .ToListAsync())
+            .Select(x => (x.SourceAssignmentId, x.SourceQuestionId)).ToHashSet();
+
+        foreach (var assignment in pastAssignments)
+        {
+            var unitIds = assignment.UnitIds;
+            if (unitIds.Count != 1)
+            {
+                if (assignment.Questions.Count > 0) skippedMultiUnitAssignments.Add(assignment.Id);
+                continue;
+            }
+
+            var placement = await GetPlacementAsync(unitIds[0]);
+            if (placement == null) continue;
+
+            foreach (var q in assignment.Questions)
+            {
+                if (importedAssignmentQuestionIds.Contains((assignment.Id, q.Id))) continue;
+
+                var answers = await _db.AssignmentAnswers
+                    .Where(a => a.QuestionId == q.Id && a.AssignmentSubmission!.AssignmentId == assignment.Id)
+                    .Select(a => a.MarkAwarded)
+                    .ToListAsync();
+                var graded = answers.Where(m => m.HasValue).Select(m => m!.Value).ToList();
+                var wrongRate = graded.Count > 0 ? graded.Count(m => m == 0) / (double)graded.Count : 0;
+
+                created.Add(new BankQuestion
+                {
+                    LessonId = placement.Value.lessonId,
+                    UnitId = placement.Value.unitId,
+                    Type = q.Type,
+                    Text = q.Text,
+                    Answer = q.Answer,
+                    Mark = q.Mark,
+                    Choices = q.Choices,
+                    ImageUrl = q.ImageUrl,
+                    Difficulty = QuizzesController.PickDifficulty(wrongRate),
+                    TeacherId = teacherId,
+                    SourceAssignmentId = assignment.Id,
+                    SourceQuestionId = q.Id
+                });
+            }
+        }
+
+        if (created.Count > 0)
+        {
+            _db.BankQuestions.AddRange(created);
+            await _db.SaveChangesAsync();
+        }
+
+        return Ok(new
+        {
+            imported = created.Count,
+            fromQuizzes = created.Count(c => c.SourceQuizId != null),
+            fromAssignments = created.Count(c => c.SourceAssignmentId != null),
+            skippedMultiUnitAssignments
+        });
     }
 
     [HttpGet]

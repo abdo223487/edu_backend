@@ -157,8 +157,8 @@ public class GreenApiWhatsAppService : IWhatsAppService
             $"تم تسجيل حضور الطالب/ة {data.StudentName} مع المدرس {data.TeacherName} " +
             $"بتاريخ {data.AttendanceLocalTime:dd/MM/yyyy} الساعة {data.AttendanceLocalTime:HH:mm:ss}.\n\n" +
             $"آخر درجة: {data.LastGradeText}\n" +
-            $"آخر واجب: {data.LastHomeworkText}\n" +
-            $"حالة المذكرة: {data.NotebookStatusText}";
+            $"آخر واجب: {data.LastHomeworkText}\n\n" +
+            $"{data.NotebookLineText}";
     }
 
     private static string BuildWelcomeMessageText(StudentWelcomeWhatsAppNotification data, GreenApiOptions options)

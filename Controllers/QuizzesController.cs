@@ -526,4 +526,17 @@ public class QuizzesController : ControllerBase
         await _db.SaveChangesAsync();
         return Ok(new { message = "Quiz deleted." });
     }
+
+    private static readonly Random _difficultyRng = new();
+
+    // "struggled a lot" = the majority of takers got it wrong -> force Hard.
+    // Otherwise spread questions randomly across all three levels. Used by
+    // BankQuestionsController.SyncFromHistory when auto-importing quiz/assignment
+    // questions into the question bank.
+    internal static string PickDifficulty(double wrongRate, double hardThreshold = 0.5)
+    {
+        if (wrongRate >= hardThreshold) return "Hard";
+        var levels = new[] { "Easy", "Medium", "Hard" };
+        return levels[_difficultyRng.Next(levels.Length)];
+    }
 }

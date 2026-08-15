@@ -25,21 +25,42 @@ public class WhatsAppOptions
     /// Name of the approved Message Template in Meta Business Manager.
     /// Business-initiated messages MUST use an approved template. This
     /// project uses the APPROVED template "attendance_notification" with
-    /// these exact 7 named body variables:
+    /// these exact 7 named body variables. NOTE: {{last_grade}} and
+    /// {{last_homework}} are numeric marks ONLY ("17/20") -- never a quiz
+    /// or homework title/name (no "اختبار الوحدة", no "سنتر كويز", etc.).
     ///   {{student_name}}
     ///   {{teacher_name}}
     ///   {{date}}             dd/MM/yyyy
     ///   {{time}}              HH:mm:ss
-    ///   {{last_grade}}        "85/100 - اختبار الوحدة الأولى (12/07/2026)" or "لا يوجد"
+    ///   {{last_grade}}        "17/20" or "لا يوجد"
     ///   {{last_homework}}     same format, or "لا يوجد"
-    ///   {{notebook_status}}   "اسم المذكرة: مدفوعة | ..." or "لا يوجد مذكرات"
+    ///   {{notebook_line}}     the ENTIRE last line, fully backend-composed.
+    ///                         Always ends with the same encouraging closing
+    ///                         sentence (with the teacher's name baked in);
+    ///                         when the student has a notebook, a
+    ///                         "📒 حالة المذكرة: ..." line (with emojis) is
+    ///                         prepended before the closing sentence. Never
+    ///                         blank/empty -- there's always at least the
+    ///                         closing sentence.
     ///
-    /// Approved template body text (Arabic, category "Utility"):
-    ///   "السلام عليكم ورحمة الله وبركاته تم تسجيل حضور الطالب/ة {{student_name}}
-    ///    مع المدرس {{teacher_name}} بتاريخ {{date}} الساعة {{time}}.
-    ///    آخر درجة: {{last_grade}}
-    ///    آخر واجب: {{last_homework}}
-    ///    حالة المذكرة: {{notebook_status}} شكرًا لكم."
+    /// IMPORTANT: the approved template body must have NO static text
+    /// wrapping this variable -- it must be the entire last line by itself,
+    /// e.g.:
+    ///   "السلام عليكم ورحمة الله وبركاته 🤍
+    ///
+    ///    تم تسجيل حضور الطالب/ة {{student_name}}
+    ///    مع المدرس {{teacher_name}}
+    ///
+    ///    بتاريخ {{date}} 📅
+    ///    الساعة {{time}} 🕒
+    ///
+    ///    آخر درجة: {{last_grade}} 📊
+    ///    آخر واجب: {{last_homework}} 📚
+    ///
+    ///    {{notebook_line}}"
+    /// (NOT "حالة المذكرة: {{notebook_line}} شكرًا لكم." -- {{notebook_line}}
+    /// already carries its own full closing text, so wrapping it in more
+    /// static text would duplicate/garble the message.)
     /// </summary>
     public string TemplateName { get; set; } = "attendance_notification";
 

@@ -49,7 +49,7 @@ public class MetaWhatsAppService : IWhatsAppService
             new { type = "text", parameter_name = "time", text = egyptTime.ToString("HH:mm:ss") },
             new { type = "text", parameter_name = "last_grade", text = data.LastGradeText },
             new { type = "text", parameter_name = "last_homework", text = data.LastHomeworkText },
-            new { type = "text", parameter_name = "notebook_status", text = data.NotebookStatusText },
+            new { type = "text", parameter_name = "notebook_line", text = data.NotebookLineText },
         };
 
         return await SendTemplateAsync(parentPhoneNumber, _options.TemplateName, parameters, "attendance");

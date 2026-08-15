@@ -4,9 +4,13 @@ public record AttendanceWhatsAppNotification(
     string StudentName,
     string TeacherName,
     DateTime AttendanceLocalTime,
+    // Numeric marks only ("17/20") -- no quiz/homework title text.
     string LastGradeText,
     string LastHomeworkText,
-    string NotebookStatusText
+    // Entire last line of the template, fully composed here -- see
+    // WhatsAppOptions.TemplateName doc comment. Always ends with the
+    // encouraging closing sentence; never blank.
+    string NotebookLineText
 );
 
 public record StudentWelcomeWhatsAppNotification(
