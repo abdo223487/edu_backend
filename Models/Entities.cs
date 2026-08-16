@@ -955,6 +955,15 @@ public class BankQuestion
 
     /// <summary>TENANT LAYER: which teacher (tenant) this bank question belongs to.</summary>
     public int TeacherId { get; set; }
+
+    // Set only when this bank question was auto-imported from a Quiz/Assignment
+    // (see QuizzesController/AssignmentsController "export-to-bank"), never for
+    // questions the teacher typed directly into the bank. SourceQuestionId is
+    // the original Question/AssignmentQuestion Id — used to skip re-importing
+    // the same question if the teacher runs the export more than once.
+    public int? SourceQuizId { get; set; }
+    public int? SourceAssignmentId { get; set; }
+    public int? SourceQuestionId { get; set; }
 }
 
 /// <summary>
