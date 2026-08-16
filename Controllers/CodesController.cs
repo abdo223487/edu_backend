@@ -272,24 +272,51 @@ public class CodesController : ControllerBase
                 return BadRequest(new { message = "TriggerLectureId must be a Center lecture." });
         }
 
-        var code = new Code
+        // FIX: this used to call GenerateRandomCode() (plain GenerateRandom(),
+        // no DB pre-check at all) and Add()+SaveChangesAsync() with no
+        // try/catch. Now uses GenerateUniqueAsync (checks the DB first, same
+        // as AttendanceController's auto-issued codes) AND retries on a
+        // genuine DbUpdateException from the unique index on Code.Value
+        // (AppDbContext) -- belt-and-suspenders against the same class of
+        // race condition, since neither the pre-check nor the unique index
+        // alone is both sufficient and convenient on its own: the pre-check
+        // can still race, and reacting to the index without retrying would
+        // surface a raw 500 to the teacher for what's really just a rare,
+        // recoverable collision.
+        const int maxAttempts = 5;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            Value = GenerateRandomCode(),
-            SchoolYear = request.SchoolYear,
-            UnitIds = request.UnitIds ?? new(),
-            LectureIds = request.LectureIds ?? new(),
-            OnlineLessonIds = request.OnlineLessonIds ?? new(),
-            IsTemplate = request.TriggerLectureId.HasValue,
-            TriggerLectureId = request.TriggerLectureId,
-            TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
-        };
-        _db.Codes.Add(code);
-        await _db.SaveChangesAsync();
+            var code = new Code
+            {
+                Value = await Common.CodeGenerator.GenerateUniqueAsync(_db),
+                SchoolYear = request.SchoolYear,
+                UnitIds = request.UnitIds ?? new(),
+                LectureIds = request.LectureIds ?? new(),
+                OnlineLessonIds = request.OnlineLessonIds ?? new(),
+                IsTemplate = request.TriggerLectureId.HasValue,
+                TriggerLectureId = request.TriggerLectureId,
+                TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
+            };
+            _db.Codes.Add(code);
 
-        return Ok(await ToDto(code));
+            try
+            {
+                await _db.SaveChangesAsync();
+                return Ok(await ToDto(code));
+            }
+            catch (DbUpdateException) when (attempt < maxAttempts)
+            {
+                // Detach the failed insert so the next attempt's
+                // SaveChangesAsync doesn't try (and fail) to save it again.
+                _db.Entry(code).State = EntityState.Detached;
+            }
+        }
+
+        // Reaching here means maxAttempts consecutive collisions -- vanishingly
+        // unlikely with an 8-char, 32-symbol alphabet, but fail loudly rather
+        // than silently if it ever does happen.
+        return StatusCode(500, new { message = "Could not generate a unique code after several attempts. Please try again." });
     }
-
-    private static string GenerateRandomCode() => Common.CodeGenerator.GenerateRandom();
 
     private async Task<object> ToDto(Code c)
     {

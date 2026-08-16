@@ -101,9 +101,52 @@ public class MaterialController : ControllerBase
         var material = await _db.Materials.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (id) && e.NotebookId == null);
         if (material == null) return NotFound(new { message = "Material not found." });
 
-        if (User.IsInRole(Roles.Student) && material.UnitId.HasValue &&
-            !User.GetUnitIds().Contains(material.UnitId.Value))
-            return StatusCode(403, new { message = "Not subscribed to this unit." });
+        if (User.IsInRole(Roles.Student))
+        {
+            var studentId = User.GetUserId();
+
+            if (material.UnitId.HasValue)
+            {
+                // Same gate as LecturesController.ByGroup: visible via a
+                // full Unit subscription OR a lecture-specific unlock.
+                if (!User.GetUnitIds().Contains(material.UnitId.Value) &&
+                    !await _db.StudentLectureUnlocks.AnyAsync(u => u.StudentId == studentId && u.LectureId == material.LectureId))
+                    return StatusCode(403, new { message = "Not subscribed to this unit." });
+            }
+            else if (material.LectureId.HasValue)
+            {
+                // SECURITY FIX: this branch didn't exist before -- a
+                // Material tied only to a LectureId (no UnitId) skipped the
+                // check above entirely (material.UnitId.HasValue was false),
+                // so ANY authenticated student could fetch the file just by
+                // knowing/guessing the Material id, completely bypassing
+                // whatever code-based unlock was supposed to gate that
+                // lecture (see StudentsController.RedeemCode and
+                // LecturesController.ByGroup, which both treat a
+                // no-UnitId lecture as locked until a StudentLectureUnlock
+                // or StudentOnlineLessonUnlock row exists). Now mirrors the
+                // exact same three-way gate those use:
+                var lecture = await _db.Lectures.AsNoTracking()
+                    .Where(l => l.Id == material.LectureId.Value)
+                    .Select(l => new { l.OnlineLessonId })
+                    .FirstOrDefaultAsync();
+
+                var unlocked = lecture?.OnlineLessonId.HasValue == true
+                    // Lecture lives inside an OnlineLesson container -- gated
+                    // on unlocking the WHOLE container, not the lecture itself
+                    // (see OnlineLessonsController and the Lecture.OnlineLessonId
+                    // doc comment in Models/Entities.cs).
+                    ? await _db.StudentOnlineLessonUnlocks.AnyAsync(u =>
+                        u.StudentId == studentId && u.OnlineLessonId == lecture!.OnlineLessonId.Value)
+                    // Standalone lecture (no Unit, no OnlineLesson) -- gated
+                    // directly on a per-lecture unlock.
+                    : await _db.StudentLectureUnlocks.AnyAsync(u =>
+                        u.StudentId == studentId && u.LectureId == material.LectureId.Value);
+
+                if (!unlocked)
+                    return StatusCode(403, new { message = "Not unlocked for this lecture." });
+            }
+        }
 
         string? unitName = null;
         if (material.UnitId.HasValue)

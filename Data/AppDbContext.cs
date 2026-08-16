@@ -127,6 +127,38 @@ public class AppDbContext : DbContext
         // (IssueTriggeredCodesAsync) — same performance reasoning as the
         // TeacherId indexes above.
         modelBuilder.Entity<Code>().HasIndex(c => c.TriggerLectureId);
+        // RACE-CONDITION FIX: same class of bug as the Attendance unique
+        // index below. IssueTriggeredCodesAsync's "already issued?" AnyAsync
+        // check (SourceCodeTemplateId + UsedByStudentId) is not atomic, so
+        // two near-simultaneous attendance requests for the same student
+        // (double scan, client retry, offline-sync replay) can both pass it
+        // before either INSERT commits, minting two redeemed codes -- and
+        // therefore double-granting whatever units/lectures/online-lessons
+        // that template unlocks -- for the same student. Both columns are
+        // nullable (a Code can be a plain non-template, unredeemed code, in
+        // which case both are null), so this MUST be a filtered/partial
+        // index -- Postgres treats every NULL as distinct, so an unfiltered
+        // unique index here would silently allow unlimited rows where both
+        // columns are null instead of actually enforcing "one issued code
+        // per template per student".
+        modelBuilder.Entity<Code>()
+            .HasIndex(c => new { c.SourceCodeTemplateId, c.UsedByStudentId })
+            .IsUnique()
+            .HasFilter("\"SourceCodeTemplateId\" IS NOT NULL AND \"UsedByStudentId\" IS NOT NULL");
+        // RACE-CONDITION FIX: CodeGenerator.GenerateUniqueAsync only checked
+        // "is this random value already taken?" via AnyAsync before
+        // returning it -- not atomic, so two near-simultaneous generate
+        // calls (a teacher clicking Generate twice, or two attendance
+        // records triggering a code mint at the same instant) could both
+        // land on the same 8-char candidate and both pass the check before
+        // either INSERT commits. Codes.Value is looked up directly during
+        // redemption (StudentsController: c.Value == request.Code) with no
+        // other disambiguator, so a duplicate here isn't just a wasted row
+        // -- it can hand one student's code to whichever row redemption
+        // happens to match first, silently misdirecting the unlock. No
+        // nullability concern here (Value is always set), so this is a
+        // plain unique index, no filter needed.
+        modelBuilder.Entity<Code>().HasIndex(c => c.Value).IsUnique();
         modelBuilder.Entity<Notification>().HasIndex(n => n.TeacherId);
         modelBuilder.Entity<Quiz>().HasIndex(q => q.TeacherId);
         modelBuilder.Entity<Assignment>().HasIndex(a => a.TeacherId);
@@ -153,6 +185,15 @@ public class AppDbContext : DbContext
         // column) and the common TeacherId+StudentId combination, instead of
         // needing two separate indexes.
         modelBuilder.Entity<QuizResult>().HasIndex(qr => new { qr.TeacherId, qr.StudentId });
+        // RACE-CONDITION FIX: QuizzesController.Grade's "already submitted?"
+        // AnyAsync check was never atomic with its later INSERT, so two
+        // near-simultaneous grade submissions (double-tap, client retry, or
+        // -- worse -- a student deliberately re-submitting after seeing
+        // correct answers from a first attempt) could both land as separate
+        // QuizResult rows for the same student+quiz. The database itself
+        // now refuses a second row outright, regardless of timing or
+        // whether the app-level check was skipped/bypassed.
+        modelBuilder.Entity<QuizResult>().HasIndex(qr => new { qr.QuizId, qr.StudentId }).IsUnique();
         modelBuilder.Entity<CenterQuizResult>().HasIndex(cr => new { cr.TeacherId, cr.StudentId });
         modelBuilder.Entity<HomeworkResult>().HasIndex(hr => new { hr.TeacherId, hr.StudentId });
 
@@ -177,8 +218,28 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<StudentUnitSubscription>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
 
         modelBuilder.Entity<Attendance>().HasIndex(a => a.TeacherId);
+        // RACE-CONDITION FIX: the app-level "already recorded?" AnyAsync
+        // check in AttendanceController is not atomic -- two near-
+        // simultaneous requests for the same student+lecture (double QR
+        // scan, client retry after a timeout, offline-sync replay) can both
+        // pass that check before either one's SaveChangesAsync commits,
+        // producing two Attendance rows for the same student in the same
+        // lecture. This unique index makes the database itself the source
+        // of truth and reject the second insert outright, regardless of
+        // timing -- the AnyAsync check stays in place as a fast, friendly
+        // first line of defense (clear error message), this index is what
+        // actually guarantees no duplicate ever lands in the table.
+        modelBuilder.Entity<Attendance>().HasIndex(a => new { a.LectureId, a.StudentId }).IsUnique();
         modelBuilder.Entity<AssignmentSubmission>().HasIndex(s => s.TeacherId);
         modelBuilder.Entity<AssignmentCenterSubmission>().HasIndex(s => s.TeacherId);
+        // RACE-CONDITION FIX: same class of bug as the QuizResult fix above
+        // -- AssignmentCentersController.Submit's AnyAsync check + later
+        // INSERT aren't atomic either. Its app-level check DOES correctly
+        // reject re-submission, but that check alone still can't stop two
+        // truly-simultaneous requests from both passing it before either
+        // commits. This index is the actual guarantee.
+        modelBuilder.Entity<AssignmentCenterSubmission>()
+            .HasIndex(s => new { s.AssignmentCenterId, s.StudentId }).IsUnique();
         modelBuilder.Entity<NotebookPayment>().HasIndex(p => p.TeacherId);
         modelBuilder.Entity<BillingPayment>().HasIndex(p => p.TeacherId);
         modelBuilder.Entity<StudentLectureUnlock>().HasIndex(u => u.TeacherId);

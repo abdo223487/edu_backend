@@ -283,6 +283,19 @@ public class LecturesController : ControllerBase
             Enum.TryParse<AttendanceMethod>(request.AttendanceMethod, true, out var method))
             lecture.AttendanceMethod = method;
         if (request.SchoolYear.HasValue) lecture.SchoolYear = request.SchoolYear.Value;
+        // FEATURE: editing which groups/course a lecture is visible to used
+        // to be impossible via this endpoint at all -- the Flutter client
+        // worked around that by deleting the whole lecture and recreating it
+        // from scratch just to change its groups, which silently orphaned
+        // that lecture's attendance history, materials, and its old id
+        // (anything referencing the deleted lectureId broke). Now a real
+        // in-place update. Standalone/OnlineLesson lectures (no Unit) never
+        // had a GroupIds concept to begin with (see the Lecture.OnlineLessonId
+        // doc comment in Models/Entities.cs) -- silently ignore this field
+        // for those rather than erroring, since the client may still send an
+        // empty/irrelevant groupIds for them.
+        if (request.GroupIds != null && lecture.UnitId.HasValue)
+            lecture.GroupIds = request.GroupIds;
 
         await _db.SaveChangesAsync();
         return Ok(ToDto(lecture));

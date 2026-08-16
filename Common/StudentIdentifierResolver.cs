@@ -26,14 +26,17 @@ public static class StudentIdentifierResolver
     /// <summary>
     /// Collapses Arabic letter-shape variants that real users type
     /// interchangeably (أ/إ/آ/ٱ vs ا, ة vs ه, ى/ئ vs ي, ؤ vs و) down to one
-    /// canonical form, and strips tashkeel/diacritics -- so e.g. "أحمد" and
-    /// "احمد" become byte-identical for comparison purposes.
+    /// canonical form, strips tashkeel/diacritics, and collapses any run of
+    /// whitespace (extra spaces from mobile-keyboard autocorrect, tabs, etc.)
+    /// down to a single space -- so e.g. "أحمد  محمد" (double space) and
+    /// "احمد محمد" become byte-identical for comparison purposes.
     /// </summary>
     public static string NormalizeArabic(string? input)
     {
         if (string.IsNullOrEmpty(input)) return string.Empty;
 
         var sb = new System.Text.StringBuilder(input.Length);
+        var lastWasSpace = false;
         foreach (var ch in input)
         {
             // Arabic diacritics/tashkeel (fatha, damma, kasra, shadda, sukun,
@@ -41,20 +44,52 @@ public static class StudentIdentifierResolver
             if (ch is >= '\u064B' and <= '\u0652' or '\u0670')
                 continue;
 
+            if (char.IsWhiteSpace(ch))
+            {
+                if (!lastWasSpace) sb.Append(' ');
+                lastWasSpace = true;
+                continue;
+            }
+            lastWasSpace = false;
+
             sb.Append(ArabicNormalizationMap.TryGetValue(ch, out var mapped) ? mapped : ch);
         }
         return sb.ToString().Trim();
     }
 
     /// <summary>
+    /// Reduces a phone number down to just its digits, then strips a leading
+    /// Egypt country-code/trunk-prefix variant (+20, 0020, or 20) and a
+    /// leading 0, leaving just the bare subscriber number -- so
+    /// "01012345678", "+201012345678", "0020 101 234 5678", and "1012345678"
+    /// (same number typed 4 different ways, all real things people type) all
+    /// normalize to the same core digits and compare equal. Previously phone
+    /// matching was a byte-for-byte string comparison with none of this, so
+    /// any of those harmless variations silently failed to match a student
+    /// who was actually in the database under a differently-formatted number.
+    /// </summary>
+    private static string NormalizePhone(string? input)
+    {
+        if (string.IsNullOrEmpty(input)) return string.Empty;
+
+        var digits = new string(input.Where(char.IsDigit).ToArray());
+        if (digits.Length == 0) return string.Empty;
+
+        if (digits.StartsWith("0020")) digits = digits[4..];
+        else if (digits.StartsWith("20") && digits.Length > 10) digits = digits[2..];
+
+        if (digits.StartsWith('0')) digits = digits[1..];
+
+        return digits;
+    }
+
+    /// <summary>
     /// Resolves a hand-typed identifier against <c>db.Students</c> in this
     /// order:
     ///   1) Numeric AND matches an existing Student.Id exactly.
-    ///   2) Exact PhoneNumber match, compared as a STRING -- this is what
-    ///      keeps a leading zero intact (e.g. "01012345678"). Parsing a
-    ///      phone number to an int first (like the old id-or-phone fallback
-    ///      used to) silently drops that leading zero, so the phone lookup
-    ///      then never matches anything.
+    ///   2) Phone match, compared via NormalizePhone (digits-only, leading
+    ///      0 / country-code stripped) -- see that method's doc comment for
+    ///      why a raw string comparison was too strict.
     ///   3) Name, Arabic-normalized (see NormalizeArabic). Only resolves
     ///      when exactly ONE student matches -- with zero or several
     ///      matches we can't safely guess which student was meant, so this
@@ -80,11 +115,25 @@ public static class StudentIdentifierResolver
             await students.AnyAsync(s => s.Id == asId))
             return asId;
 
-        var byPhone = await students
-            .Where(s => s.PhoneNumber == identifier)
-            .Select(s => (int?)s.Id)
-            .FirstOrDefaultAsync();
-        if (byPhone != null) return byPhone;
+        // FIX: was `s.PhoneNumber == identifier` -- an exact byte-for-byte
+        // string comparison, so e.g. a stored "01012345678" would NOT match
+        // a typed "1012345678" or "+201012345678", even though they're
+        // obviously the same number. Now compares on NormalizePhone's
+        // digits-only, prefix-stripped form on BOTH sides so all the common
+        // ways people actually type a phone number match the same student.
+        // Pulled client-side (not translated to SQL) since it's only ever a
+        // handful of students per tenant -- cheap enough, and the normalize
+        // logic isn't SQL-translatable anyway.
+        var normalizedPhoneIdentifier = NormalizePhone(identifier);
+        if (normalizedPhoneIdentifier.Length > 0)
+        {
+            var phoneCandidates = await students
+                .Select(s => new { s.Id, s.PhoneNumber })
+                .ToListAsync();
+            var byPhone = phoneCandidates
+                .FirstOrDefault(s => NormalizePhone(s.PhoneNumber) == normalizedPhoneIdentifier);
+            if (byPhone != null) return byPhone.Id;
+        }
 
         var normalizedIdentifier = NormalizeArabic(identifier);
         if (normalizedIdentifier.Length == 0) return null;

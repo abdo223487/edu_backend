@@ -118,7 +118,37 @@ public class AttendanceController : ControllerBase
         if (request.AutoSubscribe)
             await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
         await IssueTriggeredCodesAsync(lectureId, studentId.Value);
-        await _db.SaveChangesAsync();
+
+        try
+        {
+            await _db.SaveChangesAsync();
+        }
+        catch (DbUpdateException)
+        {
+            // Now that Code also has a unique index (SourceCodeTemplateId +
+            // UsedByStudentId -- see AppDbContext), a duplicate insert here
+            // could be either the Attendance row OR a triggered Code, since
+            // both are saved together in this one SaveChangesAsync. Re-check
+            // which one actually happened rather than assuming it's always
+            // the attendance -- misreporting "Attendance already recorded"
+            // when the attendance itself is fine (only its triggered code
+            // collided) would be a confusing, wrong error message, and would
+            // also incorrectly discard an attendance record that should have
+            // been saved.
+            var attendanceExists = await _db.Attendances.AnyAsync(a => a.LectureId == lectureId && a.StudentId == studentId.Value);
+            if (attendanceExists)
+            {
+                // Same 400 + message as the AnyAsync path above, per the
+                // Flutter-client contract noted there.
+                return BadRequest(new { message = "Attendance already recorded." });
+            }
+
+            // The conflict was a triggered Code (or some other concurrent
+            // write), not the attendance itself -- the whole save was rolled
+            // back together, so nothing was actually persisted. Safe for the
+            // client to just retry the request.
+            return Conflict(new { message = "A conflicting update happened at the same time. Please try again." });
+        }
 
         await SendAttendanceWhatsAppAsync(studentId.Value, attendance.Date);
 
@@ -214,24 +244,65 @@ public class AttendanceController : ControllerBase
                 continue;
             }
 
-            _db.Attendances.Add(new Attendance
+            // PER-ITEM SAVE + TRY/CATCH: previously every item in the batch
+            // shared ONE SaveChangesAsync() call at the very end, so if the
+            // unique (LectureId, StudentId) index (added to guard against
+            // the AnyAsync-check race condition above -- see AppDbContext)
+            // rejected even a single duplicate insert here, EF would roll
+            // back and fail the ENTIRE batch, including every other
+            // perfectly valid item sent in the same request. Saving each
+            // item individually means a duplicate only fails that one item
+            // -- everything else in the batch still gets committed and
+            // reported back correctly.
+            var attendance = new Attendance
             {
                 TeacherId = _tenant.CurrentTenantId.Value,
                 LectureId = lectureId,
                 StudentId = studentId.Value,
                 EncodedStudentId = encodedStudentId,
                 Date = item.Date
-            });
+            };
+            _db.Attendances.Add(attendance);
             if (item.AutoSubscribe)
                 await AutoSubscribeIfSubscriptionLectureAsync(lectureId, studentId.Value);
             await IssueTriggeredCodesAsync(lectureId, studentId.Value);
+
+            try
+            {
+                await _db.SaveChangesAsync();
+            }
+            catch (DbUpdateException)
+            {
+                // Almost certainly the unique index catching a genuine race
+                // (e.g. the same student scanned twice in two overlapping
+                // requests, or an offline-sync replay) that slipped past the
+                // AnyAsync check above because it ran concurrently with
+                // another request. Detach everything this iteration added so
+                // the failed insert doesn't get retried (and fail again) on
+                // the next item's SaveChangesAsync call.
+                _db.Entry(attendance).State = EntityState.Detached;
+                foreach (var entry in _db.ChangeTracker.Entries().Where(e => e.State == EntityState.Added).ToList())
+                    entry.State = EntityState.Detached;
+
+                // Now that Code also has its own unique index, don't assume
+                // it was the attendance that collided -- re-check, same
+                // reasoning as the single Record endpoint above.
+                var attendanceExists = await _db.Attendances.AnyAsync(a => a.LectureId == lectureId && a.StudentId == studentId.Value);
+                failed.Add(new
+                {
+                    studentId = requestedId,
+                    reason = attendanceExists
+                        ? "Attendance already recorded."
+                        : "A conflicting update happened at the same time. Please try again."
+                });
+                continue;
+            }
+
             notifyList.Add((studentId.Value, item.Date));
             savedStudentIds.Add(studentId.Value);
             savedIdentifiers.Add(requestedId);
             created++;
         }
-
-        await _db.SaveChangesAsync();
 
         foreach (var (studentId, date) in notifyList)
             await SendAttendanceWhatsAppAsync(studentId, date);

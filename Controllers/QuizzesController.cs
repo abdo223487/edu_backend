@@ -345,6 +345,19 @@ public class QuizzesController : ControllerBase
         if (!alreadySubmitted && DateTime.UtcNow > quiz.Deadline)
             return StatusCode(410, new { message = "انتهى وقت الامتحان." });
 
+        // BUGFIX: alreadySubmitted was computed above (for the deadline
+        // check) but never actually acted on -- there was no rejection here
+        // at all, so a student could re-submit the same quiz an unlimited
+        // number of times, each creating a brand-new QuizResult. Beyond the
+        // obvious data-integrity issue (which score is even "the" result?),
+        // this let a student see the correct answers from a first attempt
+        // (GetAsStudent reveals them once a submission exists) and then
+        // submit again with corrected answers for a perfect score --
+        // completely undermining the exam. AssignmentCentersController.Submit
+        // already had this check; it was simply missing here.
+        if (alreadySubmitted)
+            return Conflict(new { message = "تم تسليم هذا الامتحان من قبل." });
+
         var totalMarks = quiz.Questions.Sum(q => q.Mark);
         var score = 0;
 
@@ -369,7 +382,20 @@ public class QuizzesController : ControllerBase
 
         result.Score = score;
         _db.QuizResults.Add(result);
-        await _db.SaveChangesAsync();
+
+        try
+        {
+            await _db.SaveChangesAsync();
+        }
+        catch (DbUpdateException)
+        {
+            // RACE-CONDITION FIX: the AnyAsync check above already covers
+            // the common case; this catches the rare genuine race (two
+            // near-simultaneous submissions for the same student+quiz) that
+            // the unique (QuizId, StudentId) index (see AppDbContext)
+            // rejects at the database level.
+            return Conflict(new { message = "تم تسليم هذا الامتحان من قبل." });
+        }
 
         // Notify the parent on WhatsApp that the student finished this online
         // quiz. Never let this block/fail the submission itself — the

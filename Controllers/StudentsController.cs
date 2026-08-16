@@ -1,4 +1,5 @@
 using System.Text;
+using System.Data;
 using ClosedXML.Excel;
 using EduApi.Common;
 using EduApi.Data;
@@ -966,6 +967,18 @@ public class StudentsController : ControllerBase
             };
             var trimmedQ = q?.Trim();
             var isNumericQuery = !string.IsNullOrEmpty(trimmedQ) && trimmedQ.All(char.IsDigit);
+            // Distinguishes "typed an ID" from "typed part of a phone number"
+            // when the query is purely digits. Egyptian phone numbers always
+            // start with 0 and are long (11 digits) -- so a short, non-zero-
+            // leading numeric query (e.g. "27") is almost certainly someone
+            // searching by student ID, not typing the start/middle of a
+            // phone number. Without this distinction, a query like "27"
+            // matched BOTH "student Id contains 27" AND "phone number
+            // contains 27" at once, mixing unrelated phone-number matches
+            // into what was meant as an ID lookup. 5 digits is the cutoff --
+            // comfortably below any real phone number's length, generous
+            // enough for auto-increment ids for a long time to come.
+            var isIdLikeQuery = isNumericQuery && trimmedQ!.Length <= 5 && !trimmedQ.StartsWith('0');
             if (groupId.HasValue)
                 query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
             else if (schoolYear.HasValue)
@@ -985,13 +998,16 @@ public class StudentsController : ControllerBase
             // SEARCH: "q" matches Name (Arabic-normalized, so common
             // letter-shape variants are treated as identical -- see
             // NormalizeArabic), PhoneNumber (substring), or Id (substring on
-            // the numeric id, and exact when the id itself matches). Because
-            // the normalized-name comparison can't be translated to SQL, we
-            // pull the (already status/group/year-filtered, still
-            // tenant-scoped) candidate rows into memory first and filter/page
-            // there whenever a search term is present. Without a search term
-            // we keep the original all-SQL path (paged in the database) for
-            // best performance on the common "just browse the list" case.
+            // the numeric id, and exact when the id itself matches) -- UNLESS
+            // the query is a short, non-zero-leading number (isIdLikeQuery),
+            // in which case it's treated as an ID-only search (see comment
+            // there for why). Because the normalized-name comparison can't
+            // be translated to SQL, we pull the (already status/group/year-
+            // filtered, still tenant-scoped) candidate rows into memory
+            // first and filter/page there whenever a search term is
+            // present. Without a search term we keep the original all-SQL
+            // path (paged in the database) for best performance on the
+            // common "just browse the list" case.
             List<StudentRow> students;
             if (!string.IsNullOrWhiteSpace(trimmedQ))
             {
@@ -1002,9 +1018,15 @@ public class StudentsController : ControllerBase
 
                 students = candidates
                     .Where(s =>
-                        NormalizeArabic(s.Name).Contains(normalizedQ, StringComparison.OrdinalIgnoreCase) ||
-                        (s.PhoneNumber != null && s.PhoneNumber.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)) ||
-                        (isNumericQuery && s.Id.ToString().Contains(trimmedQ)))
+                        isIdLikeQuery
+                            // Short, non-zero-leading numeric query -> ID
+                            // search ONLY. Deliberately does NOT also check
+                            // PhoneNumber/Name here -- that's the whole
+                            // point of the branch (see isIdLikeQuery above).
+                            ? s.Id.ToString().Contains(trimmedQ)
+                            : NormalizeArabic(s.Name).Contains(normalizedQ, StringComparison.OrdinalIgnoreCase) ||
+                              (s.PhoneNumber != null && s.PhoneNumber.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)) ||
+                              (isNumericQuery && s.Id.ToString().Contains(trimmedQ)))
                     .OrderBy(s => s.Name)
                     .Skip((p - 1) * PagingDefaults.PageSize)
                     .Take(PagingDefaults.PageSize)
@@ -1341,14 +1363,39 @@ public class StudentsController : ControllerBase
     [Authorize(Roles = Roles.Student)]
     public async Task<IActionResult> RedeemCode([FromBody] RedeemCodeRequest request)
     {
-        var code = await _db.Codes.FirstOrDefaultAsync(c => c.Value == request.Code);
+        var code = await _db.Codes.AsNoTracking().FirstOrDefaultAsync(c => c.Value == request.Code);
         if (code == null || code.IsTemplate) return NotFound(new { message = "Invalid code." });
         if (code.IsUsed) return Conflict(new { message = "Code already used." });
 
         var studentId = User.GetUserId();
-        code.IsUsed = true;
-        code.UsedByStudentId = studentId;
-        code.UsedAt = DateTime.UtcNow;
+
+        // RACE-CONDITION FIX: this used to be "read code.IsUsed, then later
+        // set code.IsUsed = true and SaveChangesAsync at the very end" --
+        // not atomic, so two near-simultaneous redemptions of the SAME code
+        // (two students racing to redeem a shared code, or a double-tap)
+        // could both pass the IsUsed check above before either write
+        // committed, and both would succeed -- double-granting one
+        // supposedly single-use code's unlocks to two different students.
+        // ExecuteUpdateAsync issues a single atomic "UPDATE ... WHERE
+        // IsUsed = false" directly against the database: Postgres itself
+        // guarantees only one of two concurrent callers can ever flip this
+        // row from unused to used, and reports back exactly how many rows
+        // it actually changed (0 or 1) so we know which one we were.
+        var claimed = await _db.Codes
+            .Where(c => c.Value == request.Code && !c.IsUsed && !c.IsTemplate)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(c => c.IsUsed, true)
+                .SetProperty(c => c.UsedByStudentId, studentId)
+                .SetProperty(c => c.UsedAt, DateTime.UtcNow));
+
+        if (claimed == 0)
+        {
+            // Someone else (or another near-simultaneous request from the
+            // same caller) claimed it first between our read above and this
+            // update -- the code data we already read (UnitIds etc.) is
+            // stale, so don't grant anything.
+            return Conflict(new { message = "Code already used." });
+        }
 
         foreach (var unitId in code.UnitIds)
         {
@@ -1643,33 +1690,65 @@ public class StudentsController : ControllerBase
         if (request.Amount <= 0)
             return BadRequest(new { message = "Payment amount must be greater than zero." });
 
-        // SAFETY: don't let a student "overpay" past the notebook's price
-        // (or their applied discounted price, if any). Cap the accepted
-        // amount to whatever is actually still owed.
-        var existingPayments = await _db.NotebookPayments.AsNoTracking()
-            .Where(p => p.NotebookId == notebookId && p.StudentId == resolvedStudentId.Value)
-            .ToListAsync();
-        var alreadyPaid = existingPayments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
-        var owedTotal = existingPayments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
-                        ?? notebook.Price;
-        var remaining = owedTotal - alreadyPaid;
-        if (remaining <= 0)
-            return BadRequest(new { message = "This student has already fully paid for this notebook." });
-        if (request.Amount > remaining)
-            return BadRequest(new { message = $"Amount exceeds what's left to pay ({remaining})." });
-
-        var payment = new NotebookPayment
+        // RACE-CONDITION FIX: the "remaining owed" read below and this
+        // payment's INSERT used to happen with no transaction/locking at
+        // all. Two near-simultaneous payment requests for the same student
+        // + notebook (double-tap on "pay", two staff recording a payment at
+        // once) could both read the SAME "remaining" value before either
+        // INSERT committed, and both get accepted -- letting the student's
+        // total recorded payments exceed the notebook's price. Unlike the
+        // Attendance/Code duplicate-row bugs fixed earlier, a unique index
+        // can't fix this (multiple payments per student+notebook are normal
+        // -- installments), so this needs an actual atomic read+write
+        // instead: a SERIALIZABLE transaction makes Postgres itself detect
+        // the conflict and abort one of the two transactions with a
+        // retryable serialization-failure error, which we catch and retry
+        // with a fresh read of "remaining".
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            TeacherId = notebook.TeacherId,
-            NotebookId = notebookId,
-            StudentId = resolvedStudentId.Value,
-            Price = request.Amount,
-            LectureId = request.LectureId,
-        };
-        _db.NotebookPayments.Add(payment);
-        await _db.SaveChangesAsync();
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+            try
+            {
+                // SAFETY: don't let a student "overpay" past the notebook's
+                // price (or their applied discounted price, if any). Cap the
+                // accepted amount to whatever is actually still owed.
+                var existingPayments = await _db.NotebookPayments.AsNoTracking()
+                    .Where(p => p.NotebookId == notebookId && p.StudentId == resolvedStudentId.Value)
+                    .ToListAsync();
+                var alreadyPaid = existingPayments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
+                var owedTotal = existingPayments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
+                                ?? notebook.Price;
+                var remaining = owedTotal - alreadyPaid;
+                if (remaining <= 0)
+                    return BadRequest(new { message = "This student has already fully paid for this notebook." });
+                if (request.Amount > remaining)
+                    return BadRequest(new { message = $"Amount exceeds what's left to pay ({remaining})." });
 
-        return StatusCode(201, new { id = payment.Id, message = "Payment recorded." });
+                var payment = new NotebookPayment
+                {
+                    TeacherId = notebook.TeacherId,
+                    NotebookId = notebookId,
+                    StudentId = resolvedStudentId.Value,
+                    Price = request.Amount,
+                    LectureId = request.LectureId,
+                };
+                _db.NotebookPayments.Add(payment);
+                await _db.SaveChangesAsync();
+                await tx.CommitAsync();
+
+                return StatusCode(201, new { id = payment.Id, message = "Payment recorded." });
+            }
+            catch (DbUpdateException ex) when (attempt < maxAttempts && IsSerializationFailure(ex))
+            {
+                await tx.RollbackAsync();
+                // Loop again: a fresh transaction re-reads "remaining" from
+                // scratch, so it correctly sees whatever the other,
+                // successful transaction just committed.
+            }
+        }
+
+        return Conflict(new { message = "A conflicting payment was recorded at the same time. Please try again." });
     }
 
     // GET Students/{notebookId}/discount?studentId=..
@@ -1929,30 +2008,47 @@ public class StudentsController : ControllerBase
         if (request.Amount <= 0)
             return BadRequest(new { message = "Payment amount must be greater than zero." });
 
-        var existingPayments = await _db.BillingPayments.AsNoTracking()
-            .Where(p => p.BillingId == billingId && p.StudentId == resolvedStudentId.Value)
-            .ToListAsync();
-        var alreadyPaid = existingPayments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
-        var owedTotal = existingPayments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
-                        ?? billing.Price;
-        var remaining = owedTotal - alreadyPaid;
-        if (remaining <= 0)
-            return BadRequest(new { message = "This student has already fully paid for this billing." });
-        if (request.Amount > remaining)
-            return BadRequest(new { message = $"Amount exceeds what's left to pay ({remaining})." });
-
-        var payment = new BillingPayment
+        // RACE-CONDITION FIX: same class of bug as PayNotebook above, same
+        // fix -- see the comment there for the full explanation.
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            TeacherId = billing.TeacherId,
-            BillingId = billingId,
-            StudentId = resolvedStudentId.Value,
-            Price = request.Amount,
-            LectureId = request.LectureId,
-        };
-        _db.BillingPayments.Add(payment);
-        await _db.SaveChangesAsync();
+            await using var tx = await _db.Database.BeginTransactionAsync(IsolationLevel.Serializable);
+            try
+            {
+                var existingPayments = await _db.BillingPayments.AsNoTracking()
+                    .Where(p => p.BillingId == billingId && p.StudentId == resolvedStudentId.Value)
+                    .ToListAsync();
+                var alreadyPaid = existingPayments.Where(p => !p.DiscountedPrice.HasValue).Sum(p => p.Price);
+                var owedTotal = existingPayments.FirstOrDefault(p => p.DiscountedPrice.HasValue)?.DiscountedPrice
+                                ?? billing.Price;
+                var remaining = owedTotal - alreadyPaid;
+                if (remaining <= 0)
+                    return BadRequest(new { message = "This student has already fully paid for this billing." });
+                if (request.Amount > remaining)
+                    return BadRequest(new { message = $"Amount exceeds what's left to pay ({remaining})." });
 
-        return StatusCode(201, new { id = payment.Id, message = "Payment recorded." });
+                var payment = new BillingPayment
+                {
+                    TeacherId = billing.TeacherId,
+                    BillingId = billingId,
+                    StudentId = resolvedStudentId.Value,
+                    Price = request.Amount,
+                    LectureId = request.LectureId,
+                };
+                _db.BillingPayments.Add(payment);
+                await _db.SaveChangesAsync();
+                await tx.CommitAsync();
+
+                return StatusCode(201, new { id = payment.Id, message = "Payment recorded." });
+            }
+            catch (DbUpdateException ex) when (attempt < maxAttempts && IsSerializationFailure(ex))
+            {
+                await tx.RollbackAsync();
+            }
+        }
+
+        return Conflict(new { message = "A conflicting payment was recorded at the same time. Please try again." });
     }
 
     // GET Students/billing/{billingId}/discount?studentId=..
@@ -2356,6 +2452,16 @@ public class StudentsController : ControllerBase
     private Task<int?> ResolveManualStudentIdAsync(string? identifier, int fallbackId = 0)
         => Common.StudentIdentifierResolver.ResolveAsync(
             _db, string.IsNullOrWhiteSpace(identifier) ? fallbackId.ToString() : identifier);
+
+    // Used by PayNotebook / PayBilling's SERIALIZABLE-transaction retry loop
+    // (see comments there) to recognize a genuine Postgres serialization
+    // conflict (SQLSTATE 40001) -- the expected, retryable outcome when two
+    // concurrent payment transactions for the same student touch overlapping
+    // rows -- as opposed to some other DbUpdateException (bad data, a real
+    // constraint violation) that should just propagate as an actual error
+    // instead of being silently retried.
+    private static bool IsSerializationFailure(DbUpdateException ex) =>
+        ex.InnerException is Npgsql.PostgresException { SqlState: "40001" };
 
     // Both auto-generated UserName and Password are now 10-digit numeric
     // strings (digits 0-9 only), e.g. "9878934576". This applies whenever a

@@ -13,11 +13,14 @@ namespace EduApi.DTOs;
 // never neither.
 
 // PATCH Lectures/{id}
-// body: { "name", "attendanceMethod", "schoolYear" } (partial update; all fields optional)
+// body: { "name", "attendanceMethod", "schoolYear", "groupIds" } (partial update; all fields optional)
 // "schoolYear" is mainly useful to backfill standalone lectures created before
 // SchoolYear was required on them. Video source (file/YoutubeLink) is NOT
 // editable here — delete and recreate the lecture to change its video.
-public record UpdateLectureRequest(string? Name, string? AttendanceMethod, int? SchoolYear);
+// "groupIds", when present, REPLACES the lecture's entire group list (not a
+// merge/append) -- same "whole list every time" contract as Create's
+// GroupIds. Send the full desired list, not just the ones being added.
+public record UpdateLectureRequest(string? Name, string? AttendanceMethod, int? SchoolYear, List<int>? GroupIds);
 
 // "Link" is whichever video source is actually playable right now: the R2
 // file's public URL if the lecture has one, otherwise the YoutubeLink.

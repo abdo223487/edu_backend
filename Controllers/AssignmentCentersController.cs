@@ -260,7 +260,20 @@ public class AssignmentCentersController : ControllerBase
 
         submission.Score = score;
         _db.AssignmentCenterSubmissions.Add(submission);
-        await _db.SaveChangesAsync();
+
+        try
+        {
+            await _db.SaveChangesAsync();
+        }
+        catch (DbUpdateException)
+        {
+            // RACE-CONDITION FIX: the AnyAsync check above already covers
+            // the common case; this catches the rare genuine race (two
+            // near-simultaneous submissions for the same student+assignment)
+            // that the unique (AssignmentCenterId, StudentId) index (see
+            // AppDbContext) rejects at the database level.
+            return Conflict(new { message = "تم تسليم هذا الواجب من قبل." });
+        }
 
         try
         {
