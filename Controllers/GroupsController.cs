@@ -10,11 +10,15 @@ namespace EduApi.Controllers;
 
 public record CreateGroupRequest(int SchoolYear, string Name);
 
+// PATCH Groups/{id}  body: { name }
+public record UpdateGroupRequest(string Name);
+
 /// <summary>
 /// Route: api/Groups
-///  GET  Groups?schoolYear=..
-///  POST Groups                       body: { schoolYear, name }
-///  POST Groups/delete?groupId=..
+///  GET   Groups?schoolYear=..
+///  POST  Groups                       body: { schoolYear, name }
+///  PATCH Groups/{id}                  body: { name }
+///  POST  Groups/delete?groupId=..
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -75,6 +79,30 @@ public class GroupsController : ControllerBase
         await _cache.RemoveByPrefixAsync(GroupsCachePrefix());
 
         return StatusCode(201, new { groupId = group.Id, name = group.Name, schoolYear = group.SchoolYear });
+    }
+
+    [HttpPatch("{id:int}")]
+    public async Task<IActionResult> Update(int id, [FromBody] UpdateGroupRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Name))
+            return BadRequest(new { message = "Name is required." });
+
+        var group = await _db.Groups.FirstOrDefaultAsync(e => e.Id == (id));
+        if (group == null) return NotFound(new { message = "Group not found." });
+
+        // Same uniqueness rule as Create: no two groups sharing a name within
+        // the same school year (for this tenant -- Groups is already
+        // tenant-scoped via the query filter). Excludes the group's own
+        // current row so renaming a group to its own existing name (a no-op
+        // save) doesn't spuriously conflict with itself.
+        if (await _db.Groups.AnyAsync(g => g.Id != id && g.Name == request.Name && g.SchoolYear == group.SchoolYear))
+            return Conflict(new { message = "A group with this name already exists for this year." });
+
+        group.Name = request.Name.Trim();
+        await _db.SaveChangesAsync();
+        await _cache.RemoveByPrefixAsync(GroupsCachePrefix());
+
+        return Ok(new { groupId = group.Id, name = group.Name, schoolYear = group.SchoolYear });
     }
 
     [HttpPost("delete")]
