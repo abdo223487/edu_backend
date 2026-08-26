@@ -5,7 +5,7 @@ public record AssignmentQuestionDto(int Id, string QuestionType, string Text, Li
 // Teacher (and post-deadline student) view includes the correct answer.
 public record AssignmentQuestionTeacherDto(int Id, string QuestionType, string Text, List<string> Choices, string CorrectAnswer, int Mark, string? ImageUrl);
 
-public record AssignmentListItem(int Id, string Title, List<int> UnitIds, List<int> GroupIds, DateTime Deadline, int? SchoolYear, bool HasSubmitted);
+public record AssignmentListItem(int Id, string Title, List<int> UnitIds, List<int> GroupIds, DateTime Deadline, int? SchoolYear, bool HasSubmitted, bool AllowLateReview);
 
 // POST Assignments/submit
 // body: { "assignmentId": int, "answers": [ { "questionId": int, "answer": "..." }, ... ] }
@@ -20,6 +20,12 @@ public record ChangeAssignmentMarkRequest(int AssignmentId, int StudentId, int Q
 // POST Assignments/edit-question
 // body: { "assignmentId": int, "questionId": int, "text": "...", "mark": int, "choices": ["..."], "answer": "..." }
 public record EditAssignmentQuestionRequest(int AssignmentId, int QuestionId, string Text, int Mark, List<string>? Choices, string Answer);
+
+// POST Assignments/edit
+// body: { "assignmentId": int, "title": "...", "deadline": "...", "allowLateReview": bool }
+// Lets a teacher fix the assignment's own basic info (name/deadline/late-review
+// policy) after creation, without touching its questions/groups/units.
+public record EditAssignmentRequest(int AssignmentId, string Title, DateTime Deadline, bool AllowLateReview);
 
 public record AssignmentTakerDto(
     int StudentId,

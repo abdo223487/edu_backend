@@ -34,6 +34,12 @@ public record ChangeAnswerMarkRequest(int QuizId, int StudentId, int QuestionId,
 // exam question without deleting and recreating the whole quiz.
 public record EditQuestionRequest(int QuizId, int QuestionId, string Text, int Mark, List<string>? Choices, string Answer);
 
+// POST Quizzes/edit
+// body: { "quizId": int, "title": "...", "durationInMinutes": int, "allowLateReview": bool }
+// Lets a teacher fix the exam's own basic info (name/duration/late-review
+// policy) after creation, without touching its questions/groups/unit.
+public record EditQuizRequest(int QuizId, string Title, int DurationInMinutes, bool AllowLateReview);
+
 // Field names match Takers.dart's expected JSON exactly: quizMark (not
 // "score"), totalQuizMarks (not "totalMarks"), date, groupName.
 // StudentId is sent as a STRING (not int) — ExamReview_for_Taker.dart's

@@ -149,6 +149,9 @@ public class QuizzesController : ControllerBase
                 groups = q.GroupIds.Select(gid => groupNamesById.TryGetValue(gid, out var n) ? n : gid.ToString()).ToList(),
                 unit = new { month = unitsById.TryGetValue(q.UnitId, out var m) ? m : (int?)null },
                 grade = q.SchoolYear,
+                // Lets the teacher's exam-list/edit UI show the current
+                // late-review policy without a separate round trip.
+                allowLateReview = q.AllowLateReview,
                 isTaken = studentId.HasValue && takenQuizIds.Contains(q.Id),
                 // BUGFIX: the list endpoint used to only say isTaken=true without
                 // the actual score, so the exam-list card had no way to show the
@@ -191,6 +194,14 @@ public class QuizzesController : ControllerBase
         var schoolYear = await _db.Units.Where(u => u.Id == unitId)
             .Select(u => (int?)u.SchoolYear).FirstOrDefaultAsync();
 
+        // Optional: whether a student who never submits should still be able
+        // to open this exam in review mode (zero score) once the Deadline
+        // passes. Missing/unparseable -> true, matching the old hard-coded
+        // behavior so existing clients that don't send this field yet are
+        // unaffected.
+        var allowLateReview = !bool.TryParse(form["AllowLateReview"].ToString(), out var allowLateReviewParsed)
+            || allowLateReviewParsed;
+
         var quiz = new Quiz
         {
             Title = title,
@@ -199,6 +210,7 @@ public class QuizzesController : ControllerBase
             Deadline = deadline,
             GroupIds = groupIds,
             SchoolYear = schoolYear,
+            AllowLateReview = allowLateReview,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
         };
 
@@ -282,8 +294,17 @@ public class QuizzesController : ControllerBase
         // screen shows this student exactly like a real (zero-scoring) taker
         // — same DB row shape, same Score/TotalMarks/Answers as a genuine
         // submission, just with blank answers and MarkAwarded = 0 each.
+        //
+        // The teacher can turn this off per-exam via AllowLateReview: if it's
+        // false, a student who never submitted is simply blocked (410) once
+        // the deadline passes, same as they'd be blocked from a fresh
+        // submission attempt in Grade() below — no auto-review, no peeking at
+        // the exam at all.
         if (priorResult == null && DateTime.UtcNow > quiz.Deadline)
         {
+            if (!quiz.AllowLateReview)
+                return StatusCode(410, new { message = "انتهى وقت الامتحان." });
+
             var totalMarks = quiz.Questions.Sum(q => q.Mark);
             var autoZero = new QuizResult
             {
@@ -538,6 +559,38 @@ public class QuizzesController : ControllerBase
             questionType = question.Type,
             choices = question.Choices,
             correctAnswer = question.Answer
+        });
+    }
+
+    // Lets a teacher fix the exam's own basic info (name/duration/late-review
+    // policy) after creation — separate from edit-question above, which only
+    // touches individual questions. Deliberately does NOT let group/unit/
+    // deadline be changed here, since those affect who the exam is even
+    // visible to and interact with already-in-progress attempts.
+    [HttpPost("edit")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> EditQuiz([FromBody] EditQuizRequest request)
+    {
+        var quiz = await _db.Quizzes.FirstOrDefaultAsync(q => q.Id == request.QuizId);
+        if (quiz == null) return NotFound(new { message = "Quiz not found." });
+
+        if (string.IsNullOrWhiteSpace(request.Title))
+            return BadRequest(new { message = "اسم الامتحان مطلوب." });
+        if (request.DurationInMinutes <= 0)
+            return BadRequest(new { message = "مدة الامتحان لازم تكون أكبر من صفر." });
+
+        quiz.Title = request.Title;
+        quiz.DurationInMinutes = request.DurationInMinutes;
+        quiz.AllowLateReview = request.AllowLateReview;
+
+        await _db.SaveChangesAsync();
+
+        return Ok(new
+        {
+            id = quiz.Id,
+            title = quiz.Title,
+            durationInMinutes = quiz.DurationInMinutes,
+            allowLateReview = quiz.AllowLateReview
         });
     }
 

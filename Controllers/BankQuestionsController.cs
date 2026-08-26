@@ -727,7 +727,14 @@ public class BankQuestionsController : ControllerBase
             var attemptQuestion = new BankAttemptQuestion { BankQuestionId = q.Id };
             // Randomize the on-screen order of MCQ choices, snapshotted so it stays
             // stable across repeated GETs of the same attempt.
-            if (q.Type == "MCQ" && q.Choices.Count > 0)
+            // FIX: this used to be a case-sensitive `q.Type == "MCQ"` check, but
+            // Type is stored verbatim from whatever the client sent (see Create()
+            // validation above, which already accepts "MCQ" case-insensitively)
+            // and the Flutter app currently sends the type in lowercase ("mcq").
+            // That mismatch meant MCQ choices silently never got shuffled for any
+            // question whose Type wasn't the exact string "MCQ". Compare
+            // case-insensitively here too, consistent with the validation check.
+            if (string.Equals(q.Type, "MCQ", StringComparison.OrdinalIgnoreCase) && q.Choices.Count > 0)
                 attemptQuestion.ShuffledChoices = q.Choices.OrderBy(_ => random.Next()).ToList();
             attempt.Questions.Add(attemptQuestion);
         }

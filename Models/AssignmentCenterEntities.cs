@@ -35,6 +35,9 @@ public class AssignmentCenter
         set => UnitIdsCsv = string.Join(',', value);
     }
 
+    /// <summary>Same idea as Quiz/Assignment.AllowLateReview.</summary>
+    public bool AllowLateReview { get; set; } = true;
+
     /// <summary>TENANT LAYER: which teacher (tenant) this assignment-center belongs to.</summary>
     public int TeacherId { get; set; }
 

@@ -714,6 +714,16 @@ public class Quiz
     public DateTime Deadline { get; set; }
     public int? SchoolYear { get; set; }
 
+    /// <summary>
+    /// Controls what happens to a student who never submitted once the
+    /// Deadline passes. When true (default, matches the old hard-coded
+    /// behavior), the student is auto-dropped into review mode with a
+    /// zero score (see QuizzesController.GetAsStudent). When false, that
+    /// student is blocked from opening the exam at all once the Deadline
+    /// has passed without a submission (410).
+    /// </summary>
+    public bool AllowLateReview { get; set; } = true;
+
     /// <summary>TENANT LAYER: which teacher (tenant) this quiz belongs to.</summary>
     public int TeacherId { get; set; }
 
@@ -854,6 +864,14 @@ public class Assignment
         get => UnitIdsCsv.Length == 0 ? new() : UnitIdsCsv.Split(',').Select(int.Parse).ToList();
         set => UnitIdsCsv = string.Join(',', value);
     }
+
+    /// <summary>
+    /// Same idea as Quiz.AllowLateReview: controls whether a student who
+    /// never submitted can still open the assignment in review mode (seeing
+    /// the correct answers) once the Deadline has passed. When false, that
+    /// student is blocked from opening it at all (410).
+    /// </summary>
+    public bool AllowLateReview { get; set; } = true;
 
     /// <summary>TENANT LAYER: which teacher (tenant) this assignment belongs to.</summary>
     public int TeacherId { get; set; }

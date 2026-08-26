@@ -96,7 +96,8 @@ public class AssignmentsController : ControllerBase
             a.GroupIds,
             a.Deadline,
             a.SchoolYear,
-            studentId.HasValue && submittedIds.Contains(a.Id)));
+            studentId.HasValue && submittedIds.Contains(a.Id),
+            a.AllowLateReview));
 
         return Ok(items);
     }
@@ -144,6 +145,13 @@ public class AssignmentsController : ControllerBase
             schoolYear = await _db.Units.Where(u => unitIds.Contains(u.Id))
                 .Select(u => (int?)u.SchoolYear).FirstOrDefaultAsync();
 
+        // Same idea as Quizzes: whether a student who never submits can still
+        // open this assignment in review mode once the Deadline passes.
+        // Missing/unparseable -> true, matching the previous hard-coded
+        // "always let them peek once the deadline's passed" behavior.
+        var allowLateReview = !bool.TryParse(form["AllowLateReview"].ToString(), out var allowLateReviewParsed)
+            || allowLateReviewParsed;
+
         var assignment = new Assignment
         {
             Title = title,
@@ -151,6 +159,7 @@ public class AssignmentsController : ControllerBase
             GroupIds = groupIds,
             UnitIds = unitIds,
             SchoolYear = schoolYear,
+            AllowLateReview = allowLateReview,
             // TENANT LAYER: _tenant.CurrentTenantId is the correct source for
             // BOTH cases now — for Teacher/AssistantAdmin it's the same value
             // GetStaffTenantId() would give (ITenantContext falls back to it
@@ -218,8 +227,21 @@ public class AssignmentsController : ControllerBase
             .FirstOrDefaultAsync(s => s.AssignmentId == assignmentId && s.StudentId == studentId);
 
         var deadlinePassed = DateTime.UtcNow > assignment.Deadline;
-        var revealAnswers = submission != null && deadlinePassed;
-        if (submission != null) Response.Headers["x-redirected-to"] = "review";
+
+        // A student who never submitted and shows up after the deadline is
+        // blocked entirely (410) if the teacher turned off late-review access
+        // for this assignment — same policy as Quiz.AllowLateReview. If it's
+        // on (default), they fall through to review mode below exactly like
+        // a student who did submit, just with every answer blank.
+        if (submission == null && deadlinePassed && !assignment.AllowLateReview)
+            return StatusCode(410, new { message = "انتهى وقت تسليم الواجب." });
+
+        // The solution is revealed once the deadline has passed — either
+        // because the student actually submitted, or (when AllowLateReview
+        // is on) because they're being let into review mode without ever
+        // having submitted at all.
+        var revealAnswers = deadlinePassed && (submission != null || assignment.AllowLateReview);
+        if (submission != null || revealAnswers) Response.Headers["x-redirected-to"] = "review";
 
         var items = assignment.Questions.Select(q =>
         {
@@ -233,8 +255,8 @@ public class AssignmentsController : ControllerBase
                 questionType = q.Type,
                 choices = q.Choices,
                 answer = submission != null ? studentAnswer : null,
-                markAwarded = revealAnswers
-                    ? submission!.Answers.FirstOrDefault(a => a.QuestionId == q.Id)?.MarkAwarded
+                markAwarded = submission != null && revealAnswers
+                    ? submission.Answers.FirstOrDefault(a => a.QuestionId == q.Id)?.MarkAwarded
                     : null,
                 // The solution stays hidden until the deadline has fully passed,
                 // no matter how early the student submitted.
@@ -247,8 +269,8 @@ public class AssignmentsController : ControllerBase
             deadline = assignment.Deadline,
             hasSubmitted = submission != null,
             deadlinePassed,
-            score = revealAnswers ? submission!.Score : (int?)null,
-            totalMarks = revealAnswers ? submission!.TotalMarks : (int?)null,
+            score = submission != null && revealAnswers ? submission.Score : (int?)null,
+            totalMarks = submission != null && revealAnswers ? submission.TotalMarks : (int?)null,
             questions = items
         });
     }
@@ -449,6 +471,36 @@ public class AssignmentsController : ControllerBase
 
         return Ok(new AssignmentQuestionTeacherDto(
             question.Id, question.Type, question.Text, question.Choices, question.Answer, question.Mark, question.ImageUrl));
+    }
+
+    // Lets a teacher fix the assignment's own basic info (name/deadline/
+    // late-review policy) after creation — separate from edit-question
+    // above, which only touches individual questions. Deliberately does NOT
+    // let group/unit be changed here, since that affects who the assignment
+    // is even visible to.
+    [HttpPost("edit")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> EditAssignment([FromBody] EditAssignmentRequest request)
+    {
+        var assignment = await _db.Assignments.FirstOrDefaultAsync(a => a.Id == request.AssignmentId);
+        if (assignment == null) return NotFound(new { message = "Assignment not found." });
+
+        if (string.IsNullOrWhiteSpace(request.Title))
+            return BadRequest(new { message = "اسم الواجب مطلوب." });
+
+        assignment.Title = request.Title;
+        assignment.Deadline = request.Deadline;
+        assignment.AllowLateReview = request.AllowLateReview;
+
+        await _db.SaveChangesAsync();
+
+        return Ok(new
+        {
+            id = assignment.Id,
+            title = assignment.Title,
+            deadline = assignment.Deadline,
+            allowLateReview = assignment.AllowLateReview
+        });
     }
 
     [HttpPost("delete/{assignmentId:int}")]

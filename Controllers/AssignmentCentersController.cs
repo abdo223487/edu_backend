@@ -91,7 +91,8 @@ public class AssignmentCentersController : ControllerBase
             a.GroupIds,
             a.Deadline,
             a.SchoolYear,
-            studentId.HasValue && submittedIds.Contains(a.Id)));
+            studentId.HasValue && submittedIds.Contains(a.Id),
+            a.AllowLateReview));
 
         return Ok(items);
     }
@@ -133,6 +134,9 @@ public class AssignmentCentersController : ControllerBase
             GroupIds = request.GroupIds,
             UnitIds = request.UnitIds,
             SchoolYear = schoolYear,
+            // Missing (null) -> true, matching the old hard-coded "always
+            // let them peek once the deadline's passed" behavior.
+            AllowLateReview = request.AllowLateReview ?? true,
             TeacherId = _tenant.CurrentTenantId!.Value
         };
 
@@ -178,8 +182,15 @@ public class AssignmentCentersController : ControllerBase
             .FirstOrDefaultAsync(s => s.AssignmentCenterId == assignmentCenterId && s.StudentId == studentId);
 
         var deadlinePassed = DateTime.UtcNow > assignment.Deadline;
-        var revealAnswers = submission != null && deadlinePassed;
-        if (submission != null) Response.Headers["x-redirected-to"] = "review";
+
+        // Same policy as Assignments/as-student: a student who never
+        // submitted is blocked entirely (410) once the deadline passes, if
+        // the teacher turned off late-review access for this assignment.
+        if (submission == null && deadlinePassed && !assignment.AllowLateReview)
+            return StatusCode(410, new { message = "انتهى وقت تسليم الواجب." });
+
+        var revealAnswers = deadlinePassed && (submission != null || assignment.AllowLateReview);
+        if (submission != null || revealAnswers) Response.Headers["x-redirected-to"] = "review";
 
         var items = assignment.Questions.Select(q =>
         {
@@ -191,8 +202,8 @@ public class AssignmentCentersController : ControllerBase
                 mark = q.Mark,
                 choices = AssignmentCenterChoices.Letters,
                 answer = submission != null ? studentAnswer : null,
-                markAwarded = revealAnswers
-                    ? submission!.Answers.FirstOrDefault(a => a.QuestionId == q.Id)?.MarkAwarded
+                markAwarded = submission != null && revealAnswers
+                    ? submission.Answers.FirstOrDefault(a => a.QuestionId == q.Id)?.MarkAwarded
                     : null,
                 correctAnswer = revealAnswers ? q.Answer : null
             };
@@ -203,8 +214,8 @@ public class AssignmentCentersController : ControllerBase
             deadline = assignment.Deadline,
             hasSubmitted = submission != null,
             deadlinePassed,
-            score = revealAnswers ? submission!.Score : (int?)null,
-            totalMarks = revealAnswers ? submission!.TotalMarks : (int?)null,
+            score = submission != null && revealAnswers ? submission.Score : (int?)null,
+            totalMarks = submission != null && revealAnswers ? submission.TotalMarks : (int?)null,
             questions = items
         });
     }

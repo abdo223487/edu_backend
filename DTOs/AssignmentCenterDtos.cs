@@ -7,11 +7,16 @@ public record CreateAssignmentCenterRequest(
     DateTime Deadline,
     List<int> GroupIds,
     List<int> UnitIds,
-    List<CreateAssignmentCenterQuestionDto> Questions);
+    List<CreateAssignmentCenterQuestionDto> Questions,
+    // Same idea as Quiz/Assignment.AllowLateReview. Optional so old clients
+    // that don't send it yet still work (record default -> false, but the
+    // controller treats a JSON-missing value as "true" explicitly — see
+    // AssignmentCentersController.Create).
+    bool? AllowLateReview = null);
 
 public record AssignmentCenterQuestionTeacherDto(int Id, string Text, string CorrectAnswer, int Mark);
 
-public record AssignmentCenterListItem(int Id, string Title, List<int> UnitIds, List<int> GroupIds, DateTime Deadline, int? SchoolYear, bool HasSubmitted);
+public record AssignmentCenterListItem(int Id, string Title, List<int> UnitIds, List<int> GroupIds, DateTime Deadline, int? SchoolYear, bool HasSubmitted, bool AllowLateReview);
 
 // POST AssignmentCenters/submit
 // body: { "assignmentCenterId": int, "answers": [ { "questionId": int, "answer": "أ" }, ... ] }
