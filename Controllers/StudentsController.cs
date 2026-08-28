@@ -1521,12 +1521,19 @@ public class StudentsController : ControllerBase
                 .Select(g => (int?)g.Id)
                 .FirstOrDefaultAsync();
 
-        // Attendance can be recorded for a lecture the student was never
-        // added to a Group for (autoSubscribe grants a Unit subscription,
-        // not a Group membership -- and Record() doesn't check Group at
-        // all). So the lecture list here must also include anything
-        // reachable via the student's Unit subscriptions, or an already-
-        // recorded Attendance row would silently never show up.
+        // Same gate as Lectures/ByYear and Lectures/ByGroup: a Center lecture
+        // tied to a Unit is only relevant to this attendance screen if the
+        // student is both subscribed to that Unit AND a member of one of the
+        // lecture's Groups -- a Unit subscription alone must not pull in a
+        // lecture meant for a different group.
+        //
+        // TRADE-OFF vs the previous OR-based version: a lecture whose group
+        // assignment changed AFTER an Attendance row was already recorded for
+        // this student (autoSubscribe grants only a Unit subscription, not a
+        // Group membership) can now disappear from this list even though the
+        // Attendance row still exists. If that turns out to matter in
+        // practice, the fix is to also union in lectures with an existing
+        // Attendance row for this student, regardless of the Group/Unit gate.
         var subscribedUnitIds = await _db.StudentUnitSubscriptions.AsNoTracking()
             .Where(su => su.StudentId == sid.Value)
             .Select(su => su.UnitId)
@@ -1534,8 +1541,8 @@ public class StudentsController : ControllerBase
 
         var lecturesQuery = _db.Lectures.AsNoTracking()
             .Where(l => l.AttendanceMethod == AttendanceMethod.Center &&
-                (_db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == tenantGroupId)
-                 || (l.UnitId != null && subscribedUnitIds.Contains(l.UnitId.Value))));
+                l.UnitId != null && subscribedUnitIds.Contains(l.UnitId.Value) &&
+                (tenantGroupId != null && _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == tenantGroupId)));
         if (unitId.HasValue) lecturesQuery = lecturesQuery.Where(l => l.UnitId == unitId.Value);
 
         var lectures = await lecturesQuery.OrderBy(l => l.CreatedAt).ToListAsync();
