@@ -784,6 +784,93 @@ public class QuizResult
     public bool IsAutoSubmitted { get; set; } = false;
 }
 
+/// <summary>
+/// A completely separate exam kind, attached DIRECTLY to a Lecture — same
+/// idea as a Material with a LectureId (see Material.LectureId), just for
+/// exams instead of PDFs. Deliberately NOT the same table as Quiz/does not
+/// touch QuizGroupLinks/QuizResults at all: it has no Unit, no GroupIds, no
+/// shared Deadline. Visibility is gated purely on being able to reach the
+/// Lecture itself (Unit subscription / StudentLectureUnlock /
+/// StudentOnlineLessonUnlock — see LectureExamsController.
+/// StudentCanAccessLectureAsync, mirroring MaterialController.GetById).
+///
+/// Timing is per-student instead of a shared Deadline: the countdown starts
+/// the moment a given student opens the exam (see LectureExamStudentStart)
+/// and runs for exactly DurationInMinutes from that moment.
+/// </summary>
+public class LectureExam
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = default!;
+    public int LectureId { get; set; }
+    public int DurationInMinutes { get; set; }
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this exam belongs to.</summary>
+    public int TeacherId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    public ICollection<LectureExamQuestion> Questions { get; set; } = new List<LectureExamQuestion>();
+}
+
+public class LectureExamQuestion
+{
+    public int Id { get; set; }
+    public int LectureExamId { get; set; }
+    [ForeignKey(nameof(LectureExamId))] public LectureExam? LectureExam { get; set; }
+    public string Type { get; set; } = "MCQ";
+    public string Text { get; set; } = default!;
+    public string Answer { get; set; } = default!;
+    public int Mark { get; set; }
+    public string ChoicesCsv { get; set; } = string.Empty;
+    [NotMapped] public List<string> Choices
+    {
+        get => ChoicesCsv.Length == 0 ? new() : ChoicesCsv.Split('\u001F').ToList();
+        set => ChoicesCsv = string.Join('\u001F', value);
+    }
+    public string? ImageUrl { get; set; }
+}
+
+/// <summary>
+/// Records the moment a student first opened a LectureExam. This row's
+/// StartedAt + LectureExam.DurationInMinutes IS that student's personal
+/// exam window, created lazily the first time they open it (see
+/// LectureExamsController.GetAsStudent).
+/// </summary>
+public class LectureExamStudentStart
+{
+    public int Id { get; set; }
+    public int LectureExamId { get; set; }
+    public int StudentId { get; set; }
+    public DateTime StartedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>TENANT LAYER: copied from the parent LectureExam at creation time.</summary>
+    public int TeacherId { get; set; }
+}
+
+public class LectureExamResult
+{
+    public int Id { get; set; }
+    public int LectureExamId { get; set; }
+    public int StudentId { get; set; }
+    public int Score { get; set; }
+    public int TotalMarks { get; set; }
+    public DateTime GradedAt { get; set; } = DateTime.UtcNow;
+    public ICollection<LectureExamAnswer> Answers { get; set; } = new List<LectureExamAnswer>();
+
+    /// <summary>TENANT LAYER: copied from the parent LectureExam at creation time.</summary>
+    public int TeacherId { get; set; }
+}
+
+public class LectureExamAnswer
+{
+    public int Id { get; set; }
+    public int LectureExamResultId { get; set; }
+    [ForeignKey(nameof(LectureExamResultId))] public LectureExamResult? LectureExamResult { get; set; }
+    public int QuestionId { get; set; }
+    public string Answer { get; set; } = default!;
+    public int? MarkAwarded { get; set; }
+}
+
 public class QuizAnswer
 {
     public int Id { get; set; }

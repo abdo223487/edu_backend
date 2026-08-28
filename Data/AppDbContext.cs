@@ -42,6 +42,11 @@ public class AppDbContext : DbContext
     public DbSet<Question> Questions => Set<Question>();
     public DbSet<QuizResult> QuizResults => Set<QuizResult>();
     public DbSet<QuizAnswer> QuizAnswers => Set<QuizAnswer>();
+    public DbSet<LectureExam> LectureExams => Set<LectureExam>();
+    public DbSet<LectureExamQuestion> LectureExamQuestions => Set<LectureExamQuestion>();
+    public DbSet<LectureExamResult> LectureExamResults => Set<LectureExamResult>();
+    public DbSet<LectureExamAnswer> LectureExamAnswers => Set<LectureExamAnswer>();
+    public DbSet<LectureExamStudentStart> LectureExamStudentStarts => Set<LectureExamStudentStart>();
     public DbSet<Assignment> Assignments => Set<Assignment>();
     public DbSet<AssignmentQuestion> AssignmentQuestions => Set<AssignmentQuestion>();
     public DbSet<AssignmentSubmission> AssignmentSubmissions => Set<AssignmentSubmission>();
@@ -174,6 +179,9 @@ public class AppDbContext : DbContext
         // these because they're queried directly off their own DbSet, not via
         // Student.
         modelBuilder.Entity<QuizResult>().HasQueryFilter(qr => qr.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<LectureExam>().HasQueryFilter(le => le.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<LectureExamResult>().HasQueryFilter(lr => lr.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<LectureExamStudentStart>().HasQueryFilter(ls => ls.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<CenterQuizResult>().HasQueryFilter(cr => cr.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<HomeworkResult>().HasQueryFilter(hr => hr.TeacherId == _tenant.CurrentTenantId);
 
@@ -194,6 +202,13 @@ public class AppDbContext : DbContext
         // now refuses a second row outright, regardless of timing or
         // whether the app-level check was skipped/bypassed.
         modelBuilder.Entity<QuizResult>().HasIndex(qr => new { qr.QuizId, qr.StudentId }).IsUnique();
+        // Same race-condition guard as QuizResult above.
+        modelBuilder.Entity<LectureExamResult>().HasIndex(lr => new { lr.LectureExamId, lr.StudentId }).IsUnique();
+        modelBuilder.Entity<LectureExamResult>().HasIndex(lr => lr.TeacherId);
+        modelBuilder.Entity<LectureExamStudentStart>().HasIndex(ls => new { ls.LectureExamId, ls.StudentId }).IsUnique();
+        modelBuilder.Entity<LectureExamStudentStart>().HasIndex(ls => ls.TeacherId);
+        modelBuilder.Entity<LectureExam>().HasIndex(le => le.TeacherId);
+        modelBuilder.Entity<LectureExam>().HasIndex(le => le.LectureId);
         modelBuilder.Entity<CenterQuizResult>().HasIndex(cr => new { cr.TeacherId, cr.StudentId });
         modelBuilder.Entity<HomeworkResult>().HasIndex(hr => new { hr.TeacherId, hr.StudentId });
 
@@ -327,6 +342,18 @@ public class AppDbContext : DbContext
             .HasOne(q => q.Quiz)
             .WithMany(q => q.Questions)
             .HasForeignKey(q => q.QuizId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<LectureExamQuestion>()
+            .HasOne(q => q.LectureExam)
+            .WithMany(le => le.Questions)
+            .HasForeignKey(q => q.LectureExamId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<LectureExamAnswer>()
+            .HasOne(a => a.LectureExamResult)
+            .WithMany(r => r.Answers)
+            .HasForeignKey(a => a.LectureExamResultId)
             .OnDelete(DeleteBehavior.Cascade);
 
         modelBuilder.Entity<QuizAnswer>()
