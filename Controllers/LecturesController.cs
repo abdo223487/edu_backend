@@ -352,20 +352,22 @@ public class LecturesController : ControllerBase
         {
             var studentId = User.GetUserId();
             var subscribedIds = User.GetUnitIds();
+            var studentGroupId = User.GetGroupId(_tenant.CurrentTenantId);
             var unlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
                 .Where(u => u.StudentId == studentId)
                 .Select(u => u.LectureId)
                 .ToListAsync();
 
-            // A lecture inside a Unit is visible either because the student is
-            // subscribed to the whole Unit, OR because they redeemed a code
-            // that unlocked that ONE lecture specifically (see RedeemCode) —
-            // previously only a full-unit subscription counted here, so a
-            // lecture-level code for an in-unit lecture was granted but never
-            // actually visible to the student.
+            // Same gate as ByGroup: a lecture inside a Unit is only visible to
+            // a student both subscribed to that Unit AND a member of one of
+            // the lecture's Groups -- a course-wide Unit subscription alone
+            // must not leak a lecture meant for a different group. A direct
+            // lecture-level code unlock (see RedeemCode) bypasses both checks,
+            // same as before.
             query = query.Where(l =>
-                (l.UnitId != null && (subscribedIds.Contains(l.UnitId.Value) || unlockedLectureIds.Contains(l.Id))) ||
-                (l.UnitId == null && unlockedLectureIds.Contains(l.Id)));
+                unlockedLectureIds.Contains(l.Id) ||
+                (l.UnitId != null && subscribedIds.Contains(l.UnitId.Value) &&
+                    (studentGroupId.HasValue && _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == studentGroupId.Value))));
         }
 
         // ToDto only reads Id/Name/AttendanceMethod/YoutubeLink/StorageFileKey/
