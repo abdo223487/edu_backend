@@ -5,7 +5,9 @@ public record AssignmentQuestionDto(int Id, string QuestionType, string Text, Li
 // Teacher (and post-deadline student) view includes the correct answer.
 public record AssignmentQuestionTeacherDto(int Id, string QuestionType, string Text, List<string> Choices, string CorrectAnswer, int Mark, string? ImageUrl);
 
-public record AssignmentListItem(int Id, string Title, List<int> UnitIds, List<int> GroupIds, DateTime Deadline, int? SchoolYear, bool HasSubmitted, bool AllowLateReview);
+// Score/TotalMarks appended at the end (optional, null when not submitted
+// yet) so the existing positional-record shape stays backward compatible.
+public record AssignmentListItem(int Id, string Title, List<int> UnitIds, List<int> GroupIds, DateTime Deadline, int? SchoolYear, bool HasSubmitted, bool AllowLateReview, int? Score = null, int? TotalMarks = null);
 
 // POST Assignments/submit
 // body: { "assignmentId": int, "answers": [ { "questionId": int, "answer": "..." }, ... ] }
@@ -26,6 +28,12 @@ public record EditAssignmentQuestionRequest(int AssignmentId, int QuestionId, st
 // Lets a teacher fix the assignment's own basic info (name/deadline/late-review
 // policy) after creation, without touching its questions/groups/units.
 public record EditAssignmentRequest(int AssignmentId, string Title, DateTime Deadline, bool AllowLateReview);
+
+// POST Assignments/force-review — same idea as Quizzes/force-review.
+public record ForceAssignmentReviewRequest(int AssignmentId, int StudentId);
+
+// POST Assignments/reopen — same idea as Quizzes/reopen.
+public record ReopenAssignmentRequest(int AssignmentId, int StudentId, int Minutes);
 
 public record AssignmentTakerDto(
     int StudentId,

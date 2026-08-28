@@ -47,6 +47,20 @@ public record EditQuizRequest(int QuizId, string Title, int DurationInMinutes, b
 // Takers.dart forwards this field straight through untouched, so the JSON
 // shape has to match that String type or the widget crashes (gray screen)
 // when Takers.dart navigates to it.
+// POST Quizzes/force-review
+// body: { "quizId": int, "studentId": int }
+// Teacher-only, from the student's own "Exams" quick-action list: the next
+// time this student opens the exam, they land straight in review mode
+// (correct answers shown) even though they never submitted.
+public record ForceQuizReviewRequest(int QuizId, int StudentId);
+
+// POST Quizzes/reopen
+// body: { "quizId": int, "studentId": int, "minutes": int }
+// Teacher-only: wipes this student's prior attempt (if any) and gives them
+// a fresh, normal attempt window of exactly "minutes" starting now,
+// regardless of the quiz's own Deadline.
+public record ReopenQuizRequest(int QuizId, int StudentId, int Minutes);
+
 public record TakerDto(
     string StudentId,
     string StudentName,

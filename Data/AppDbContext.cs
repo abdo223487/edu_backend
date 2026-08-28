@@ -42,6 +42,7 @@ public class AppDbContext : DbContext
     public DbSet<Question> Questions => Set<Question>();
     public DbSet<QuizResult> QuizResults => Set<QuizResult>();
     public DbSet<QuizAnswer> QuizAnswers => Set<QuizAnswer>();
+    public DbSet<QuizStudentOverride> QuizStudentOverrides => Set<QuizStudentOverride>();
     public DbSet<LectureExam> LectureExams => Set<LectureExam>();
     public DbSet<LectureExamQuestion> LectureExamQuestions => Set<LectureExamQuestion>();
     public DbSet<LectureExamResult> LectureExamResults => Set<LectureExamResult>();
@@ -51,6 +52,7 @@ public class AppDbContext : DbContext
     public DbSet<AssignmentQuestion> AssignmentQuestions => Set<AssignmentQuestion>();
     public DbSet<AssignmentSubmission> AssignmentSubmissions => Set<AssignmentSubmission>();
     public DbSet<AssignmentAnswer> AssignmentAnswers => Set<AssignmentAnswer>();
+    public DbSet<AssignmentStudentOverride> AssignmentStudentOverrides => Set<AssignmentStudentOverride>();
     public DbSet<AssignmentCenter> AssignmentCenters => Set<AssignmentCenter>();
     public DbSet<AssignmentCenterQuestion> AssignmentCenterQuestions => Set<AssignmentCenterQuestion>();
     public DbSet<AssignmentCenterSubmission> AssignmentCenterSubmissions => Set<AssignmentCenterSubmission>();
@@ -179,6 +181,8 @@ public class AppDbContext : DbContext
         // these because they're queried directly off their own DbSet, not via
         // Student.
         modelBuilder.Entity<QuizResult>().HasQueryFilter(qr => qr.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<QuizStudentOverride>().HasQueryFilter(o => o.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<AssignmentStudentOverride>().HasQueryFilter(o => o.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<LectureExam>().HasQueryFilter(le => le.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<LectureExamResult>().HasQueryFilter(lr => lr.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<LectureExamStudentStart>().HasQueryFilter(ls => ls.TeacherId == _tenant.CurrentTenantId);
@@ -193,6 +197,13 @@ public class AppDbContext : DbContext
         // column) and the common TeacherId+StudentId combination, instead of
         // needing two separate indexes.
         modelBuilder.Entity<QuizResult>().HasIndex(qr => new { qr.TeacherId, qr.StudentId });
+        // At most one override row per (quiz, student) / (assignment, student) —
+        // ForceReview/ReopenExpiresAt are upserted onto the same row, never
+        // duplicated. Same race-condition guard as QuizResult below.
+        modelBuilder.Entity<QuizStudentOverride>().HasIndex(o => new { o.QuizId, o.StudentId }).IsUnique();
+        modelBuilder.Entity<QuizStudentOverride>().HasIndex(o => o.TeacherId);
+        modelBuilder.Entity<AssignmentStudentOverride>().HasIndex(o => new { o.AssignmentId, o.StudentId }).IsUnique();
+        modelBuilder.Entity<AssignmentStudentOverride>().HasIndex(o => o.TeacherId);
         // RACE-CONDITION FIX: QuizzesController.Grade's "already submitted?"
         // AnyAsync check was never atomic with its later INSERT, so two
         // near-simultaneous grade submissions (double-tap, client retry, or

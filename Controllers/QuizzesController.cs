@@ -70,14 +70,14 @@ public class QuizzesController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? unitId, [FromQuery] int p = 1)
+    public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? unitId, [FromQuery] int? studentId, [FromQuery] int p = 1)
     {
         var query = _db.Quizzes.AsNoTracking().AsQueryable();
-        int? studentId = null;
+        int? effectiveStudentId = null;
 
         if (User.IsInRole(Roles.Student))
         {
-            studentId = User.GetUserId();
+            effectiveStudentId = User.GetUserId();
 
             var groupId = User.GetGroupId(_tenant.CurrentTenantId);
             if (groupId.HasValue) query = query.Where(q => _db.QuizGroupLinks.Any(x => x.QuizId == q.Id && x.GroupId == groupId.Value));
@@ -87,6 +87,34 @@ public class QuizzesController : ControllerBase
             // there's no "unscoped quiz" passthrough case here unlike the others.
             var subscribedIds = User.GetUnitIds();
             query = query.Where(q => subscribedIds.Contains(q.UnitId));
+        }
+        else if (studentId.HasValue)
+        {
+            // TEACHER VIEWING A SPECIFIC STUDENT'S EXAM LIST: the "الامتحانات"
+            // quick action on that student's own details page. Same shape as
+            // the student's own list above, except the group/subscribed-units
+            // are resolved from the DB for the TARGET student (current tenant
+            // only) instead of from the caller's own JWT claims — mirroring
+            // StudentsController.GetAttendance's studentId-for-teacher pattern.
+            effectiveStudentId = studentId.Value;
+
+            var targetGroupId = await _db.StudentGroupMemberships.AsNoTracking()
+                .Where(m => m.StudentId == studentId.Value)
+                .Select(m => (int?)m.GroupId)
+                .FirstOrDefaultAsync();
+            if (targetGroupId == null)
+            {
+                var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == studentId.Value);
+                if (student != null && await _db.Groups.AsNoTracking().AnyAsync(g => g.Id == student.GroupId && g.TeacherId == _tenant.CurrentTenantId))
+                    targetGroupId = student.GroupId;
+            }
+            if (targetGroupId.HasValue) query = query.Where(q => _db.QuizGroupLinks.Any(x => x.QuizId == q.Id && x.GroupId == targetGroupId.Value));
+
+            var targetUnitIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+                .Where(su => su.StudentId == studentId.Value)
+                .Select(su => su.UnitId)
+                .ToListAsync();
+            query = query.Where(q => targetUnitIds.Contains(q.UnitId));
         }
         else if (schoolYear.HasValue)
         {
@@ -115,21 +143,43 @@ public class QuizzesController : ControllerBase
         // auto-zero row GetAsStudent creates for a missed exam (IsAutoSubmitted
         // = true) must NOT flip isTaken to true just because the student opened
         // the exam page after the Deadline without ever answering anything.
-        var studentResultsById = studentId.HasValue
+        var studentResultsById = effectiveStudentId.HasValue
             ? await _db.QuizResults.AsNoTracking()
-                .Where(r => r.StudentId == studentId.Value && quizIds.Contains(r.QuizId) && !r.IsAutoSubmitted)
+                .Where(r => r.StudentId == effectiveStudentId.Value && quizIds.Contains(r.QuizId) && !r.IsAutoSubmitted)
                 .ToDictionaryAsync(r => r.QuizId, r => (Score: r.Score, TotalMarks: r.TotalMarks))
             : new Dictionary<int, (int Score, int TotalMarks)>();
         var takenQuizIds = studentResultsById.Keys.ToHashSet();
+
+        // Per-student teacher overrides (force-review / reopen), see
+        // QuizStudentOverride. Folded into "deadline"/"allowLateReview" below
+        // so the existing student-app blocked/countdown logic (which only
+        // looks at those two fields) keeps working without any client change.
+        var overridesByQuizId = effectiveStudentId.HasValue
+            ? await _db.QuizStudentOverrides.AsNoTracking()
+                .Where(o => o.StudentId == effectiveStudentId.Value && quizIds.Contains(o.QuizId))
+                .ToDictionaryAsync(o => o.QuizId)
+            : new Dictionary<int, QuizStudentOverride>();
 
         var nowUtc = DateTime.UtcNow;
 
         var items = quizzes.Select(q =>
         {
+            overridesByQuizId.TryGetValue(q.Id, out var ov);
+            var reopenActive = ov?.ReopenExpiresAt != null && ov.ReopenExpiresAt.Value > nowUtc;
+
+            // While a teacher-granted reopen window is active, the exam looks
+            // (to this student only) exactly like a fresh assignment whose
+            // Deadline is the reopen expiry, instead of the quiz's own
+            // Deadline — this is what lets the student open/submit it again
+            // normally, past the original Deadline.
+            var effectiveQuizForStudent = reopenActive
+                ? new Quiz { DurationInMinutes = q.DurationInMinutes, Deadline = ov!.ReopenExpiresAt!.Value }
+                : q;
+
             // Students get the real remaining time (capped by the Deadline);
             // teachers/admins keep seeing the exam's actual configured duration.
-            var effectiveDuration = studentId.HasValue
-                ? EffectiveRemaining(q, nowUtc)
+            var effectiveDuration = effectiveStudentId.HasValue
+                ? EffectiveRemaining(effectiveQuizForStudent, nowUtc)
                 : TimeSpan.FromMinutes(q.DurationInMinutes);
 
             var result = studentResultsById.TryGetValue(q.Id, out var r) ? r : ((int Score, int TotalMarks)?)null;
@@ -144,20 +194,29 @@ public class QuizzesController : ControllerBase
                 // widget.duration.split(":")), so format it here instead of sending
                 // a raw minutes count.
                 duration = FormatDuration(effectiveDuration),
-                deadline = q.Deadline,
+                deadline = effectiveQuizForStudent.Deadline,
                 groupIds = q.GroupIds,
                 groups = q.GroupIds.Select(gid => groupNamesById.TryGetValue(gid, out var n) ? n : gid.ToString()).ToList(),
                 unit = new { month = unitsById.TryGetValue(q.UnitId, out var m) ? m : (int?)null },
                 grade = q.SchoolYear,
                 // Lets the teacher's exam-list/edit UI show the current
-                // late-review policy without a separate round trip.
-                allowLateReview = q.AllowLateReview,
-                isTaken = studentId.HasValue && takenQuizIds.Contains(q.Id),
+                // late-review policy without a separate round trip. Forced to
+                // true for a student with an active ForceReview override, so
+                // the client's existing "late-review-off" block doesn't stop
+                // them from opening the exam the teacher just unlocked.
+                allowLateReview = (ov?.ForceReview == true) || q.AllowLateReview,
+                isTaken = effectiveStudentId.HasValue && takenQuizIds.Contains(q.Id),
                 // BUGFIX: the list endpoint used to only say isTaken=true without
                 // the actual score, so the exam-list card had no way to show the
                 // student's grade after submitting. Now included when available.
                 score = result?.Score,
-                totalMarks = result?.TotalMarks
+                totalMarks = result?.TotalMarks,
+                // Teacher-facing only (used by the per-student "الامتحانات" quick
+                // action to decide whether to show the 3-dot menu / its state):
+                // ignored by the student app.
+                forceReviewGranted = ov?.ForceReview == true,
+                reopenActive,
+                reopenExpiresAt = reopenActive ? ov!.ReopenExpiresAt : null
             };
         });
 
@@ -286,6 +345,35 @@ public class QuizzesController : ControllerBase
         var priorResult = await _db.QuizResults.Include(r => r.Answers)
             .FirstOrDefaultAsync(r => r.QuizId == quizId && r.StudentId == studentId);
 
+        var overrideRow = await _db.QuizStudentOverrides
+            .FirstOrDefaultAsync(o => o.QuizId == quizId && o.StudentId == studentId);
+        var hasActiveReopen = overrideRow?.ReopenExpiresAt != null && overrideRow.ReopenExpiresAt.Value > DateTime.UtcNow;
+
+        // TEACHER OVERRIDE: the teacher used the "افتح كمراجعة" action on this
+        // student's exam list (see ForceReview below). Drop them into review
+        // mode right now with an auto-zero result, exactly like the
+        // missed-deadline path below, but regardless of Deadline/
+        // AllowLateReview — the teacher explicitly asked for this.
+        if (priorResult == null && overrideRow?.ForceReview == true)
+        {
+            var totalMarks = quiz.Questions.Sum(q => q.Mark);
+            var forcedReview = new QuizResult
+            {
+                QuizId = quiz.Id,
+                StudentId = studentId,
+                TotalMarks = totalMarks,
+                Score = 0,
+                TeacherId = quiz.TeacherId,
+                IsAutoSubmitted = true
+            };
+            foreach (var q in quiz.Questions)
+                forcedReview.Answers.Add(new QuizAnswer { QuestionId = q.Id, Answer = "", MarkAwarded = 0 });
+
+            _db.QuizResults.Add(forcedReview);
+            await _db.SaveChangesAsync();
+
+            priorResult = forcedReview;
+        }
         // A student who never opened the exam and shows up after the deadline
         // doesn't get blocked out anymore — they get dropped straight into
         // review mode like anyone who actually took it, except every question
@@ -300,7 +388,12 @@ public class QuizzesController : ControllerBase
         // the deadline passes, same as they'd be blocked from a fresh
         // submission attempt in Grade() below — no auto-review, no peeking at
         // the exam at all.
-        if (priorResult == null && DateTime.UtcNow > quiz.Deadline)
+        //
+        // TEACHER OVERRIDE: an active reopen window (hasActiveReopen) skips
+        // this entirely — the student is being given a genuinely fresh
+        // attempt, not review mode, even though the original Deadline has
+        // technically passed.
+        else if (priorResult == null && !hasActiveReopen && DateTime.UtcNow > quiz.Deadline)
         {
             if (!quiz.AllowLateReview)
                 return StatusCode(410, new { message = "انتهى وقت الامتحان." });
@@ -363,7 +456,13 @@ public class QuizzesController : ControllerBase
         // "get questions" step were fixed, since this is a separate endpoint.
         var alreadySubmitted = await _db.QuizResults
             .AnyAsync(r => r.QuizId == quiz.Id && r.StudentId == studentId);
-        if (!alreadySubmitted && DateTime.UtcNow > quiz.Deadline)
+
+        // TEACHER OVERRIDE: an active reopen window (see Reopen below) lets
+        // the student submit past the quiz's own Deadline.
+        var hasActiveReopen = await _db.QuizStudentOverrides.AsNoTracking()
+            .AnyAsync(o => o.QuizId == quiz.Id && o.StudentId == studentId && o.ReopenExpiresAt != null && o.ReopenExpiresAt.Value > DateTime.UtcNow);
+
+        if (!alreadySubmitted && !hasActiveReopen && DateTime.UtcNow > quiz.Deadline)
             return StatusCode(410, new { message = "انتهى وقت الامتحان." });
 
         // BUGFIX: alreadySubmitted was computed above (for the deadline
@@ -592,6 +691,88 @@ public class QuizzesController : ControllerBase
             durationInMinutes = quiz.DurationInMinutes,
             allowLateReview = quiz.AllowLateReview
         });
+    }
+
+    // Teacher-only, called from a student's own "الامتحانات" quick action
+    // (student_details_.dart -> a per-student quiz list) via its 3-dot menu
+    // on a not-yet-taken exam. Grants (or refreshes) a ForceReview override:
+    // the next time this student opens the exam, GetAsStudent drops them
+    // straight into review mode (correct answers shown), never actually
+    // requiring a real submission. Clears any active reopen window on the
+    // same row, since the two are mutually exclusive.
+    [HttpPost("force-review")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> ForceReview([FromBody] ForceQuizReviewRequest request)
+    {
+        var quiz = await _db.Quizzes.AsNoTracking().FirstOrDefaultAsync(q => q.Id == request.QuizId);
+        if (quiz == null) return NotFound(new { message = "Quiz not found." });
+
+        var alreadyTaken = await _db.QuizResults
+            .AnyAsync(r => r.QuizId == request.QuizId && r.StudentId == request.StudentId && !r.IsAutoSubmitted);
+        if (alreadyTaken)
+            return Conflict(new { message = "الطالب سلّم الامتحان بالفعل." });
+
+        var overrideRow = await _db.QuizStudentOverrides
+            .FirstOrDefaultAsync(o => o.QuizId == request.QuizId && o.StudentId == request.StudentId);
+        if (overrideRow == null)
+        {
+            overrideRow = new QuizStudentOverride
+            {
+                QuizId = request.QuizId,
+                StudentId = request.StudentId,
+                TeacherId = quiz.TeacherId
+            };
+            _db.QuizStudentOverrides.Add(overrideRow);
+        }
+
+        overrideRow.ForceReview = true;
+        overrideRow.ReopenExpiresAt = null;
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "تم فتح الامتحان للطالب كمراجعة." });
+    }
+
+    // Teacher-only, same entry point as ForceReview above. Wipes any prior
+    // attempt (real or auto-zero) for this student and grants them a
+    // brand-new, fully normal attempt window of exactly "minutes" starting
+    // now — the exam opens for them exactly as if it had just been assigned,
+    // bypassing the quiz's own Deadline entirely.
+    [HttpPost("reopen")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> Reopen([FromBody] ReopenQuizRequest request)
+    {
+        if (request.Minutes <= 0)
+            return BadRequest(new { message = "عدد الدقايق لازم يكون أكبر من صفر." });
+
+        var quiz = await _db.Quizzes.AsNoTracking().FirstOrDefaultAsync(q => q.Id == request.QuizId);
+        if (quiz == null) return NotFound(new { message = "Quiz not found." });
+
+        // Clean slate: any prior result (real submission or an earlier
+        // auto-zero/forced-review row) is removed so the student genuinely
+        // starts fresh, and so isTaken correctly goes back to false.
+        var priorResults = await _db.QuizResults
+            .Where(r => r.QuizId == request.QuizId && r.StudentId == request.StudentId)
+            .ToListAsync();
+        if (priorResults.Count > 0) _db.QuizResults.RemoveRange(priorResults);
+
+        var overrideRow = await _db.QuizStudentOverrides
+            .FirstOrDefaultAsync(o => o.QuizId == request.QuizId && o.StudentId == request.StudentId);
+        if (overrideRow == null)
+        {
+            overrideRow = new QuizStudentOverride
+            {
+                QuizId = request.QuizId,
+                StudentId = request.StudentId,
+                TeacherId = quiz.TeacherId
+            };
+            _db.QuizStudentOverrides.Add(overrideRow);
+        }
+
+        overrideRow.ForceReview = false;
+        overrideRow.ReopenExpiresAt = DateTime.UtcNow.AddMinutes(request.Minutes);
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "تم إعادة فتح الامتحان للطالب.", reopenExpiresAt = overrideRow.ReopenExpiresAt });
     }
 
     [HttpPost("delete/{quizId:int}")]

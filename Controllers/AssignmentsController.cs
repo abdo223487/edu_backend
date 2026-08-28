@@ -52,14 +52,14 @@ public class AssignmentsController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? unitId, [FromQuery] int p = 1)
+    public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? unitId, [FromQuery] int? studentId, [FromQuery] int p = 1)
     {
         var query = _db.Assignments.AsNoTracking().AsQueryable();
-        int? studentId = null;
+        int? effectiveStudentId = null;
 
         if (User.IsInRole(Roles.Student))
         {
-            studentId = User.GetUserId();
+            effectiveStudentId = User.GetUserId();
 
             var groupId = User.GetGroupId(_tenant.CurrentTenantId);
             if (groupId.HasValue) query = query.Where(a => _db.AssignmentGroupLinks.Any(x => x.AssignmentId == a.Id && x.GroupId == groupId.Value));
@@ -67,6 +67,31 @@ public class AssignmentsController : ControllerBase
             // Only assignments that cover at least one unit the student is subscribed to.
             var subscribedIds = User.GetUnitIds();
             query = query.Where(a => _db.AssignmentUnitLinks.Any(x => x.AssignmentId == a.Id && subscribedIds.Contains(x.UnitId)));
+        }
+        else if (studentId.HasValue)
+        {
+            // TEACHER VIEWING A SPECIFIC STUDENT'S ASSIGNMENT LIST — same idea
+            // as QuizzesController.GetAll's studentId-for-teacher branch, see
+            // there for the full explanation.
+            effectiveStudentId = studentId.Value;
+
+            var targetGroupId = await _db.StudentGroupMemberships.AsNoTracking()
+                .Where(m => m.StudentId == studentId.Value)
+                .Select(m => (int?)m.GroupId)
+                .FirstOrDefaultAsync();
+            if (targetGroupId == null)
+            {
+                var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == studentId.Value);
+                if (student != null && await _db.Groups.AsNoTracking().AnyAsync(g => g.Id == student.GroupId && g.TeacherId == _tenant.CurrentTenantId))
+                    targetGroupId = student.GroupId;
+            }
+            if (targetGroupId.HasValue) query = query.Where(a => _db.AssignmentGroupLinks.Any(x => x.AssignmentId == a.Id && x.GroupId == targetGroupId.Value));
+
+            var targetUnitIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+                .Where(su => su.StudentId == studentId.Value)
+                .Select(su => su.UnitId)
+                .ToListAsync();
+            query = query.Where(a => _db.AssignmentUnitLinks.Any(x => x.AssignmentId == a.Id && targetUnitIds.Contains(x.UnitId)));
         }
         else if (schoolYear.HasValue)
         {
@@ -83,21 +108,40 @@ public class AssignmentsController : ControllerBase
 
         var assignmentIds = assignments.Select(a => a.Id).ToList();
 
-        var submittedIds = studentId.HasValue
-            ? (await _db.AssignmentSubmissions.AsNoTracking()
-                .Where(s => s.StudentId == studentId.Value && assignmentIds.Contains(s.AssignmentId))
-                .Select(s => s.AssignmentId).ToListAsync()).ToHashSet()
-            : new HashSet<int>();
+        var submissionsById = effectiveStudentId.HasValue
+            ? await _db.AssignmentSubmissions.AsNoTracking()
+                .Where(s => s.StudentId == effectiveStudentId.Value && assignmentIds.Contains(s.AssignmentId))
+                .ToDictionaryAsync(s => s.AssignmentId, s => (Score: s.Score, TotalMarks: s.TotalMarks))
+            : new Dictionary<int, (int Score, int TotalMarks)>();
 
-        var items = assignments.Select(a => new AssignmentListItem(
-            a.Id,
-            a.Title,
-            a.UnitIds,
-            a.GroupIds,
-            a.Deadline,
-            a.SchoolYear,
-            studentId.HasValue && submittedIds.Contains(a.Id),
-            a.AllowLateReview));
+        // Per-student teacher overrides — same idea/shape as QuizStudentOverride.
+        var overridesById = effectiveStudentId.HasValue
+            ? await _db.AssignmentStudentOverrides.AsNoTracking()
+                .Where(o => o.StudentId == effectiveStudentId.Value && assignmentIds.Contains(o.AssignmentId))
+                .ToDictionaryAsync(o => o.AssignmentId)
+            : new Dictionary<int, AssignmentStudentOverride>();
+
+        var nowUtc = DateTime.UtcNow;
+
+        var items = assignments.Select(a =>
+        {
+            overridesById.TryGetValue(a.Id, out var ov);
+            var reopenActive = ov?.ReopenExpiresAt != null && ov.ReopenExpiresAt.Value > nowUtc;
+            var effectiveDeadline = reopenActive ? ov!.ReopenExpiresAt!.Value : a.Deadline;
+            var result = submissionsById.TryGetValue(a.Id, out var r) ? r : ((int Score, int TotalMarks)?)null;
+
+            return new AssignmentListItem(
+                a.Id,
+                a.Title,
+                a.UnitIds,
+                a.GroupIds,
+                effectiveDeadline,
+                a.SchoolYear,
+                effectiveStudentId.HasValue && submissionsById.ContainsKey(a.Id),
+                (ov?.ForceReview == true) || a.AllowLateReview,
+                result?.Score,
+                result?.TotalMarks);
+        });
 
         return Ok(items);
     }
@@ -226,21 +270,34 @@ public class AssignmentsController : ControllerBase
         var submission = await _db.AssignmentSubmissions.AsNoTracking().Include(s => s.Answers)
             .FirstOrDefaultAsync(s => s.AssignmentId == assignmentId && s.StudentId == studentId);
 
-        var deadlinePassed = DateTime.UtcNow > assignment.Deadline;
+        var overrideRow = await _db.AssignmentStudentOverrides.AsNoTracking()
+            .FirstOrDefaultAsync(o => o.AssignmentId == assignmentId && o.StudentId == studentId);
+        var hasForceReview = overrideRow?.ForceReview == true;
+        var hasActiveReopen = overrideRow?.ReopenExpiresAt != null && overrideRow.ReopenExpiresAt.Value > DateTime.UtcNow;
+
+        // TEACHER OVERRIDE: an active reopen window makes the assignment
+        // behave, for this student only, as if it hadn't reached its deadline
+        // yet — even if the real Deadline has already passed.
+        var deadlinePassed = hasActiveReopen ? false : DateTime.UtcNow > assignment.Deadline;
 
         // A student who never submitted and shows up after the deadline is
         // blocked entirely (410) if the teacher turned off late-review access
         // for this assignment — same policy as Quiz.AllowLateReview. If it's
         // on (default), they fall through to review mode below exactly like
         // a student who did submit, just with every answer blank.
-        if (submission == null && deadlinePassed && !assignment.AllowLateReview)
+        //
+        // TEACHER OVERRIDE: hasForceReview always lets them through here,
+        // regardless of the assignment's own AllowLateReview policy — the
+        // teacher explicitly asked for this via the "افتح كمراجعة" action.
+        if (submission == null && deadlinePassed && !assignment.AllowLateReview && !hasForceReview)
             return StatusCode(410, new { message = "انتهى وقت تسليم الواجب." });
 
         // The solution is revealed once the deadline has passed — either
         // because the student actually submitted, or (when AllowLateReview
         // is on) because they're being let into review mode without ever
-        // having submitted at all.
-        var revealAnswers = deadlinePassed && (submission != null || assignment.AllowLateReview);
+        // having submitted at all. A forced review always reveals it,
+        // regardless of the real deadline.
+        var revealAnswers = hasForceReview || (deadlinePassed && (submission != null || assignment.AllowLateReview));
         if (submission != null || revealAnswers) Response.Headers["x-redirected-to"] = "review";
 
         var items = assignment.Questions.Select(q =>
@@ -266,7 +323,7 @@ public class AssignmentsController : ControllerBase
 
         return Ok(new
         {
-            deadline = assignment.Deadline,
+            deadline = hasActiveReopen ? overrideRow!.ReopenExpiresAt!.Value : assignment.Deadline,
             hasSubmitted = submission != null,
             deadlinePassed,
             score = submission != null && revealAnswers ? submission.Score : (int?)null,
@@ -293,8 +350,13 @@ public class AssignmentsController : ControllerBase
         if (alreadySubmitted)
             return Conflict(new { message = "تم تسليم هذا الواجب من قبل." });
 
+        // TEACHER OVERRIDE: an active reopen window (see Reopen below) lets
+        // the student submit past the assignment's own Deadline.
+        var hasActiveReopen = await _db.AssignmentStudentOverrides.AsNoTracking()
+            .AnyAsync(o => o.AssignmentId == assignment.Id && o.StudentId == studentId && o.ReopenExpiresAt != null && o.ReopenExpiresAt.Value > DateTime.UtcNow);
+
         // No submissions accepted once the deadline has passed.
-        if (DateTime.UtcNow > assignment.Deadline)
+        if (!hasActiveReopen && DateTime.UtcNow > assignment.Deadline)
             return StatusCode(410, new { message = "انتهى وقت تسليم الواجب." });
 
         var totalMarks = assignment.Questions.Sum(q => q.Mark);
@@ -501,6 +563,77 @@ public class AssignmentsController : ControllerBase
             deadline = assignment.Deadline,
             allowLateReview = assignment.AllowLateReview
         });
+    }
+
+    // Teacher-only — same idea as QuizzesController.ForceReview, from a
+    // student's "الواجبات" quick action list. See QuizStudentOverride /
+    // AssignmentStudentOverride for the full explanation.
+    [HttpPost("force-review")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> ForceReview([FromBody] ForceAssignmentReviewRequest request)
+    {
+        var assignment = await _db.Assignments.AsNoTracking().FirstOrDefaultAsync(a => a.Id == request.AssignmentId);
+        if (assignment == null) return NotFound(new { message = "Assignment not found." });
+
+        var alreadySubmitted = await _db.AssignmentSubmissions
+            .AnyAsync(s => s.AssignmentId == request.AssignmentId && s.StudentId == request.StudentId);
+        if (alreadySubmitted)
+            return Conflict(new { message = "الطالب سلّم الواجب بالفعل." });
+
+        var overrideRow = await _db.AssignmentStudentOverrides
+            .FirstOrDefaultAsync(o => o.AssignmentId == request.AssignmentId && o.StudentId == request.StudentId);
+        if (overrideRow == null)
+        {
+            overrideRow = new AssignmentStudentOverride
+            {
+                AssignmentId = request.AssignmentId,
+                StudentId = request.StudentId,
+                TeacherId = assignment.TeacherId
+            };
+            _db.AssignmentStudentOverrides.Add(overrideRow);
+        }
+
+        overrideRow.ForceReview = true;
+        overrideRow.ReopenExpiresAt = null;
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "تم فتح الواجب للطالب كمراجعة." });
+    }
+
+    // Teacher-only — same idea as QuizzesController.Reopen.
+    [HttpPost("reopen")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> Reopen([FromBody] ReopenAssignmentRequest request)
+    {
+        if (request.Minutes <= 0)
+            return BadRequest(new { message = "عدد الدقايق لازم يكون أكبر من صفر." });
+
+        var assignment = await _db.Assignments.AsNoTracking().FirstOrDefaultAsync(a => a.Id == request.AssignmentId);
+        if (assignment == null) return NotFound(new { message = "Assignment not found." });
+
+        var priorSubmissions = await _db.AssignmentSubmissions
+            .Where(s => s.AssignmentId == request.AssignmentId && s.StudentId == request.StudentId)
+            .ToListAsync();
+        if (priorSubmissions.Count > 0) _db.AssignmentSubmissions.RemoveRange(priorSubmissions);
+
+        var overrideRow = await _db.AssignmentStudentOverrides
+            .FirstOrDefaultAsync(o => o.AssignmentId == request.AssignmentId && o.StudentId == request.StudentId);
+        if (overrideRow == null)
+        {
+            overrideRow = new AssignmentStudentOverride
+            {
+                AssignmentId = request.AssignmentId,
+                StudentId = request.StudentId,
+                TeacherId = assignment.TeacherId
+            };
+            _db.AssignmentStudentOverrides.Add(overrideRow);
+        }
+
+        overrideRow.ForceReview = false;
+        overrideRow.ReopenExpiresAt = DateTime.UtcNow.AddMinutes(request.Minutes);
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "تم إعادة فتح الواجب للطالب.", reopenExpiresAt = overrideRow.ReopenExpiresAt });
     }
 
     [HttpPost("delete/{assignmentId:int}")]

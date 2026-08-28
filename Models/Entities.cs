@@ -871,6 +871,38 @@ public class LectureExamAnswer
     public int? MarkAwarded { get; set; }
 }
 
+/// <summary>
+/// A per-student teacher override for one Quiz, created from the teacher's
+/// "Exams" quick action on a student's own details page (see
+/// QuizzesController.ForceReview / .Reopen). At most one row per
+/// (QuizId, StudentId) — see AppDbContext's unique index.
+///
+/// Two mutually exclusive things a teacher can grant a student who hasn't
+/// submitted yet:
+///  - ForceReview: the NEXT time this student opens the exam, they're
+///    dropped straight into review mode (correct answers shown) exactly
+///    like a real/auto-zero taker, regardless of Deadline/AllowLateReview.
+///    See QuizzesController.GetAsStudent.
+///  - ReopenExpiresAt: the exam behaves as if freshly assigned to this
+///    student only, until this moment — bypassing the quiz's own Deadline
+///    entirely. Setting this also wipes any prior QuizResult for this
+///    student (see QuizzesController.Reopen), so they get a genuinely
+///    clean attempt.
+/// </summary>
+public class QuizStudentOverride
+{
+    public int Id { get; set; }
+    public int QuizId { get; set; }
+    public int StudentId { get; set; }
+
+    /// <summary>TENANT LAYER: copied from the parent Quiz at creation time.</summary>
+    public int TeacherId { get; set; }
+
+    public bool ForceReview { get; set; } = false;
+    public DateTime? ReopenExpiresAt { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 public class QuizAnswer
 {
     public int Id { get; set; }
@@ -1011,6 +1043,25 @@ public class AssignmentSubmission
     public int TotalMarks { get; set; }
     public DateTime SubmittedAt { get; set; } = DateTime.UtcNow;
     public ICollection<AssignmentAnswer> Answers { get; set; } = new List<AssignmentAnswer>();
+}
+
+/// <summary>
+/// Same idea as QuizStudentOverride, for Assignments — see there for the
+/// full explanation of ForceReview / ReopenExpiresAt. One row per
+/// (AssignmentId, StudentId), see AppDbContext's unique index.
+/// </summary>
+public class AssignmentStudentOverride
+{
+    public int Id { get; set; }
+    public int AssignmentId { get; set; }
+    public int StudentId { get; set; }
+
+    /// <summary>TENANT LAYER: copied from the parent Assignment at creation time.</summary>
+    public int TeacherId { get; set; }
+
+    public bool ForceReview { get; set; } = false;
+    public DateTime? ReopenExpiresAt { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
 public class AssignmentAnswer
