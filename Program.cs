@@ -293,6 +293,10 @@ using (var scope = app.Services.CreateScope())
     var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
     try
     {
+        // TEMP DEBUG -- احذف السطرين دول بعد ما نتأكد من المشكلة
+        logger.LogWarning("ALL migrations EF can see: {All}",
+            string.Join(", ", db.Database.GetMigrations()));
+
         var pending = db.Database.GetPendingMigrations().ToList();
         if (pending.Count > 0)
         {
