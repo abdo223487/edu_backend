@@ -17,7 +17,18 @@ namespace EduApi.Migrations
     /// Written as idempotent raw SQL, same style as AddOnlineLessons --
     /// PendingModelChangesWarning is already suppressed in Program.cs for
     /// exactly this reason (see the comment there).
+    ///
+    /// BUGFIX: this migration was never actually applied when first shipped —
+    /// EF Core discovers migrations at runtime by scanning the assembly for
+    /// classes carrying [Migration("id")] (normally emitted into the paired
+    /// .Designer.cs file that `dotnet ef migrations add` generates). This
+    /// file was hand-written without one, so Database.Migrate() never even
+    /// saw it as a candidate, let alone ran it. The [Migration] attribute
+    /// below is the fix -- a full Designer.cs (with BuildTargetModel) is only
+    /// needed for design-time model-diffing, which this project already
+    /// doesn't rely on for raw-SQL migrations like this one.
     /// </remarks>
+    [Migration("20260828120000_AddExternalBooks")]
     public partial class AddExternalBooks : Migration
     {
         /// <inheritdoc />
