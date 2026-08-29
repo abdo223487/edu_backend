@@ -304,9 +304,12 @@ public class AssignmentCentersController : ControllerBase
         return Ok(new SubmitAssignmentCenterResult(score, totalMarks));
     }
 
+    // GET AssignmentCenters/takers?assignmentCenterId=..&p=..&q=..&submitted=..
+    // Same paging convention as Students?p=..&q=.. and Assignments/takers.
     [HttpGet("takers")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.SuperAdmin}")]
-    public async Task<IActionResult> GetTakers([FromQuery] int assignmentCenterId)
+    public async Task<IActionResult> GetTakers(
+        [FromQuery] int assignmentCenterId, [FromQuery] int p = 1, [FromQuery] string? q = null, [FromQuery] bool? submitted = null)
     {
         var assignment = await _db.AssignmentCenters.AsNoTracking().FirstOrDefaultAsync(a => a.Id == assignmentCenterId);
         if (assignment == null) return NotFound(new { message = "Assignment not found." });
@@ -316,18 +319,28 @@ public class AssignmentCentersController : ControllerBase
             .Where(s => s.GroupMemberships.Any(m => groupIds.Contains(m.GroupId))).ToListAsync();
         var submissions = await _db.AssignmentCenterSubmissions.AsNoTracking().Where(s => s.AssignmentCenterId == assignmentCenterId).ToListAsync();
 
-        var items = students.Select(s =>
-        {
-            var submission = submissions.FirstOrDefault(sub => sub.StudentId == s.Id);
-            return new AssignmentCenterTakerDto(
-                s.Id,
-                s.Name,
-                s.Group?.Name ?? "",
-                submission != null,
-                submission?.Score,
-                submission?.TotalMarks,
-                submission?.SubmittedAt);
-        });
+        var trimmedQ = q?.Trim();
+
+        IEnumerable<Student> filtered = students;
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+            filtered = filtered.Where(s =>
+                s.Name.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase) ||
+                (s.Group?.Name != null && s.Group.Name.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)));
+
+        var items = filtered
+            .Select(s => new { student = s, submission = submissions.FirstOrDefault(sub => sub.StudentId == s.Id) })
+            .Where(x => submitted == null || (submitted.Value ? x.submission != null : x.submission == null))
+            .OrderBy(x => x.student.Name)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
+            .Select(x => new AssignmentCenterTakerDto(
+                x.student.Id,
+                x.student.Name,
+                x.student.Group?.Name ?? "",
+                x.submission != null,
+                x.submission?.Score,
+                x.submission?.TotalMarks,
+                x.submission?.SubmittedAt));
 
         return Ok(items);
     }

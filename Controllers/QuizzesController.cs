@@ -539,9 +539,16 @@ public class QuizzesController : ControllerBase
         return Ok(new GradeQuizResult(score, totalMarks));
     }
 
+    // GET Quizzes/takers?quizId=..&p=..&q=..&submitted=..
+    // Returns the FULL roster of eligible students (not just those who
+    // submitted, like Assignments/takers) so the teacher can see who
+    // hasn't taken the quiz yet, with the same p/q paging convention as
+    // Students?p=..&q=.. -- submitted=true/false narrows to only takers
+    // or only non-takers; omitted returns everyone.
     [HttpGet("takers")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public async Task<IActionResult> GetTakers([FromQuery] int quizId)
+    public async Task<IActionResult> GetTakers(
+        [FromQuery] int quizId, [FromQuery] int p = 1, [FromQuery] string? q = null, [FromQuery] bool? submitted = null)
     {
         var quiz = await _db.Quizzes.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (quizId));
         if (quiz == null) return NotFound(new { message = "Quiz not found." });
@@ -552,20 +559,28 @@ public class QuizzesController : ControllerBase
             .Where(s => s.GroupMemberships.Any(m => groupIds.Contains(m.GroupId))).ToListAsync();
         var results = await _db.QuizResults.AsNoTracking().Where(r => r.QuizId == quizId).ToListAsync();
 
-        // Takers.dart's UI (score bar, pct calc) assumes every returned taker has
-        // actually submitted, so only include students with a result — matches
-        // "الممتحنين" (those who took the exam), not the full roster.
-        var takers = students
+        var trimmedQ = q?.Trim();
+
+        IEnumerable<Student> filtered = students;
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+            filtered = filtered.Where(s =>
+                s.Name.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase) ||
+                (s.Group?.Name != null && s.Group.Name.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)));
+
+        var takers = filtered
             .Select(s => new { student = s, result = results.FirstOrDefault(r => r.StudentId == s.Id) })
-            .Where(x => x.result != null)
+            .Where(x => submitted == null || (submitted.Value ? x.result != null : x.result == null))
+            .OrderBy(x => x.student.Name)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
             .Select(x => new TakerDto(
                 x.student.Id.ToString(),
                 x.student.Name,
                 x.student.Group?.Name ?? "",
-                true,
-                x.result!.Score,
-                x.result.TotalMarks,
-                x.result.GradedAt));
+                x.result != null,
+                x.result?.Score,
+                x.result?.TotalMarks ?? 0,
+                x.result?.GradedAt));
 
         return Ok(takers);
     }

@@ -395,7 +395,7 @@ public class BankQuestionsController : ControllerBase
 
     [HttpGet("stats")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public async Task<IActionResult> GetStats([FromQuery] int? lessonId, [FromQuery] int? unitId)
+    public async Task<IActionResult> GetStats([FromQuery] int? lessonId, [FromQuery] int? unitId, [FromQuery] int p = 1)
     {
         var query = _db.BankQuestions.AsNoTracking().Include(q => q.Lesson).Include(q => q.Unit).AsQueryable();
         if (lessonId.HasValue) query = query.Where(q => q.LessonId == lessonId.Value);
@@ -435,7 +435,12 @@ public class BankQuestionsController : ControllerBase
                 studentsWrongCount);
         })
         // Hardest / most-missed questions first — the most useful view for a teacher at a glance.
-        .OrderBy(s => s.CorrectPercentage);
+        .OrderBy(s => s.CorrectPercentage)
+        // Same p convention as BankQuestions (GetAll) -- this used to return
+        // every question's stats in one response, which doesn't scale once a
+        // teacher's bank has hundreds of questions.
+        .Skip((p - 1) * PagingDefaults.PageSize)
+        .Take(PagingDefaults.PageSize);
 
         return Ok(items);
     }

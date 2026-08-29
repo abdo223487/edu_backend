@@ -468,9 +468,15 @@ public class LectureExamsController : ControllerBase
         return Ok(new GradeQuizResult(score, totalMarks));
     }
 
+    // GET LectureExams/takers?lectureExamId=..&p=..&q=..&submitted=..
+    // Same convention as Quizzes/takers: full eligible roster (see
+    // GetEligibleStudentsForLectureAsync above) instead of submitters only,
+    // p/q paging like Students?p=..&q=.., submitted=true/false narrows to
+    // only takers or only non-takers.
     [HttpGet("takers")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public async Task<IActionResult> GetTakers([FromQuery] int lectureExamId)
+    public async Task<IActionResult> GetTakers(
+        [FromQuery] int lectureExamId, [FromQuery] int p = 1, [FromQuery] string? q = null, [FromQuery] bool? submitted = null)
     {
         var exam = await _db.LectureExams.AsNoTracking().FirstOrDefaultAsync(e => e.Id == lectureExamId);
         if (exam == null) return NotFound(new { message = "Lecture exam not found." });
@@ -478,17 +484,28 @@ public class LectureExamsController : ControllerBase
         var students = await GetEligibleStudentsForLectureAsync(exam.LectureId);
         var results = await _db.LectureExamResults.AsNoTracking().Where(r => r.LectureExamId == lectureExamId).ToListAsync();
 
-        var takers = students
+        var trimmedQ = q?.Trim();
+
+        IEnumerable<Student> filtered = students;
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+            filtered = filtered.Where(s =>
+                s.Name.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase) ||
+                (s.Group?.Name != null && s.Group.Name.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)));
+
+        var takers = filtered
             .Select(s => new { student = s, result = results.FirstOrDefault(r => r.StudentId == s.Id) })
-            .Where(x => x.result != null)
+            .Where(x => submitted == null || (submitted.Value ? x.result != null : x.result == null))
+            .OrderBy(x => x.student.Name)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
             .Select(x => new TakerDto(
                 x.student.Id.ToString(),
                 x.student.Name,
                 x.student.Group?.Name ?? "",
-                true,
-                x.result!.Score,
-                x.result.TotalMarks,
-                x.result.GradedAt));
+                x.result != null,
+                x.result?.Score,
+                x.result?.TotalMarks ?? 0,
+                x.result?.GradedAt));
 
         return Ok(takers);
     }

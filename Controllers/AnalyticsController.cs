@@ -42,11 +42,15 @@ public class AnalyticsController : ControllerBase
     [HttpGet("students")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetStudentsAnalytics(
-        [FromQuery] int p = 1, [FromQuery] int? groupId = null, [FromQuery] int? schoolYear = null)
+        [FromQuery] int p = 1, [FromQuery] int? groupId = null, [FromQuery] int? schoolYear = null, [FromQuery] string? q = null)
     {
         var query = _db.Students.AsNoTracking().AsQueryable();
         if (groupId.HasValue) query = query.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
+
+        var trimmedQ = q?.Trim();
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+            query = query.Where(s => s.Name.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase));
 
         // Only Id/Name/Group name are ever read below -- project at the SQL
         // level instead of materializing (and Include()-joining) the full
@@ -109,13 +113,17 @@ public class AnalyticsController : ControllerBase
     [HttpGet("failed-students")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> GetFailedStudents(
-        [FromQuery] int p = 1, [FromQuery] int? groupId = null, [FromQuery] int? schoolYear = null)
+        [FromQuery] int p = 1, [FromQuery] int? groupId = null, [FromQuery] int? schoolYear = null, [FromQuery] string? q = null)
     {
         const int passMarkPercent = 50;
 
         var studentQuery = _db.Students.AsNoTracking().AsQueryable();
         if (groupId.HasValue) studentQuery = studentQuery.Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value));
         else if (schoolYear.HasValue) studentQuery = studentQuery.Where(s => s.SchoolYear == schoolYear.Value);
+
+        var trimmedQ = q?.Trim();
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+            studentQuery = studentQuery.Where(s => s.Name.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase));
 
         // Only Id/Name/Group name are used below -- project at the SQL level.
         var students = await studentQuery
@@ -393,16 +401,16 @@ public class AnalyticsController : ControllerBase
 
     [HttpGet("notebooks/{notebookId:int}/paid")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public Task<IActionResult> GetNotebookPaidStudents(int notebookId, [FromQuery] int? groupId, [FromQuery] int? schoolYear, [FromQuery] int p = 1)
-        => GetNotebookStudentsByPaymentStatus(notebookId, paid: true, groupId, schoolYear, p);
+    public Task<IActionResult> GetNotebookPaidStudents(int notebookId, [FromQuery] int? groupId, [FromQuery] int? schoolYear, [FromQuery] int p = 1, [FromQuery] string? q = null)
+        => GetNotebookStudentsByPaymentStatus(notebookId, paid: true, groupId, schoolYear, p, q);
 
     [HttpGet("notebooks/{notebookId:int}/unpaid")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public Task<IActionResult> GetNotebookUnpaidStudents(int notebookId, [FromQuery] int? groupId, [FromQuery] int? schoolYear, [FromQuery] int p = 1)
-        => GetNotebookStudentsByPaymentStatus(notebookId, paid: false, groupId, schoolYear, p);
+    public Task<IActionResult> GetNotebookUnpaidStudents(int notebookId, [FromQuery] int? groupId, [FromQuery] int? schoolYear, [FromQuery] int p = 1, [FromQuery] string? q = null)
+        => GetNotebookStudentsByPaymentStatus(notebookId, paid: false, groupId, schoolYear, p, q);
 
     private async Task<IActionResult> GetNotebookStudentsByPaymentStatus(
-        int notebookId, bool paid, int? groupId, int? schoolYear, int p)
+        int notebookId, bool paid, int? groupId, int? schoolYear, int p, string? q = null)
     {
         var notebook = await _db.Notebooks.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (notebookId));
         if (notebook == null) return NotFound(new { message = "Notebook not found." });
@@ -412,9 +420,16 @@ public class AnalyticsController : ControllerBase
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
         else query = query.Where(s => s.GroupMemberships.Any(m => notebook.GroupIds.Contains(m.GroupId)));
 
+        var trimmedQ = q?.Trim();
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+            query = query.Where(s => s.Name.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase));
+
         // Only Id/Name/PhoneNumber are read below -- project at the SQL level.
-        var students = await query.OrderBy(s => s.Name)
-            .Skip((p - 1) * PagingDefaults.PageSize).Take(PagingDefaults.PageSize)
+        // NOTE: paid/unpaid is a Payments-table condition, not a Students-table
+        // one, so it can't be applied inside this query -- it MUST run before
+        // Skip/Take (below) or a page can come back short/empty even though
+        // more matching students exist further in the (unfiltered) ordering.
+        var candidates = await query.OrderBy(s => s.Name)
             .Select(s => new { s.Id, s.Name, s.PhoneNumber })
             .ToListAsync();
 
@@ -430,8 +445,10 @@ public class AnalyticsController : ControllerBase
         // Client (notebbok analytics .dart) reads s['student']['name'] (a nested
         // object, not a flat one), plus s['totalPaid'] and s['price'] at the top
         // level for the progress bar — none of which existed before.
-        var filtered = students
+        var filtered = candidates
             .Where(s => paid ? paidByStudent.ContainsKey(s.Id) : !paidByStudent.ContainsKey(s.Id))
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
             .Select(s => new
             {
                 student = new { id = s.Id, name = s.Name, phoneNumber = s.PhoneNumber },
@@ -528,16 +545,16 @@ public class AnalyticsController : ControllerBase
 
     [HttpGet("billings/{billingId:int}/paid")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public Task<IActionResult> GetBillingPaidStudents(int billingId, [FromQuery] int? groupId, [FromQuery] int? schoolYear, [FromQuery] int p = 1)
-        => GetBillingStudentsByPaymentStatus(billingId, paid: true, groupId, schoolYear, p);
+    public Task<IActionResult> GetBillingPaidStudents(int billingId, [FromQuery] int? groupId, [FromQuery] int? schoolYear, [FromQuery] int p = 1, [FromQuery] string? q = null)
+        => GetBillingStudentsByPaymentStatus(billingId, paid: true, groupId, schoolYear, p, q);
 
     [HttpGet("billings/{billingId:int}/unpaid")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
-    public Task<IActionResult> GetBillingUnpaidStudents(int billingId, [FromQuery] int? groupId, [FromQuery] int? schoolYear, [FromQuery] int p = 1)
-        => GetBillingStudentsByPaymentStatus(billingId, paid: false, groupId, schoolYear, p);
+    public Task<IActionResult> GetBillingUnpaidStudents(int billingId, [FromQuery] int? groupId, [FromQuery] int? schoolYear, [FromQuery] int p = 1, [FromQuery] string? q = null)
+        => GetBillingStudentsByPaymentStatus(billingId, paid: false, groupId, schoolYear, p, q);
 
     private async Task<IActionResult> GetBillingStudentsByPaymentStatus(
-        int billingId, bool paid, int? groupId, int? schoolYear, int p)
+        int billingId, bool paid, int? groupId, int? schoolYear, int p, string? q = null)
     {
         var billing = await _db.Billings.AsNoTracking().FirstOrDefaultAsync(e => e.Id == (billingId));
         if (billing == null) return NotFound(new { message = "Billing not found." });
@@ -547,8 +564,14 @@ public class AnalyticsController : ControllerBase
         else if (schoolYear.HasValue) query = query.Where(s => s.SchoolYear == schoolYear.Value);
         else query = query.Where(s => s.GroupMemberships.Any(m => billing.GroupIds.Contains(m.GroupId)));
 
-        var students = await query.OrderBy(s => s.Name)
-            .Skip((p - 1) * PagingDefaults.PageSize).Take(PagingDefaults.PageSize)
+        var trimmedQ = q?.Trim();
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+            query = query.Where(s => s.Name.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase));
+
+        // Same ordering fix as the Notebook version above: paid/unpaid is a
+        // Payments-table condition, so it must run before Skip/Take or a page
+        // can come back short/empty despite more matching students existing.
+        var candidates = await query.OrderBy(s => s.Name)
             .Select(s => new { s.Id, s.Name, s.PhoneNumber })
             .ToListAsync();
 
@@ -558,8 +581,10 @@ public class AnalyticsController : ControllerBase
         var paidByStudent = payments.GroupBy(pay => pay.StudentId)
             .ToDictionary(g => g.Key, g => g.Sum(pay => pay.Price));
 
-        var filtered = students
+        var filtered = candidates
             .Where(s => paid ? paidByStudent.ContainsKey(s.Id) : !paidByStudent.ContainsKey(s.Id))
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
             .Select(s => new
             {
                 student = new { id = s.Id, name = s.Name, phoneNumber = s.PhoneNumber },
