@@ -317,6 +317,76 @@ public class Lesson
 }
 
 /// <summary>
+/// "الكتب الخارجية" (External Book): a Unit-shaped container -- same Name/
+/// SchoolYear/Month/Image, its own nested Lessons (ExternalBookLesson,
+/// looked up by LessonIndex exactly like Unit/Lesson), and Lectures/Materials
+/// created inside it exactly like a Unit's (see Lecture.ExternalBookId).
+///
+/// The one structural difference is UnitId: when set, every student already
+/// subscribed to that Unit (StudentUnitSubscription) automatically gets
+/// access to this External Book too -- no separate code needed (see the
+/// access checks in ExternalBooksController/LecturesController). When null,
+/// the ONLY way in is redeeming a Code carrying this book's Id (see
+/// Code.ExternalBookIds / StudentExternalBookSubscription), same as a
+/// regular Unit would work via StudentUnitSubscription.
+/// </summary>
+public class ExternalBook
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = default!;
+    public int SchoolYear { get; set; }
+    public int? Month { get; set; }
+    public string? ImageUrl { get; set; }
+
+    /// <summary>
+    /// Optional parent Unit. When set, students subscribed to that Unit can
+    /// access this External Book automatically. SetNull on the Unit's
+    /// deletion (see AppDbContext) -- the book itself is never deleted, it
+    /// just falls back to being code-only.
+    /// </summary>
+    public int? UnitId { get; set; }
+    [ForeignKey(nameof(UnitId))] public Unit? Unit { get; set; }
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this external book belongs to.</summary>
+    public int TeacherId { get; set; }
+
+    public ICollection<ExternalBookLesson> Lessons { get; set; } = new List<ExternalBookLesson>();
+}
+
+/// <summary>Exact mirror of Lesson, scoped to an ExternalBook instead of a Unit.</summary>
+public class ExternalBookLesson
+{
+    public int Id { get; set; }
+    public int ExternalBookId { get; set; }
+    [ForeignKey(nameof(ExternalBookId))] public ExternalBook? ExternalBook { get; set; }
+    /// <summary>Position of the lesson within the external book (used for lookups instead of Id).</summary>
+    public int LessonIndex { get; set; }
+    public string Name { get; set; } = default!;
+
+    /// <summary>Mandatory cover image for the lesson (enforced in ExternalBooksController.AddLesson).</summary>
+    public string? ImageUrl { get; set; }
+}
+
+/// <summary>
+/// Grants a student access to EVERY lecture inside one ExternalBook, created
+/// when a Code carrying that ExternalBookId is redeemed (see
+/// StudentsController.RedeemCode). Mirrors StudentUnitSubscription/
+/// StudentOnlineLessonUnlock. NOT the only way in though -- a student
+/// subscribed to the book's linked UnitId (when set) gets access too without
+/// ever needing a row here; see the access checks in
+/// ExternalBooksController/LecturesController.
+/// </summary>
+public class StudentExternalBookSubscription
+{
+    public int Id { get; set; }
+    // MULTI-TENANT SECURITY: same reasoning as StudentUnitSubscription.TeacherId.
+    public int TeacherId { get; set; }
+    public int StudentId { get; set; }
+    public int ExternalBookId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>
 /// A standalone container for online-only lectures — NOT tied to a Unit.
 /// Created with just a Name, SchoolYear, and ImageUrl. A student can never
 /// browse into it or its lectures on their own; the only way in is
@@ -417,9 +487,17 @@ public class Lecture
     /// container (see OnlineLessonsController). Always AttendanceMethod =
     /// Online, never has GroupIds -- the only way a student reaches it is by
     /// redeeming a Code for its OnlineLessonId (StudentOnlineLessonUnlock).
-    /// Mutually exclusive with UnitId.
+    /// Mutually exclusive with UnitId and ExternalBookId.
     /// </summary>
     public int? OnlineLessonId { get; set; }
+    /// <summary>
+    /// Set instead of UnitId for a lecture created inside an External Book
+    /// (see ExternalBooksController / LecturesController). Behaves exactly
+    /// like a Unit lecture otherwise -- can have GroupIds and a LessonIndex
+    /// pointing at one of the book's ExternalBookLessons. Mutually exclusive
+    /// with UnitId and OnlineLessonId.
+    /// </summary>
+    public int? ExternalBookId { get; set; }
     public int? LessonIndex { get; set; }
     public int? Months { get; set; }
     public int? SchoolYear { get; set; }
@@ -593,6 +671,18 @@ public class Code
     {
         get => OnlineLessonIdsCsv.Length == 0 ? new() : OnlineLessonIdsCsv.Split(',').Select(int.Parse).ToList();
         set => OnlineLessonIdsCsv = string.Join(',', value);
+    }
+    /// <summary>
+    /// External Book ids this code unlocks (in addition to UnitIds/LectureIds/
+    /// OnlineLessonIds). Redeeming grants a StudentExternalBookSubscription
+    /// for each one. Same CSV-on-the-entity pattern as the others -- see
+    /// StudentsController.RedeemCode / ExternalBooksController.
+    /// </summary>
+    public string ExternalBookIdsCsv { get; set; } = string.Empty;
+    [NotMapped] public List<int> ExternalBookIds
+    {
+        get => ExternalBookIdsCsv.Length == 0 ? new() : ExternalBookIdsCsv.Split(',').Select(int.Parse).ToList();
+        set => ExternalBookIdsCsv = string.Join(',', value);
     }
     public bool IsUsed { get; set; }
     public int? UsedByStudentId { get; set; }

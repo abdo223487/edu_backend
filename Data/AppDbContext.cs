@@ -25,6 +25,9 @@ public class AppDbContext : DbContext
     public DbSet<Lesson> Lessons => Set<Lesson>();
     public DbSet<OnlineLesson> OnlineLessons => Set<OnlineLesson>();
     public DbSet<StudentOnlineLessonUnlock> StudentOnlineLessonUnlocks => Set<StudentOnlineLessonUnlock>();
+    public DbSet<ExternalBook> ExternalBooks => Set<ExternalBook>();
+    public DbSet<ExternalBookLesson> ExternalBookLessons => Set<ExternalBookLesson>();
+    public DbSet<StudentExternalBookSubscription> StudentExternalBookSubscriptions => Set<StudentExternalBookSubscription>();
     public DbSet<StudentUnitSubscription> StudentUnitSubscriptions => Set<StudentUnitSubscription>();
     public DbSet<StudentGroupMembership> StudentGroupMemberships => Set<StudentGroupMembership>();
     public DbSet<StudentLectureUnlock> StudentLectureUnlocks => Set<StudentLectureUnlock>();
@@ -104,6 +107,8 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Group>().HasQueryFilter(g => g.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Unit>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<OnlineLesson>().HasQueryFilter(o => o.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<ExternalBook>().HasQueryFilter(e => e.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<StudentExternalBookSubscription>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Lecture>().HasQueryFilter(l => l.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Material>().HasQueryFilter(m => m.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Notebook>().HasQueryFilter(n => n.TeacherId == _tenant.CurrentTenantId);
@@ -125,6 +130,11 @@ public class AppDbContext : DbContext
         // writes. See AddTeacherIdIndexesForTenantIsolation migration.
         modelBuilder.Entity<Group>().HasIndex(g => g.TeacherId);
         modelBuilder.Entity<Unit>().HasIndex(u => u.TeacherId);
+        modelBuilder.Entity<ExternalBook>().HasIndex(e => e.TeacherId);
+        modelBuilder.Entity<ExternalBook>().HasIndex(e => e.UnitId);
+        modelBuilder.Entity<StudentExternalBookSubscription>().HasIndex(s => s.TeacherId);
+        modelBuilder.Entity<StudentExternalBookSubscription>()
+            .HasIndex(s => new { s.StudentId, s.ExternalBookId }).IsUnique();
         modelBuilder.Entity<Lecture>().HasIndex(l => l.TeacherId);
         modelBuilder.Entity<Material>().HasIndex(m => m.TeacherId);
         modelBuilder.Entity<Notebook>().HasIndex(n => n.TeacherId);
@@ -321,7 +331,8 @@ public class AppDbContext : DbContext
                 Set<StudentGroupMembership>().Any(m => m.StudentId == s.Id && m.Group != null && m.Group.TeacherId == _tenant.CurrentTenantId) ||
                 Set<StudentUnitSubscription>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId) ||
                 Set<StudentLectureUnlock>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId) ||
-                Set<StudentOnlineLessonUnlock>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId));
+                Set<StudentOnlineLessonUnlock>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId) ||
+                Set<StudentExternalBookSubscription>().Any(u => u.StudentId == s.Id && u.TeacherId == _tenant.CurrentTenantId));
 
         modelBuilder.Entity<StudentGroupMembership>()
             .HasIndex(m => new { m.StudentId, m.GroupId }).IsUnique();
@@ -348,6 +359,21 @@ public class AppDbContext : DbContext
             .WithMany(u => u.Lessons)
             .HasForeignKey(l => l.UnitId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<ExternalBookLesson>()
+            .HasOne(l => l.ExternalBook)
+            .WithMany(e => e.Lessons)
+            .HasForeignKey(l => l.ExternalBookId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        // Optional parent Unit link: deleting the Unit un-links the External
+        // Book (falls back to code-only access) instead of blocking the
+        // Unit's deletion or cascading into deleting the book itself.
+        modelBuilder.Entity<ExternalBook>()
+            .HasOne(e => e.Unit)
+            .WithMany()
+            .HasForeignKey(e => e.UnitId)
+            .OnDelete(DeleteBehavior.SetNull);
 
         modelBuilder.Entity<Question>()
             .HasOne(q => q.Quiz)

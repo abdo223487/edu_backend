@@ -39,6 +39,29 @@ public class LecturesController : ControllerBase
         _logger = logger;
     }
 
+    /// <summary>
+    /// External Book ids the given student can currently reach: a direct
+    /// redeemed-code subscription, plus any book whose optional UnitId is
+    /// one the student is subscribed to (JWT claim OR a live row, in case a
+    /// unit was just redeemed and the token hasn't refreshed yet). Mirrors
+    /// the Unit-subscription gate used throughout this controller.
+    /// </summary>
+    private async Task<List<int>> GetAccessibleExternalBookIdsAsync(int studentId)
+    {
+        var subscribedUnitIds = User.GetUnitIds().ToHashSet();
+        var liveUnitIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+            .Where(s => s.StudentId == studentId).Select(s => s.UnitId).ToListAsync();
+        subscribedUnitIds.UnionWith(liveUnitIds);
+
+        var directIds = await _db.StudentExternalBookSubscriptions.AsNoTracking()
+            .Where(s => s.StudentId == studentId).Select(s => s.ExternalBookId).ToListAsync();
+        var viaUnitIds = await _db.ExternalBooks.AsNoTracking()
+            .Where(e => e.UnitId != null && subscribedUnitIds.Contains(e.UnitId.Value))
+            .Select(e => e.Id).ToListAsync();
+
+        return directIds.Union(viaUnitIds).Distinct().ToList();
+    }
+
     // GET Lectures/latest-center-by-year
     // Returns the most recently created Center (in-person) lecture PER
     // SchoolYear for the current teacher — a list of
@@ -125,7 +148,7 @@ public class LecturesController : ControllerBase
         string? youtubeLinkRaw;
         IFormFile? videoFile;
         var groupIds = new List<int>();
-        int? unitId, lessonIndex, requestSchoolYear;
+        int? unitId, lessonIndex, requestSchoolYear, externalBookId;
 
         if (Request.HasFormContentType)
         {
@@ -141,6 +164,7 @@ public class LecturesController : ControllerBase
                 groupIds.Add(int.Parse(form[$"GroupIds[{i}]"].ToString()));
 
             unitId = int.TryParse(form["UnitId"].ToString(), out var uid) ? uid : null;
+            externalBookId = int.TryParse(form["ExternalBookId"].ToString(), out var eid) ? eid : null;
             lessonIndex = int.TryParse(form["LessonIndex"].ToString(), out var li) ? li : null;
             requestSchoolYear = int.TryParse(form["SchoolYear"].ToString(), out var sy) ? sy : null;
         }
@@ -176,12 +200,16 @@ public class LecturesController : ControllerBase
             }
 
             unitId = GetInt("unitId", "UnitId");
+            externalBookId = GetInt("externalBookId", "ExternalBookId");
             lessonIndex = GetInt("lessonIndex", "LessonIndex");
             requestSchoolYear = GetInt("schoolYear", "SchoolYear");
         }
 
         if (!Enum.TryParse<AttendanceMethod>(attendanceMethodRaw, true, out var method))
             return BadRequest(new { message = "attendanceMethod must be 'Center' or 'Online'." });
+
+        if (unitId.HasValue && externalBookId.HasValue)
+            return BadRequest(new { message = "A lecture can belong to a Unit or an External Book, not both." });
 
         // The client only ever sends one text field for "the video link"
         // (still called YoutubeLink for backward compatibility with the
@@ -231,14 +259,20 @@ public class LecturesController : ControllerBase
             thumbnailUrl = await TryGenerateThumbnailFromUrlAsync(manualVideoLink);
         }
 
-        // Same SchoolYear-derivation rule as before: prefer the Unit's year,
-        // fall back to an explicitly-sent SchoolYear, then to the first
-        // group's year — a teacher JWT never carries a "schoolYear" claim.
+        // Same SchoolYear-derivation rule as before: prefer the Unit's (or
+        // External Book's) year, fall back to an explicitly-sent SchoolYear,
+        // then to the first group's year — a teacher JWT never carries a
+        // "schoolYear" claim.
         int? schoolYear;
         if (unitId.HasValue)
         {
             schoolYear = await _db.Units.Where(u => u.Id == unitId.Value)
                 .Select(u => (int?)u.SchoolYear).FirstOrDefaultAsync();
+        }
+        else if (externalBookId.HasValue)
+        {
+            schoolYear = await _db.ExternalBooks.Where(e => e.Id == externalBookId.Value)
+                .Select(e => (int?)e.SchoolYear).FirstOrDefaultAsync();
         }
         else if (requestSchoolYear.HasValue)
         {
@@ -261,6 +295,7 @@ public class LecturesController : ControllerBase
             ThumbnailUrl = thumbnailUrl,
             GroupIds = groupIds,
             UnitId = unitId,
+            ExternalBookId = externalBookId,
             LessonIndex = lessonIndex,
             SchoolYear = schoolYear,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
@@ -294,7 +329,7 @@ public class LecturesController : ControllerBase
         // doc comment in Models/Entities.cs) -- silently ignore this field
         // for those rather than erroring, since the client may still send an
         // empty/irrelevant groupIds for them.
-        if (request.GroupIds != null && lecture.UnitId.HasValue)
+        if (request.GroupIds != null && (lecture.UnitId.HasValue || lecture.ExternalBookId.HasValue))
             lecture.GroupIds = request.GroupIds;
 
         await _db.SaveChangesAsync();
@@ -337,13 +372,15 @@ public class LecturesController : ControllerBase
     public async Task<IActionResult> ByYear(
         [FromQuery] int schoolYear,
         [FromQuery] string attendanceMethod,
-        [FromQuery] int? unitId = null)
+        [FromQuery] int? unitId = null,
+        [FromQuery] int? externalBookId = null)
     {
         if (!Enum.TryParse<AttendanceMethod>(attendanceMethod, true, out var method))
             return BadRequest(new { message = "attendanceMethod must be 'Center' or 'Online'." });
 
         var query = _db.Lectures.AsNoTracking().Where(l => l.SchoolYear == schoolYear && l.AttendanceMethod == method);
         if (unitId.HasValue) query = query.Where(l => l.UnitId == unitId.Value);
+        if (externalBookId.HasValue) query = query.Where(l => l.ExternalBookId == externalBookId.Value);
 
         // Defensive: this action has no [Authorize(Roles=...)] restricting it to
         // staff, so apply the same subscription/unlock gate as ByGroup in case
@@ -357,16 +394,21 @@ public class LecturesController : ControllerBase
                 .Where(u => u.StudentId == studentId)
                 .Select(u => u.LectureId)
                 .ToListAsync();
+            var accessibleBookIds = await GetAccessibleExternalBookIdsAsync(studentId);
 
             // Same gate as ByGroup: a lecture inside a Unit is only visible to
             // a student both subscribed to that Unit AND a member of one of
             // the lecture's Groups -- a course-wide Unit subscription alone
             // must not leak a lecture meant for a different group. A direct
             // lecture-level code unlock (see RedeemCode) bypasses both checks,
-            // same as before.
+            // same as before. A lecture inside an External Book follows the
+            // exact same Group-membership rule, gated on the book instead of
+            // the unit.
             query = query.Where(l =>
                 unlockedLectureIds.Contains(l.Id) ||
                 (l.UnitId != null && subscribedIds.Contains(l.UnitId.Value) &&
+                    (studentGroupId.HasValue && _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == studentGroupId.Value))) ||
+                (l.ExternalBookId != null && accessibleBookIds.Contains(l.ExternalBookId.Value) &&
                     (studentGroupId.HasValue && _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == studentGroupId.Value))));
         }
 
@@ -375,7 +417,7 @@ public class LecturesController : ControllerBase
         // the SQL level instead of materializing the full Lecture row
         // (TeacherId/Months/SchoolYear are never used here).
         var items = await query.OrderBy(l => l.Id)
-            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt })
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.ExternalBookId })
             .ToListAsync();
         return Ok(items.Select(l =>
         {
@@ -383,7 +425,7 @@ public class LecturesController : ControllerBase
             return new LectureListItem(
                 l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
-                l.CreatedAt);
+                l.CreatedAt, l.ExternalBookId);
         }));
     }
 
@@ -392,6 +434,7 @@ public class LecturesController : ControllerBase
         [FromQuery] int? groupId,
         [FromQuery] string? attendanceMethod,
         [FromQuery] int? unitId,
+        [FromQuery] int? externalBookId,
         [FromQuery] int? lessonIndex,
         [FromQuery] bool noUnitOnly = false,
         [FromQuery] int p = 1)
@@ -404,11 +447,13 @@ public class LecturesController : ControllerBase
             Enum.TryParse<AttendanceMethod>(attendanceMethod, true, out var method))
             query = query.Where(l => l.AttendanceMethod == method);
 
-        if (noUnitOnly) query = query.Where(l => l.UnitId == null);
+        if (noUnitOnly) query = query.Where(l => l.UnitId == null && l.ExternalBookId == null);
+        else if (externalBookId.HasValue) query = query.Where(l => l.ExternalBookId == externalBookId.Value);
         else if (unitId.HasValue) query = query.Where(l => l.UnitId == unitId.Value);
 
         // Same subscription gate as Units/Notifications: a lecture tied to a
-        // specific unit is only visible to a student subscribed to that unit.
+        // specific unit (or external book) is only visible to a student
+        // subscribed to that unit/book.
         //
         // BUGFIX: lectures with no UnitId (standalone/no-unit online lectures
         // meant to be unlocked by a plain code, e.g. via Codes/codeables ->
@@ -428,13 +473,15 @@ public class LecturesController : ControllerBase
                 .Where(u => u.StudentId == studentId)
                 .Select(u => u.LectureId)
                 .ToListAsync();
+            var accessibleBookIds = await GetAccessibleExternalBookIdsAsync(studentId);
 
             // See identical note in ByYear: a lecture-level code unlock must
             // grant visibility to that lecture even when it belongs to a Unit
-            // the student never subscribed to as a whole.
+            // (or External Book) the student never subscribed to as a whole.
             query = query.Where(l =>
                 (l.UnitId != null && (subscribedIds.Contains(l.UnitId.Value) || unlockedLectureIds.Contains(l.Id))) ||
-                (l.UnitId == null && unlockedLectureIds.Contains(l.Id)));
+                (l.ExternalBookId != null && (accessibleBookIds.Contains(l.ExternalBookId.Value) || unlockedLectureIds.Contains(l.Id))) ||
+                (l.UnitId == null && l.ExternalBookId == null && unlockedLectureIds.Contains(l.Id)));
         }
 
         if (lessonIndex.HasValue) query = query.Where(l => l.LessonIndex == lessonIndex.Value);
@@ -443,7 +490,7 @@ public class LecturesController : ControllerBase
             .OrderBy(l => l.Id)
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
-            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt })
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.ExternalBookId })
             .ToListAsync();
 
         return Ok(items.Select(l =>
@@ -452,7 +499,7 @@ public class LecturesController : ControllerBase
             return new LectureListItem(
                 l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
-                l.CreatedAt);
+                l.CreatedAt, l.ExternalBookId);
         }));
     }
 
@@ -466,16 +513,28 @@ public class LecturesController : ControllerBase
         {
             var lecture = await _db.Lectures.AsNoTracking().FirstOrDefaultAsync(l => l.Id == lectureId);
             if (lecture == null) return NotFound(new { message = "Lecture not found." });
+            var studentId = User.GetUserId();
+
             if (lecture.UnitId.HasValue && !User.GetUnitIds().Contains(lecture.UnitId.Value))
             {
                 // Same lecture-level-unlock exception as ByGroup/ByYear: a
                 // code redeemed for this one in-unit lecture should still let
                 // the student open its materials without a full subscription.
-                var studentId = User.GetUserId();
                 var unlocked = await _db.StudentLectureUnlocks.AsNoTracking()
                     .AnyAsync(u => u.StudentId == studentId && u.LectureId == lectureId);
                 if (!unlocked)
                     return StatusCode(403, new { message = "Not subscribed to this unit." });
+            }
+            else if (lecture.ExternalBookId.HasValue)
+            {
+                var accessibleBookIds = await GetAccessibleExternalBookIdsAsync(studentId);
+                if (!accessibleBookIds.Contains(lecture.ExternalBookId.Value))
+                {
+                    var unlocked = await _db.StudentLectureUnlocks.AsNoTracking()
+                        .AnyAsync(u => u.StudentId == studentId && u.LectureId == lectureId);
+                    if (!unlocked)
+                        return StatusCode(403, new { message = "Not subscribed to this external book." });
+                }
             }
         }
 
@@ -523,7 +582,7 @@ public class LecturesController : ControllerBase
     private static LectureListItem ToDto(Lecture l)
     {
         var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
-        return new(l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIds, l.CreatedAt);
+        return new(l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIds, l.CreatedAt, l.ExternalBookId);
     }
 
     /// <summary>

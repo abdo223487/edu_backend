@@ -10,7 +10,7 @@ namespace EduApi.Controllers;
 // GenerateCodeRequest.TriggerLectureId is optional: when set, the teacher is
 // creating a TEMPLATE tied to a Center lecture instead of a one-off code —
 // see CodesController.Generate and AttendanceController.IssueTriggeredCodesAsync.
-public record GenerateCodeRequest(int SchoolYear, List<int> UnitIds, List<int> LectureIds, int? TriggerLectureId, List<int>? OnlineLessonIds = null);
+public record GenerateCodeRequest(int SchoolYear, List<int> UnitIds, List<int> LectureIds, int? TriggerLectureId, List<int>? OnlineLessonIds = null, List<int>? ExternalBookIds = null);
 
 /// <summary>
 /// Route: api/Codes
@@ -150,9 +150,43 @@ public class CodesController : ControllerBase
                 .ToList()
         }).ToList();
 
+        // External Books: same nested unit/lesson/lecture tree shape as
+        // "units" above (they're Unit-shaped containers with their own
+        // Lessons), plus their optional linked UnitId so the teacher UI can
+        // show "مربوط بـ..." context if it wants to.
+        var externalBooks = await _db.ExternalBooks.AsNoTracking().Where(e => e.SchoolYear == schoolYear)
+            .Include(e => e.Lessons)
+            .ToListAsync();
+        var externalBookIds = externalBooks.Select(e => e.Id).ToList();
+        var lecturesByExternalBook = await _db.Lectures.AsNoTracking()
+            .Where(l => l.ExternalBookId != null && externalBookIds.Contains(l.ExternalBookId.Value))
+            .ToListAsync();
+        lecturesByExternalBook = lecturesByExternalBook.Where(IsExternalBookLectureCodeable).ToList();
+
+        bool IsExternalBookLectureCodeable(Lecture l) =>
+            l.AttendanceMethod == AttendanceMethod.Online &&
+            HasVideoSource(l) &&
+            !string.IsNullOrEmpty(l.GroupIdsCsv);
+
+        var externalBookTree = externalBooks.Select(e => new
+        {
+            id = e.Id,
+            name = e.Name,
+            unitId = e.UnitId,
+            lessons = e.Lessons.OrderBy(l => l.LessonIndex).Select(lesson => new
+            {
+                name = lesson.Name,
+                lectures = lecturesByExternalBook
+                    .Where(l => l.ExternalBookId == e.Id && l.LessonIndex == lesson.LessonIndex)
+                    .Select(l => new { id = l.Id, name = l.Name })
+                    .ToList()
+            })
+            .ToList()
+        }).ToList();
+
         // NOTE: key is "lectures", NOT "standaloneLectures" — the client does
         // `standaloneLectures = data['lectures'] ?? []`.
-        return Ok(new { units = unitTree, lectures = standaloneDtos, onlineLessons = onlineLessonTree });
+        return Ok(new { units = unitTree, lectures = standaloneDtos, onlineLessons = onlineLessonTree, externalBooks = externalBookTree });
     }
 
     // TEMPORARY DEBUG ENDPOINT — remove once codeables filtering is confirmed
@@ -293,6 +327,7 @@ public class CodesController : ControllerBase
                 UnitIds = request.UnitIds ?? new(),
                 LectureIds = request.LectureIds ?? new(),
                 OnlineLessonIds = request.OnlineLessonIds ?? new(),
+                ExternalBookIds = request.ExternalBookIds ?? new(),
                 IsTemplate = request.TriggerLectureId.HasValue,
                 TriggerLectureId = request.TriggerLectureId,
                 TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
@@ -326,6 +361,8 @@ public class CodesController : ControllerBase
             .Select(l => new { id = l.Id, name = l.Name }).ToListAsync();
         var onlineLessons = await _db.OnlineLessons.Where(o => c.OnlineLessonIds.Contains(o.Id))
             .Select(o => new { id = o.Id, name = o.Name }).ToListAsync();
+        var externalBooks = await _db.ExternalBooks.Where(e => c.ExternalBookIds.Contains(e.Id))
+            .Select(e => new { id = e.Id, name = e.Name }).ToListAsync();
 
         object? redeemedBy = null;
         if (c.UsedByStudentId.HasValue)
@@ -356,8 +393,9 @@ public class CodesController : ControllerBase
             units,
             lectures,
             onlineLessons,
+            externalBooks,
             // "how many items this code unlocks" — only .length is read client-side.
-            unlocks = c.UnitIds.Concat(c.LectureIds).Concat(c.OnlineLessonIds).ToList(),
+            unlocks = c.UnitIds.Concat(c.LectureIds).Concat(c.OnlineLessonIds).Concat(c.ExternalBookIds).ToList(),
             isUsed = c.IsUsed,
             isRedeemed = c.IsUsed, // client's list item reads "isRedeemed" specifically
             redeemedBy,

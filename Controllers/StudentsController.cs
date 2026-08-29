@@ -1425,12 +1425,22 @@ public class StudentsController : ControllerBase
                 _db.StudentOnlineLessonUnlocks.Add(new StudentOnlineLessonUnlock { TeacherId = code.TeacherId, StudentId = studentId, OnlineLessonId = onlineLessonId });
         }
 
+        // Same pattern as UnitIds/OnlineLessonIds above: grants access to
+        // every lecture inside that External Book (see
+        // ExternalBooksController/LecturesController's access checks).
+        foreach (var externalBookId in code.ExternalBookIds)
+        {
+            if (!await _db.StudentExternalBookSubscriptions.AnyAsync(u => u.StudentId == studentId && u.ExternalBookId == externalBookId))
+                _db.StudentExternalBookSubscriptions.Add(new StudentExternalBookSubscription { TeacherId = code.TeacherId, StudentId = studentId, ExternalBookId = externalBookId });
+        }
+
         await _db.SaveChangesAsync();
         return Ok(new {
             message = "Code redeemed successfully.",
             unitIds = code.UnitIds,
             lectureIds = code.LectureIds,
-            onlineLessonIds = code.OnlineLessonIds
+            onlineLessonIds = code.OnlineLessonIds,
+            externalBookIds = code.ExternalBookIds
         });
     }
 
@@ -1452,12 +1462,15 @@ public class StudentsController : ControllerBase
         var unitIdsFlat = codes.SelectMany(c => c.UnitIds).Distinct().ToList();
         var lectureIdsFlat = codes.SelectMany(c => c.LectureIds).Distinct().ToList();
         var onlineLessonIdsFlat = codes.SelectMany(c => c.OnlineLessonIds).Distinct().ToList();
+        var externalBookIdsFlat = codes.SelectMany(c => c.ExternalBookIds).Distinct().ToList();
         var unitNames = await _db.Units.AsNoTracking().Where(u => unitIdsFlat.Contains(u.Id))
             .ToDictionaryAsync(u => u.Id, u => u.Name);
         var lectureNames = await _db.Lectures.AsNoTracking().Where(l => lectureIdsFlat.Contains(l.Id))
             .ToDictionaryAsync(l => l.Id, l => l.Name);
         var onlineLessonNames = await _db.OnlineLessons.AsNoTracking().Where(o => onlineLessonIdsFlat.Contains(o.Id))
             .ToDictionaryAsync(o => o.Id, o => o.Name);
+        var externalBookNames = await _db.ExternalBooks.AsNoTracking().Where(e => externalBookIdsFlat.Contains(e.Id))
+            .ToDictionaryAsync(e => e.Id, e => e.Name);
 
         var dtos = codes.Select(c => new
         {
@@ -1467,6 +1480,7 @@ public class StudentsController : ControllerBase
             units = c.UnitIds.Select(id => new { id, name = unitNames.GetValueOrDefault(id, "") }).ToList(),
             lectures = c.LectureIds.Select(id => new { id, name = lectureNames.GetValueOrDefault(id, "") }).ToList(),
             onlineLessons = c.OnlineLessonIds.Select(id => new { id, name = onlineLessonNames.GetValueOrDefault(id, "") }).ToList(),
+            externalBooks = c.ExternalBookIds.Select(id => new { id, name = externalBookNames.GetValueOrDefault(id, "") }).ToList(),
             redeemedAt = c.UsedAt?.ToString("O"),
             // true when this code was earned automatically by attendance
             // rather than typed in manually.

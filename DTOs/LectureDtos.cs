@@ -40,6 +40,7 @@ public record LectureListItem(
     int? UnitId,
     int? LessonIndex,
     List<int> GroupIds,
-    DateTime CreatedAt);
+    DateTime CreatedAt,
+    int? ExternalBookId = null);
 
 public record MaterialListItem(int Id, string Name, string Type, string Link);
