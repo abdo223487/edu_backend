@@ -115,6 +115,56 @@ public class Teacher
     public int TokenVersion { get; set; } = 1;
 }
 
+/// <summary>
+/// SELF-REGISTRATION: a pending "join request" a student submits themselves
+/// (picking a teacher/year/group from public dropdowns) BEFORE any Student
+/// row exists. Nothing here is trusted/active until the target teacher
+/// approves it — approval is what actually creates the real Student +
+/// StudentGroupMembership rows (see RegistrationController.Approve).
+/// Tenant-scoped like everything else (TeacherId), but reachable anonymously
+/// (register/status) so the query filter is bypassed with IgnoreQueryFilters()
+/// wherever there is no JWT/tenant context yet — same pattern as
+/// Student login/refresh.
+/// </summary>
+public static class RegistrationStatus
+{
+    public const string Pending = "Pending";
+    public const string Approved = "Approved";
+    public const string Rejected = "Rejected";
+}
+
+public class StudentRegistrationRequest
+{
+    public int Id { get; set; }
+    public string Name { get; set; } = default!;
+    public string PhoneNumber { get; set; } = default!;
+    public string ParentPhoneNumber { get; set; } = default!;
+    public string UserName { get; set; } = default!;
+    public string PasswordHash { get; set; } = default!;
+
+    /// <summary>Which teacher (tenant) this request targets.</summary>
+    public int TeacherId { get; set; }
+    public int SchoolYear { get; set; }
+    public int GroupId { get; set; }
+
+    /// <summary>
+    /// Opaque token handed back to the student on submit and required (along
+    /// with the request Id) to poll Registration/status — prevents anyone
+    /// from guessing another student's request id and reading/leaking their
+    /// review status.
+    /// </summary>
+    public string AccessCode { get; set; } = default!;
+
+    public string Status { get; set; } = RegistrationStatus.Pending;
+    public string? RejectionReason { get; set; }
+
+    /// <summary>Set once Approved and the real Student row is created.</summary>
+    public int? CreatedStudentId { get; set; }
+
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? ReviewedAt { get; set; }
+}
+
 public class Group
 {
     public int Id { get; set; }

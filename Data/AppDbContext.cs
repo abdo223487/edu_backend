@@ -30,6 +30,7 @@ public class AppDbContext : DbContext
     public DbSet<StudentExternalBookSubscription> StudentExternalBookSubscriptions => Set<StudentExternalBookSubscription>();
     public DbSet<StudentUnitSubscription> StudentUnitSubscriptions => Set<StudentUnitSubscription>();
     public DbSet<StudentGroupMembership> StudentGroupMemberships => Set<StudentGroupMembership>();
+    public DbSet<StudentRegistrationRequest> StudentRegistrationRequests => Set<StudentRegistrationRequest>();
     public DbSet<StudentLectureUnlock> StudentLectureUnlocks => Set<StudentLectureUnlock>();
     public DbSet<Lecture> Lectures => Set<Lecture>();
     public DbSet<Material> Materials => Set<Material>();
@@ -120,6 +121,13 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<AssignmentCenter>().HasQueryFilter(a => a.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<BankQuestion>().HasQueryFilter(bq => bq.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<BankAttempt>().HasQueryFilter(ba => ba.TeacherId == _tenant.CurrentTenantId);
+        // SELF-REGISTRATION: register/status endpoints are anonymous (no tenant
+        // yet) and bypass this via IgnoreQueryFilters() + an explicit TeacherId
+        // filter; the teacher-side pending/approve/reject endpoints rely on it
+        // normally, same as every other tenant-owned table.
+        modelBuilder.Entity<StudentRegistrationRequest>().HasQueryFilter(r => r.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<StudentRegistrationRequest>().HasIndex(r => r.TeacherId);
+        modelBuilder.Entity<StudentRegistrationRequest>().HasIndex(r => new { r.Id, r.AccessCode });
 
         // PERFORMANCE: every entity above (and the three result tables + five
         // activity tables filtered below) is scoped to the current tenant via
