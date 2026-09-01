@@ -63,7 +63,12 @@ public class QuizzesController : ControllerBase
     // duration, since they're not taking a timed countdown.
     private static TimeSpan EffectiveRemaining(Quiz q, DateTime nowUtc)
     {
-        var full = TimeSpan.FromMinutes(q.DurationInMinutes);
+        // NOTE: the exam no longer has a per-attempt DurationInMinutes -- it
+        // now has a fixed shared window (StartAt -> Deadline), same idea as
+        // Assignment's Deadline picker but with an explicit start too.
+        // "full" below is just that window's length.
+        var full = q.Deadline - q.StartAt;
+        if (full < TimeSpan.Zero) full = TimeSpan.Zero;
         var untilDeadline = q.Deadline - nowUtc;
         if (untilDeadline < TimeSpan.Zero) return TimeSpan.Zero;
         return untilDeadline < full ? untilDeadline : full;
@@ -173,14 +178,16 @@ public class QuizzesController : ControllerBase
             // Deadline — this is what lets the student open/submit it again
             // normally, past the original Deadline.
             var effectiveQuizForStudent = reopenActive
-                ? new Quiz { DurationInMinutes = q.DurationInMinutes, Deadline = ov!.ReopenExpiresAt!.Value }
+                ? new Quiz { StartAt = q.StartAt, Deadline = ov!.ReopenExpiresAt!.Value }
                 : q;
 
             // Students get the real remaining time (capped by the Deadline);
-            // teachers/admins keep seeing the exam's actual configured duration.
+            // teachers/admins keep seeing the exam's actual configured window.
+            var fullWindow = q.Deadline - q.StartAt;
+            if (fullWindow < TimeSpan.Zero) fullWindow = TimeSpan.Zero;
             var effectiveDuration = effectiveStudentId.HasValue
                 ? EffectiveRemaining(effectiveQuizForStudent, nowUtc)
-                : TimeSpan.FromMinutes(q.DurationInMinutes);
+                : fullWindow;
 
             var result = studentResultsById.TryGetValue(q.Id, out var r) ? r : ((int Score, int TotalMarks)?)null;
 
@@ -192,8 +199,15 @@ public class QuizzesController : ControllerBase
                 durationInMinutes = (int)effectiveDuration.TotalMinutes,
                 // Flutter's ExamDetailPage expects duration as "HH:MM:SS" (it does
                 // widget.duration.split(":")), so format it here instead of sending
+                // a raw minutes count. Kept as a derived field (Deadline - StartAt,
+                // or time remaining for a student) for backward client compatibility
+                // even though the exam is now configured via StartAt/Deadline, not
                 // a raw minutes count.
                 duration = FormatDuration(effectiveDuration),
+                startAt = q.StartAt,
+                // Whether the exam window has opened yet -- students can't fetch
+                // questions before this (see GetAsStudent).
+                started = nowUtc >= q.StartAt,
                 deadline = effectiveQuizForStudent.Deadline,
                 groupIds = q.GroupIds,
                 groups = q.GroupIds.Select(gid => groupNamesById.TryGetValue(gid, out var n) ? n : gid.ToString()).ToList(),
@@ -224,7 +238,7 @@ public class QuizzesController : ControllerBase
     }
 
     // Multipart create — matches AuthService.postExamWithAuthMultipart field naming exactly:
-    // Title, GroupIds[i], UnitId, DurationInMinutes, Deadline,
+    // Title, GroupIds[i], UnitId, StartAt, Deadline,
     // Questions[i][type|text|answer|mark|choices[j]], Questions[i].image (file)
     [HttpPost]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
@@ -235,8 +249,11 @@ public class QuizzesController : ControllerBase
 
         var title = form["Title"].ToString();
         var unitId = int.Parse(form["UnitId"].ToString());
-        var duration = int.Parse(form["DurationInMinutes"].ToString());
+        var startAt = DateTime.Parse(form["StartAt"].ToString(), null, DateTimeStyles.RoundtripKind);
         var deadline = DateTime.Parse(form["Deadline"].ToString(), null, DateTimeStyles.RoundtripKind);
+
+        if (deadline <= startAt)
+            return BadRequest("وقت نهاية الامتحان لازم يكون بعد وقت البداية.");
 
         var groupIds = new List<int>();
         for (var i = 0; form.ContainsKey($"GroupIds[{i}]"); i++)
@@ -265,7 +282,7 @@ public class QuizzesController : ControllerBase
         {
             Title = title,
             UnitId = unitId,
-            DurationInMinutes = duration,
+            StartAt = startAt,
             Deadline = deadline,
             GroupIds = groupIds,
             SchoolYear = schoolYear,
@@ -348,6 +365,12 @@ public class QuizzesController : ControllerBase
         var overrideRow = await _db.QuizStudentOverrides
             .FirstOrDefaultAsync(o => o.QuizId == quizId && o.StudentId == studentId);
         var hasActiveReopen = overrideRow?.ReopenExpiresAt != null && overrideRow.ReopenExpiresAt.Value > DateTime.UtcNow;
+
+        // Exam window hasn't opened yet. A prior submission or an active
+        // teacher override (force-review / reopen) still goes through below
+        // regardless -- this only blocks a genuinely fresh, too-early attempt.
+        if (priorResult == null && !hasActiveReopen && overrideRow?.ForceReview != true && DateTime.UtcNow < quiz.StartAt)
+            return StatusCode(403, new { message = "لم يبدأ الامتحان بعد." });
 
         // TEACHER OVERRIDE: the teacher used the "افتح كمراجعة" action on this
         // student's exam list (see ForceReview below). Drop them into review
@@ -676,10 +699,10 @@ public class QuizzesController : ControllerBase
         });
     }
 
-    // Lets a teacher fix the exam's own basic info (name/duration/late-review
-    // policy) after creation — separate from edit-question above, which only
-    // touches individual questions. Deliberately does NOT let group/unit/
-    // deadline be changed here, since those affect who the exam is even
+    // Lets a teacher fix the exam's own basic info (name/late-review policy)
+    // after creation — separate from edit-question above, which only touches
+    // individual questions. Deliberately does NOT let group/unit/StartAt/
+    // Deadline be changed here, since those affect who the exam is even
     // visible to and interact with already-in-progress attempts.
     [HttpPost("edit")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
@@ -690,11 +713,8 @@ public class QuizzesController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(request.Title))
             return BadRequest(new { message = "اسم الامتحان مطلوب." });
-        if (request.DurationInMinutes <= 0)
-            return BadRequest(new { message = "مدة الامتحان لازم تكون أكبر من صفر." });
 
         quiz.Title = request.Title;
-        quiz.DurationInMinutes = request.DurationInMinutes;
         quiz.AllowLateReview = request.AllowLateReview;
 
         await _db.SaveChangesAsync();
@@ -703,7 +723,8 @@ public class QuizzesController : ControllerBase
         {
             id = quiz.Id,
             title = quiz.Title,
-            durationInMinutes = quiz.DurationInMinutes,
+            startAt = quiz.StartAt,
+            deadline = quiz.Deadline,
             allowLateReview = quiz.AllowLateReview
         });
     }

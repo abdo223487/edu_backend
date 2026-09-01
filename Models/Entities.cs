@@ -850,7 +850,17 @@ public class Quiz
         set => GroupIdsCsv = string.Join(',', value);
     }
     public int UnitId { get; set; }
-    public int DurationInMinutes { get; set; }
+
+    /// <summary>
+    /// When the exam window opens. Students can't open the exam before this
+    /// (see QuizzesController.GetAsStudent). Replaces the old
+    /// DurationInMinutes-from-open model: the exam's length is now simply
+    /// Deadline - StartAt, a fixed shared window for every student instead of
+    /// a per-student countdown starting whenever they happen to open it.
+    /// </summary>
+    public DateTime StartAt { get; set; }
+
+    /// <summary>When the exam window closes. Also the shared submission cutoff.</summary>
     public DateTime Deadline { get; set; }
     public int? SchoolYear { get; set; }
 
