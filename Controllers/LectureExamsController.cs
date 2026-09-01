@@ -26,7 +26,7 @@ namespace EduApi.Controllers;
 /// lazily on their first GetAsStudent call) and runs for exactly
 /// DurationInMinutes from that moment -- not from upload time.
 ///
-///  GET  LectureExams/by-lecture/{lectureId}    (summary + this student's remaining time, or null if none)
+///  GET  LectureExams/by-lecture/{lectureId}    (list of all exams attached + this student's remaining time on each, or [] if none)
 ///  POST LectureExams                            (multipart/form-data, see postLectureExamWithAuthMultipart)
 ///  GET  LectureExams/as-teacher/{lectureExamId}
 ///  GET  LectureExams/as-student/{lectureExamId} (starts the personal timer on first call)
@@ -171,49 +171,60 @@ public class LectureExamsController : ControllerBase
         return remaining < full ? remaining : full;
     }
 
-    // Used by the video player: "does this lecture have an exam attached,
-    // and (for a student) what's my status/remaining time on it?" Returns
-    // 200 with data:null when the lecture simply has no exam, so the client
+    // Used by the video player: "does this lecture have exam(s) attached,
+    // and (for a student) what's my status/remaining time on each?" Returns
+    // 200 with data:[] when the lecture simply has no exams, so the client
     // can decide whether to show the "ابدأ الامتحان" button at all.
+    //
+    // FIX: كانت بترجع أول امتحان بس (FirstOrDefaultAsync) حتى لو المحاضرة
+    // فيها أكتر من امتحان -- مفيش أي unique constraint على LectureId (شوف
+    // IX_LectureExams_LectureId، index عادي مش unique) وCreate() مبيمنعش
+    // إنشاء أكتر من امتحان لنفس المحاضرة، فكانت الامتحانات الإضافية بتتخزن
+    // في الداتابيز عادي بس محدش شايفها. دلوقتي بترجع كل الامتحانات كـ list.
     [HttpGet("by-lecture/{lectureId:int}")]
     public async Task<IActionResult> GetByLecture(int lectureId)
     {
-        var exam = await _db.LectureExams.AsNoTracking().Include(e => e.Questions)
-            .FirstOrDefaultAsync(e => e.LectureId == lectureId);
-        if (exam == null) return Ok(new { data = (object?)null });
+        var exams = await _db.LectureExams.AsNoTracking().Include(e => e.Questions)
+            .Where(e => e.LectureId == lectureId)
+            .OrderBy(e => e.CreatedAt)
+            .ToListAsync();
+
+        if (exams.Count == 0) return Ok(new { data = Array.Empty<object>() });
 
         int? studentId = null;
-        DateTime? startedAt = null;
-        bool isTaken = false;
-        int? score = null, totalMarks = null;
-
         if (User.IsInRole(Roles.Student))
         {
             studentId = User.GetUserId();
             if (!await StudentCanAccessLectureAsync(studentId.Value, lectureId))
                 return StatusCode(403, new { message = "Not unlocked for this lecture." });
-
-            var start = await _db.LectureExamStudentStarts.AsNoTracking()
-                .FirstOrDefaultAsync(s => s.LectureExamId == exam.Id && s.StudentId == studentId.Value);
-            startedAt = start?.StartedAt;
-
-            var result = await _db.LectureExamResults.AsNoTracking()
-                .FirstOrDefaultAsync(r => r.LectureExamId == exam.Id && r.StudentId == studentId.Value);
-            if (result != null)
-            {
-                isTaken = true;
-                score = result.Score;
-                totalMarks = result.TotalMarks;
-            }
         }
 
-        var remaining = studentId.HasValue
-            ? RemainingFor(exam, startedAt, DateTime.UtcNow)
-            : TimeSpan.FromMinutes(exam.DurationInMinutes);
+        var examIds = exams.Select(e => e.Id).ToList();
 
-        return Ok(new
+        // بنجيب بداية/نتيجة الطالب لكل الامتحانات مرة واحدة (مش query لكل
+        // امتحان لوحده) عشان الأداء يفضل زي ما كان بالظبط مع امتحان واحد.
+        var startsByExam = studentId.HasValue
+            ? await _db.LectureExamStudentStarts.AsNoTracking()
+                .Where(s => examIds.Contains(s.LectureExamId) && s.StudentId == studentId.Value)
+                .ToDictionaryAsync(s => s.LectureExamId, s => s.StartedAt)
+            : new Dictionary<int, DateTime>();
+
+        var resultsByExam = studentId.HasValue
+            ? await _db.LectureExamResults.AsNoTracking()
+                .Where(r => examIds.Contains(r.LectureExamId) && r.StudentId == studentId.Value)
+                .ToDictionaryAsync(r => r.LectureExamId, r => r)
+            : new Dictionary<int, LectureExamResult>();
+
+        var data = exams.Select(exam =>
         {
-            data = new
+            DateTime? startedAt = studentId.HasValue && startsByExam.TryGetValue(exam.Id, out var s) ? s : null;
+            var result = studentId.HasValue && resultsByExam.TryGetValue(exam.Id, out var r) ? r : null;
+
+            var remaining = studentId.HasValue
+                ? RemainingFor(exam, startedAt, DateTime.UtcNow)
+                : TimeSpan.FromMinutes(exam.DurationInMinutes);
+
+            return new
             {
                 id = exam.Id,
                 title = exam.Title,
@@ -222,11 +233,13 @@ public class LectureExamsController : ControllerBase
                 duration = FormatDuration(remaining),
                 questionCount = exam.Questions.Count,
                 started = startedAt != null,
-                isTaken,
-                score,
-                totalMarks
-            }
+                isTaken = result != null,
+                score = result?.Score,
+                totalMarks = result?.TotalMarks
+            };
         });
+
+        return Ok(new { data });
     }
 
     // Multipart create — matches AuthService.postLectureExamWithAuthMultipart
