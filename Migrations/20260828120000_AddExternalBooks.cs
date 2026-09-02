@@ -1,3 +1,5 @@
+using EduApi.Data;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -27,7 +29,14 @@ namespace EduApi.Migrations
     /// below is the fix -- a full Designer.cs (with BuildTargetModel) is only
     /// needed for design-time model-diffing, which this project already
     /// doesn't rely on for raw-SQL migrations like this one.
+    /// BUGFIX 2: the [Migration] attribute alone still wasn't enough --
+    /// EF's internal MigrationsAssembly scan filters candidates by BOTH
+    /// [Migration] AND [DbContext(typeof(YourContext))] (the .Designer.cs
+    /// normally carries both). Without [DbContext] this type's ContextType
+    /// is null and never matches AppDbContext, so it still never showed up
+    /// in "ALL migrations EF can see" at startup even after the first fix.
     /// </remarks>
+    [DbContext(typeof(AppDbContext))]
     [Migration("20260828120000_AddExternalBooks")]
     public partial class AddExternalBooks : Migration
     {

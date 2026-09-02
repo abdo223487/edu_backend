@@ -1,4 +1,6 @@
 using System;
+using EduApi.Data;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -10,19 +12,23 @@ namespace EduApi.Migrations
     /// <remarks>
     /// BUGFIX: same class of bug as AddExternalBooks and
     /// AddStudentGroupMemberships before it -- EF Core discovers migrations
-    /// at runtime by scanning the assembly for classes carrying
-    /// [Migration("id")] (normally emitted into a paired .Designer.cs file
-    /// that `dotnet ef migrations add` generates). This file was
-    /// hand-written without one, so Database.Migrate() never even saw it as
-    /// a candidate, let alone ran it -- the app would start "successfully"
-    /// but every request touching ViewLimit/StudentLectureViewUsages would
-    /// crash with a Postgres "column/relation does not exist" error the
-    /// first time it ran. The [Migration] attribute below is the fix -- a
-    /// full Designer.cs (with BuildTargetModel) is only needed for
-    /// design-time model-diffing, which this project already doesn't rely
-    /// on for hand-written migrations like this one (see
+    /// at runtime by scanning the assembly for classes that are a
+    /// subclass of Migration AND carry BOTH [Migration("id")] AND
+    /// [DbContext(typeof(YourContext))] (normally emitted into a paired
+    /// .Designer.cs file that `dotnet ef migrations add` generates).
+    /// A previous fix on this same file added only [Migration], which
+    /// wasn't enough -- EF's internal MigrationsAssembly scan filters
+    /// candidates by BOTH attributes, so without [DbContext] the type's
+    /// ContextType is null and it never matches AppDbContext, meaning
+    /// Database.Migrate() still silently never saw this migration (it's
+    /// missing from "ALL migrations EF can see" at startup) even though
+    /// [Migration] alone looked like the fix. Both attributes below are
+    /// required. A full Designer.cs (with BuildTargetModel) is still not
+    /// needed for design-time model-diffing, which this project already
+    /// doesn't rely on for hand-written migrations like this one (see
     /// PendingModelChangesWarning being suppressed in Program.cs).
     /// </remarks>
+    [DbContext(typeof(AppDbContext))]
     [Migration("20260901000000_AddLectureViewLimits")]
     public partial class AddLectureViewLimits : Migration
     {
