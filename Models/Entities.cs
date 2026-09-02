@@ -504,6 +504,34 @@ public class StudentLectureUnlock
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
+/// <summary>
+/// Tracks how many times a given student has "opened" (confirmed the
+/// view-limit dialog for) a given Online lecture -- only ever created/used
+/// when that Lecture.ViewLimit is set. One row per (StudentId, LectureId),
+/// created lazily on the first view. A student's remaining views for a
+/// lecture is always computed as `Lecture.ViewLimit - ViewsUsed` (never
+/// stored directly), so raising/lowering ViewLimit on the lecture itself
+/// changes everyone's remaining count uniformly, while the teacher can
+/// still grant/revoke views for ONE specific student via ExtraViews
+/// (added to that student's effective limit) without touching anyone else.
+/// </summary>
+public class StudentLectureViewUsage
+{
+    public int Id { get; set; }
+    // MULTI-TENANT SECURITY: same reasoning as StudentLectureUnlock.TeacherId.
+    public int TeacherId { get; set; }
+    public int StudentId { get; set; }
+    public int LectureId { get; set; }
+    public int ViewsUsed { get; set; }
+    /// <summary>
+    /// Manual per-student adjustment set by the teacher from the "views"
+    /// screen (can be negative to revoke views early, or positive to grant
+    /// this one student extra views on top of the lecture's normal limit).
+    /// </summary>
+    public int ExtraViews { get; set; }
+    public DateTime? LastViewedAt { get; set; }
+}
+
 public enum AttendanceMethod
 {
     Center,
@@ -549,6 +577,14 @@ public class Lecture
     /// </summary>
     public int? ExternalBookId { get; set; }
     public int? LessonIndex { get; set; }
+    /// <summary>
+    /// Only meaningful for Online lectures (both video-file and YouTube
+    /// kinds). Null = unlimited views, same as every lecture before this
+    /// feature existed. When set, a student may open/watch this lecture's
+    /// video at most this many times in total -- see
+    /// StudentLectureViewUsage and LecturesController.ConsumeView.
+    /// </summary>
+    public int? ViewLimit { get; set; }
     public int? Months { get; set; }
     public int? SchoolYear { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

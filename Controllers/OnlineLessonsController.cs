@@ -113,6 +113,32 @@ public class OnlineLessonsController : ControllerBase
             .Select(l => ToDto(l, materialsLookup.TryGetValue(l.Id, out var mats) ? mats : new List<MaterialListItem>()))
             .ToList();
 
+        // FEATURE: same optional per-lecture view limit as LecturesController
+        // -- only meaningful (and only ever computed) when a Student is the
+        // one asking, and only for lectures that actually have a ViewLimit.
+        if (User.IsInRole(Roles.Student))
+        {
+            var studentId = User.GetUserId();
+            var limitedIds = lectureEntities.Where(l => l.ViewLimit.HasValue).Select(l => l.Id).ToList();
+            if (limitedIds.Count > 0)
+            {
+                var usages = await _db.StudentLectureViewUsages.AsNoTracking()
+                    .Where(u => u.StudentId == studentId && limitedIds.Contains(u.LectureId))
+                    .ToDictionaryAsync(u => u.LectureId);
+                var limitById = lectureEntities.ToDictionary(l => l.Id, l => l.ViewLimit);
+
+                lectures = lectures.Select(dto =>
+                {
+                    if (!limitById.TryGetValue(dto.Id, out var limit) || !limit.HasValue) return dto;
+                    usages.TryGetValue(dto.Id, out var usage);
+                    var used = usage?.ViewsUsed ?? 0;
+                    var extra = usage?.ExtraViews ?? 0;
+                    var remaining = Math.Max(0, limit.Value + extra - used);
+                    return dto with { RemainingViews = remaining };
+                }).ToList();
+            }
+        }
+
         return Ok(new OnlineLessonDetailDto(lesson.Id, lesson.Name, lesson.SchoolYear, lesson.ImageUrl, lectures));
     }
 
@@ -210,6 +236,7 @@ public class OnlineLessonsController : ControllerBase
         int onlineLessonId,
         [FromForm(Name = "Name")] string name,
         [FromForm(Name = "YoutubeLink")] string? youtubeLink,
+        [FromForm(Name = "ViewLimit")] string? viewLimitRaw,
         IFormFile? videoFile)
     {
         var lesson = await _db.OnlineLessons.AsNoTracking().FirstOrDefaultAsync(o => o.Id == onlineLessonId);
@@ -219,6 +246,11 @@ public class OnlineLessonsController : ControllerBase
         var hasLink = !string.IsNullOrWhiteSpace(youtubeLink);
         if (hasFile == hasLink)
             return BadRequest(new { message = "Provide exactly one of VideoFile or YoutubeLink." });
+
+        // Same optional view-limit rule as LecturesController.Create: empty
+        // or <= 0 means unlimited views, same as every lecture before this
+        // feature existed.
+        int? viewLimit = int.TryParse(viewLimitRaw, out var vl) && vl > 0 ? vl : null;
 
         string? storageFileKey = null;
         string? finalYoutubeLink = null;
@@ -250,6 +282,7 @@ public class OnlineLessonsController : ControllerBase
             ThumbnailUrl = thumbnailUrl,
             OnlineLessonId = onlineLessonId,
             SchoolYear = lesson.SchoolYear,
+            ViewLimit = viewLimit,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
         };
 
@@ -370,7 +403,10 @@ public class OnlineLessonsController : ControllerBase
     private static OnlineLectureDto ToDto(Lecture l, List<MaterialListItem> materials)
     {
         var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
-        return new(l.Id, l.Name, link, sourceType, l.ThumbnailUrl, l.CreatedAt, materials);
+        // RemainingViews stays null here (teacher-facing Create response and
+        // the base of GetOnlineLesson's projection) — GetOnlineLesson fills
+        // it in per-student afterward with `dto with { RemainingViews = ... }`.
+        return new(l.Id, l.Name, link, sourceType, l.ThumbnailUrl, l.CreatedAt, materials, l.ViewLimit, null);
     }
 
     /// <summary>Same rule as LecturesController.PlaybackInfo: at most one of StorageFileKey/YoutubeLink is ever set.</summary>

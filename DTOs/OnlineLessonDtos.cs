@@ -24,7 +24,9 @@ public record OnlineLectureDto(
     string? VideoSourceType,
     string? ThumbnailUrl,
     DateTime CreatedAt,
-    List<MaterialListItem> Materials);
+    List<MaterialListItem> Materials,
+    int? ViewLimit = null,
+    int? RemainingViews = null);
 
 public record OnlineLessonDetailDto(
     int Id,

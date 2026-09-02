@@ -20,7 +20,12 @@ namespace EduApi.DTOs;
 // "groupIds", when present, REPLACES the lecture's entire group list (not a
 // merge/append) -- same "whole list every time" contract as Create's
 // GroupIds. Send the full desired list, not just the ones being added.
-public record UpdateLectureRequest(string? Name, string? AttendanceMethod, int? SchoolYear, List<int>? GroupIds);
+// "ViewLimit": when sent, replaces the lecture's view limit (Online lectures
+// only -- ignored for Center). Send 0 or a negative number to CLEAR the
+// limit (go back to unlimited views) since the field itself has to stay
+// present/non-null to be read at all -- omit it entirely to leave the
+// current limit untouched.
+public record UpdateLectureRequest(string? Name, string? AttendanceMethod, int? SchoolYear, List<int>? GroupIds, int? ViewLimit = null);
 
 // "Link" is whichever video source is actually playable right now: the R2
 // file's public URL if the lecture has one, otherwise the YoutubeLink.
@@ -30,6 +35,13 @@ public record UpdateLectureRequest(string? Name, string? AttendanceMethod, int? 
 // ffmpeg at upload time, stored in R2). For "Youtube" lectures the client
 // should keep building the thumbnail itself from the YouTube video id
 // (img.youtube.com/vi/{id}/0.jpg) exactly like before — this field is null there.
+// "ViewLimit" is null for an unlimited-views lecture (every lecture before
+// this feature, and every Center lecture). "RemainingViews" is ONLY
+// populated when this DTO is being returned to the student themselves (in
+// student-facing endpoints like ByGroup/ByYear) AND ViewLimit is set --
+// null in every other case (teacher-facing endpoints, or an unlimited
+// lecture). It already accounts for that one student's ExtraViews
+// grant/revoke, so the client never needs to combine the two fields itself.
 public record LectureListItem(
     int Id,
     string Name,
@@ -41,6 +53,32 @@ public record LectureListItem(
     int? LessonIndex,
     List<int> GroupIds,
     DateTime CreatedAt,
-    int? ExternalBookId = null);
+    int? ExternalBookId = null,
+    int? ViewLimit = null,
+    int? RemainingViews = null);
 
 public record MaterialListItem(int Id, string Name, string Type, string Link);
+
+// GET Lectures/{id}/consume-view response.
+// "Allowed" is false when the student has no views left -- the client
+// should NOT open the player in that case, and should surface Message.
+public record ConsumeViewResult(bool Allowed, int? RemainingViews, string? Message);
+
+// GET Lectures/student-views?studentId=.. (teacher) — one row per Online
+// lecture that has a ViewLimit AND is reachable by this student (subscribed
+// unit/book, group-linked, or individually unlocked), regardless of whether
+// they've actually opened it yet.
+public record StudentLectureViewItem(
+    int LectureId,
+    string LectureName,
+    int ViewLimit,
+    int ViewsUsed,
+    int ExtraViews,
+    int RemainingViews);
+
+// POST Lectures/student-views/adjust (teacher)
+// "Delta" is added to that ONE student's remaining views for that lecture
+// (negative to take views away). Only ever touches ExtraViews -- the
+// lecture's own ViewLimit (and every other student's remaining count) is
+// left alone.
+public record AdjustStudentViewsRequest(int StudentId, int LectureId, int Delta);

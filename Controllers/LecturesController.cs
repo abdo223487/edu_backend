@@ -148,7 +148,7 @@ public class LecturesController : ControllerBase
         string? youtubeLinkRaw;
         IFormFile? videoFile;
         var groupIds = new List<int>();
-        int? unitId, lessonIndex, requestSchoolYear, externalBookId;
+        int? unitId, lessonIndex, requestSchoolYear, externalBookId, viewLimit;
 
         if (Request.HasFormContentType)
         {
@@ -167,6 +167,9 @@ public class LecturesController : ControllerBase
             externalBookId = int.TryParse(form["ExternalBookId"].ToString(), out var eid) ? eid : null;
             lessonIndex = int.TryParse(form["LessonIndex"].ToString(), out var li) ? li : null;
             requestSchoolYear = int.TryParse(form["SchoolYear"].ToString(), out var sy) ? sy : null;
+            // Optional: max number of times a student may open this lecture's
+            // video in total. Absent/empty/<=0 => unlimited, same as before.
+            viewLimit = int.TryParse(form["ViewLimit"].ToString(), out var vl) && vl > 0 ? vl : null;
         }
         else
         {
@@ -203,6 +206,8 @@ public class LecturesController : ControllerBase
             externalBookId = GetInt("externalBookId", "ExternalBookId");
             lessonIndex = GetInt("lessonIndex", "LessonIndex");
             requestSchoolYear = GetInt("schoolYear", "SchoolYear");
+            var rawViewLimit = GetInt("viewLimit", "ViewLimit");
+            viewLimit = rawViewLimit is > 0 ? rawViewLimit : null;
         }
 
         if (!Enum.TryParse<AttendanceMethod>(attendanceMethodRaw, true, out var method))
@@ -298,6 +303,11 @@ public class LecturesController : ControllerBase
             ExternalBookId = externalBookId,
             LessonIndex = lessonIndex,
             SchoolYear = schoolYear,
+            // View limits only ever apply to Online lectures (Center
+            // lectures have no video/player at all) -- silently drop it
+            // rather than erroring, since the client may still send a
+            // leftover value if the teacher flips AttendanceMethod in the form.
+            ViewLimit = method == AttendanceMethod.Online ? viewLimit : null,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
         };
 
@@ -331,6 +341,12 @@ public class LecturesController : ControllerBase
         // empty/irrelevant groupIds for them.
         if (request.GroupIds != null && (lecture.UnitId.HasValue || lecture.ExternalBookId.HasValue))
             lecture.GroupIds = request.GroupIds;
+
+        // FEATURE: optional per-lecture view limit for Online lectures (see
+        // Lecture.ViewLimit doc comment). 0/negative clears it back to
+        // unlimited -- see the doc comment on UpdateLectureRequest.
+        if (request.ViewLimit.HasValue && lecture.AttendanceMethod == AttendanceMethod.Online)
+            lecture.ViewLimit = request.ViewLimit.Value > 0 ? request.ViewLimit.Value : null;
 
         await _db.SaveChangesAsync();
         return Ok(ToDto(lecture));
@@ -417,15 +433,21 @@ public class LecturesController : ControllerBase
         // the SQL level instead of materializing the full Lecture row
         // (TeacherId/Months/SchoolYear are never used here).
         var items = await query.OrderBy(l => l.Id)
-            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.ExternalBookId })
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.ExternalBookId, l.ViewLimit })
             .ToListAsync();
+
+        var remainingViewsMap = User.IsInRole(Roles.Student)
+            ? await GetRemainingViewsMapAsync(User.GetUserId(), items.Where(l => l.ViewLimit.HasValue).Select(l => l.Id).ToList())
+            : new Dictionary<int, int>();
+
         return Ok(items.Select(l =>
         {
             var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
             return new LectureListItem(
                 l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
-                l.CreatedAt, l.ExternalBookId);
+                l.CreatedAt, l.ExternalBookId, l.ViewLimit,
+                l.ViewLimit.HasValue && remainingViewsMap.TryGetValue(l.Id, out var rem) ? rem : null);
         }));
     }
 
@@ -490,8 +512,12 @@ public class LecturesController : ControllerBase
             .OrderBy(l => l.Id)
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
-            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.ExternalBookId })
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.ExternalBookId, l.ViewLimit })
             .ToListAsync();
+
+        var remainingViewsMap = User.IsInRole(Roles.Student)
+            ? await GetRemainingViewsMapAsync(User.GetUserId(), items.Where(l => l.ViewLimit.HasValue).Select(l => l.Id).ToList())
+            : new Dictionary<int, int>();
 
         return Ok(items.Select(l =>
         {
@@ -499,7 +525,8 @@ public class LecturesController : ControllerBase
             return new LectureListItem(
                 l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
-                l.CreatedAt, l.ExternalBookId);
+                l.CreatedAt, l.ExternalBookId, l.ViewLimit,
+                l.ViewLimit.HasValue && remainingViewsMap.TryGetValue(l.Id, out var rem) ? rem : null);
         }));
     }
 
@@ -582,7 +609,204 @@ public class LecturesController : ControllerBase
     private static LectureListItem ToDto(Lecture l)
     {
         var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
-        return new(l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIds, l.CreatedAt, l.ExternalBookId);
+        // Teacher-facing (Create/Update response) -- RemainingViews is a
+        // per-student concept, always null here.
+        return new(l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIds, l.CreatedAt, l.ExternalBookId, l.ViewLimit, null);
+    }
+
+    /// <summary>
+    /// For a student and a set of lecture ids that are known to have a
+    /// ViewLimit set, returns how many views each one has left for THAT
+    /// student: `ViewLimit + ExtraViews - ViewsUsed` (clamped at 0), or the
+    /// full ViewLimit + ExtraViews when the student has never opened it
+    /// (no usage row yet). Lecture ids without a ViewLimit should not be
+    /// passed in -- the caller decides per-item whether this map applies.
+    /// </summary>
+    private async Task<Dictionary<int, int>> GetRemainingViewsMapAsync(int studentId, List<int> limitedLectureIds)
+    {
+        if (limitedLectureIds.Count == 0) return new Dictionary<int, int>();
+
+        var limits = await _db.Lectures.AsNoTracking()
+            .Where(l => limitedLectureIds.Contains(l.Id))
+            .Select(l => new { l.Id, l.ViewLimit })
+            .ToListAsync();
+
+        var usages = await _db.StudentLectureViewUsages.AsNoTracking()
+            .Where(u => u.StudentId == studentId && limitedLectureIds.Contains(u.LectureId))
+            .ToDictionaryAsync(u => u.LectureId);
+
+        var result = new Dictionary<int, int>();
+        foreach (var l in limits)
+        {
+            if (!l.ViewLimit.HasValue) continue;
+            usages.TryGetValue(l.Id, out var usage);
+            var used = usage?.ViewsUsed ?? 0;
+            var extra = usage?.ExtraViews ?? 0;
+            result[l.Id] = Math.Max(0, l.ViewLimit.Value + extra - used);
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Called by the student right after they confirm the "you have N views
+    /// left, continue?" dialog, BEFORE the player actually opens -- this is
+    /// what actually spends one view. Unlimited lectures (no ViewLimit)
+    /// always succeed and never create a usage row. Idempotent-ish in
+    /// spirit but NOT safe to call twice for one open -- the client must
+    /// call this exactly once per confirmed open.
+    /// </summary>
+    [HttpPost("{id:int}/consume-view")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> ConsumeView(int id)
+    {
+        var lecture = await _db.Lectures.AsNoTracking().FirstOrDefaultAsync(l => l.Id == id);
+        if (lecture == null) return NotFound(new { message = "Lecture not found." });
+
+        if (!lecture.ViewLimit.HasValue)
+            return Ok(new ConsumeViewResult(true, null, null));
+
+        var studentId = User.GetUserId();
+        var usage = await _db.StudentLectureViewUsages
+            .FirstOrDefaultAsync(u => u.StudentId == studentId && u.LectureId == id);
+
+        var used = usage?.ViewsUsed ?? 0;
+        var extra = usage?.ExtraViews ?? 0;
+        var remaining = lecture.ViewLimit.Value + extra - used;
+
+        if (remaining <= 0)
+        {
+            return StatusCode(403, new ConsumeViewResult(false, 0,
+                "لقد استنفذت عدد مرات المشاهدة المسموح بها لهذه المحاضرة."));
+        }
+
+        if (usage == null)
+        {
+            usage = new StudentLectureViewUsage
+            {
+                TeacherId = User.GetStaffTenantId() ?? lecture.TeacherId,
+                StudentId = studentId,
+                LectureId = id,
+                ViewsUsed = 0,
+                ExtraViews = 0,
+            };
+            _db.StudentLectureViewUsages.Add(usage);
+        }
+        usage.ViewsUsed += 1;
+        usage.LastViewedAt = DateTime.UtcNow;
+        await _db.SaveChangesAsync();
+
+        return Ok(new ConsumeViewResult(true, remaining - 1, null));
+    }
+
+    /// <summary>
+    /// Teacher-facing "المشاهدات" (views) screen for one student: every
+    /// Online lecture with a ViewLimit that this specific student can
+    /// currently reach -- subscribed unit/book + group link, a lecture
+    /// inside an unlocked OnlineLesson (redeemed via a Code -- these have
+    /// no GroupIds/group-link at all, unlike Unit/ExternalBook lectures,
+    /// see Lecture.OnlineLessonId's doc comment), a direct lecture unlock,
+    /// or a standalone unlocked lecture -- plus that student's
+    /// usage/remaining count for each. Lectures the student can't reach at
+    /// all are left out, same as they'd be left out of their own lecture
+    /// list.
+    /// </summary>
+    [HttpGet("student-views")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
+    public async Task<IActionResult> GetStudentViews([FromQuery] int studentId)
+    {
+        var subscribedUnitIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+            .Where(s => s.StudentId == studentId).Select(s => s.UnitId).ToListAsync();
+        var accessibleBookIds = await GetAccessibleExternalBookIdsAsync(studentId);
+        var unlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
+            .Where(u => u.StudentId == studentId).Select(u => u.LectureId).ToListAsync();
+        // BUGFIX: this screen used to only ever look at UnitId/ExternalBookId
+        // lectures -- OnlineLesson lectures (redeemed via a Code, see
+        // OnlineLessonsController) were silently skipped entirely, so a
+        // teacher could never see or adjust a student's remaining views for
+        // one. Unlocked via StudentOnlineLessonUnlock, same as ByGroup /
+        // OnlineLessonsController.GetOnlineLesson check reachability.
+        var unlockedOnlineLessonIds = await _db.StudentOnlineLessonUnlocks.AsNoTracking()
+            .Where(u => u.StudentId == studentId).Select(u => u.OnlineLessonId).ToListAsync();
+        var studentGroupIds = await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => m.StudentId == studentId).Select(m => m.GroupId).ToListAsync();
+
+        var candidateLectures = await _db.Lectures.AsNoTracking()
+            .Where(l => l.ViewLimit != null && l.AttendanceMethod == AttendanceMethod.Online)
+            .Select(l => new { l.Id, l.Name, l.ViewLimit, l.UnitId, l.ExternalBookId, l.OnlineLessonId })
+            .ToListAsync();
+
+        var groupLinkedLectureIds = (await _db.LectureGroupLinks.AsNoTracking()
+                .Where(x => studentGroupIds.Contains(x.GroupId))
+                .Select(x => x.LectureId)
+                .ToListAsync())
+            .ToHashSet();
+
+        var reachable = candidateLectures.Where(l =>
+            unlockedLectureIds.Contains(l.Id) ||
+            (l.UnitId != null && subscribedUnitIds.Contains(l.UnitId.Value) && groupLinkedLectureIds.Contains(l.Id)) ||
+            (l.ExternalBookId != null && accessibleBookIds.Contains(l.ExternalBookId.Value) && groupLinkedLectureIds.Contains(l.Id)) ||
+            (l.OnlineLessonId != null && unlockedOnlineLessonIds.Contains(l.OnlineLessonId.Value)))
+            .ToList();
+
+        var usages = await _db.StudentLectureViewUsages.AsNoTracking()
+            .Where(u => u.StudentId == studentId && reachable.Select(l => l.Id).Contains(u.LectureId))
+            .ToDictionaryAsync(u => u.LectureId);
+
+        var result = reachable.Select(l =>
+        {
+            usages.TryGetValue(l.Id, out var usage);
+            var used = usage?.ViewsUsed ?? 0;
+            var extra = usage?.ExtraViews ?? 0;
+            return new StudentLectureViewItem(
+                l.Id, l.Name, l.ViewLimit!.Value, used, extra, Math.Max(0, l.ViewLimit.Value + extra - used));
+        }).OrderBy(x => x.LectureName).ToList();
+
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Teacher grants/revokes extra views for ONE student on ONE lecture
+    /// (the "+"/"-" buttons on the views screen). Only changes that
+    /// student's ExtraViews -- never the lecture's own ViewLimit, so no one
+    /// else is affected. Creates the usage row if this student hasn't
+    /// opened the lecture yet.
+    /// </summary>
+    [HttpPost("student-views/adjust")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
+    public async Task<IActionResult> AdjustStudentViews([FromBody] AdjustStudentViewsRequest request)
+    {
+        var lecture = await _db.Lectures.AsNoTracking().FirstOrDefaultAsync(l => l.Id == request.LectureId);
+        if (lecture == null) return NotFound(new { message = "Lecture not found." });
+        if (!lecture.ViewLimit.HasValue)
+            return BadRequest(new { message = "This lecture has no view limit set." });
+
+        var usage = await _db.StudentLectureViewUsages
+            .FirstOrDefaultAsync(u => u.StudentId == request.StudentId && u.LectureId == request.LectureId);
+        if (usage == null)
+        {
+            usage = new StudentLectureViewUsage
+            {
+                TeacherId = User.GetStaffTenantId() ?? lecture.TeacherId,
+                StudentId = request.StudentId,
+                LectureId = request.LectureId,
+                ViewsUsed = 0,
+                ExtraViews = 0,
+            };
+            _db.StudentLectureViewUsages.Add(usage);
+        }
+
+        usage.ExtraViews += request.Delta;
+        // Never let the effective total (limit + extra) drop below the
+        // views already used -- that would silently show a negative
+        // remaining count instead of 0.
+        if (lecture.ViewLimit.Value + usage.ExtraViews < usage.ViewsUsed)
+            usage.ExtraViews = usage.ViewsUsed - lecture.ViewLimit.Value;
+
+        await _db.SaveChangesAsync();
+
+        var remaining = Math.Max(0, lecture.ViewLimit.Value + usage.ExtraViews - usage.ViewsUsed);
+        return Ok(new StudentLectureViewItem(
+            lecture.Id, lecture.Name, lecture.ViewLimit.Value, usage.ViewsUsed, usage.ExtraViews, remaining));
     }
 
     /// <summary>
