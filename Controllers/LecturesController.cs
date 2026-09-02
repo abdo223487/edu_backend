@@ -655,6 +655,37 @@ public class LecturesController : ControllerBase
     /// spirit but NOT safe to call twice for one open -- the client must
     /// call this exactly once per confirmed open.
     /// </summary>
+    /// <summary>
+    /// Read-only "how many views does THIS student have left right now" for
+    /// one lecture -- called by the client right before it shows the "N
+    /// views left, continue?" dialog, so the number is always fresh
+    /// (doesn't rely on whatever remainingViews was cached at the last
+    /// by-group/by-year list fetch, which goes stale the moment the
+    /// student watches something or a teacher adjusts it). Never spends a
+    /// view itself -- only ConsumeView does that.
+    /// </summary>
+    [HttpGet("{id:int}/view-status")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> GetViewStatus(int id)
+    {
+        var lecture = await _db.Lectures.AsNoTracking().FirstOrDefaultAsync(l => l.Id == id);
+        if (lecture == null) return NotFound(new { message = "Lecture not found." });
+
+        if (!lecture.ViewLimit.HasValue)
+            return Ok(new ConsumeViewResult(true, null, null));
+
+        var studentId = User.GetUserId();
+        var usage = await _db.StudentLectureViewUsages.AsNoTracking()
+            .FirstOrDefaultAsync(u => u.StudentId == studentId && u.LectureId == id);
+
+        var used = usage?.ViewsUsed ?? 0;
+        var extra = usage?.ExtraViews ?? 0;
+        var remaining = Math.Max(0, lecture.ViewLimit.Value + extra - used);
+
+        return Ok(new ConsumeViewResult(remaining > 0, remaining,
+            remaining > 0 ? null : "لقد استنفذت عدد مرات المشاهدة المسموح بها لهذه المحاضرة."));
+    }
+
     [HttpPost("{id:int}/consume-view")]
     [Authorize(Roles = Roles.Student)]
     public async Task<IActionResult> ConsumeView(int id)
