@@ -589,6 +589,24 @@ public class Lecture
     public int? SchoolYear { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+    /// <summary>
+    /// "الربط بالامتحان": when true, a student may only reach THIS lecture's
+    /// video after they've passed/submitted a graded LectureExamResult for
+    /// the previous Online lecture in the same context (same UnitId, same
+    /// OnlineLessonId, or same ExternalBookId -- whichever this lecture
+    /// belongs to), ordered by CreatedAt/Id. The very first lecture in a
+    /// context is never locked by this even if the flag is set (there's
+    /// nothing before it to require). Ignored for Center lectures.
+    /// </summary>
+    public bool RequireLinkExam { get; set; } = false;
+    /// <summary>
+    /// "الربط بالواجب": same idea as RequireLinkExam but gated on a graded
+    /// LectureAssignmentResult for the previous lecture instead. The two
+    /// flags are independent -- a lecture can require either, both, or
+    /// neither before it unlocks.
+    /// </summary>
+    public bool RequireLinkAssignment { get; set; } = false;
+
     /// <summary>TENANT LAYER: which teacher (tenant) this lecture belongs to.</summary>
     public int TeacherId { get; set; }
 }

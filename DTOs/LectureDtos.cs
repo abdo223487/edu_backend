@@ -25,7 +25,10 @@ namespace EduApi.DTOs;
 // limit (go back to unlimited views) since the field itself has to stay
 // present/non-null to be read at all -- omit it entirely to leave the
 // current limit untouched.
-public record UpdateLectureRequest(string? Name, string? AttendanceMethod, int? SchoolYear, List<int>? GroupIds, int? ViewLimit = null);
+// "RequireLinkExam"/"RequireLinkAssignment" ("الربط"): when set, replace
+// this lecture's link flags (Online lectures only -- ignored for Center).
+// Each is independent; omit either to leave it untouched.
+public record UpdateLectureRequest(string? Name, string? AttendanceMethod, int? SchoolYear, List<int>? GroupIds, int? ViewLimit = null, bool? RequireLinkExam = null, bool? RequireLinkAssignment = null);
 
 // "Link" is whichever video source is actually playable right now: the R2
 // file's public URL if the lecture has one, otherwise the YoutubeLink.
@@ -55,7 +58,19 @@ public record LectureListItem(
     DateTime CreatedAt,
     int? ExternalBookId = null,
     int? ViewLimit = null,
-    int? RemainingViews = null);
+    int? RemainingViews = null,
+    bool RequireLinkExam = false,
+    bool RequireLinkAssignment = false,
+    // Only ever computed for a STUDENT-facing response. True when this
+    // lecture has RequireLinkExam and/or RequireLinkAssignment set AND the
+    // requesting student hasn't yet finished the required exam/assignment
+    // on the previous Online lecture in the same context -- in that case
+    // Link/VideoSourceType/ThumbnailUrl above are forced to null so the
+    // client can't play the video, and LockReason explains why. Always
+    // false (with a null LockReason) for teacher/staff-facing responses,
+    // and for the first lecture in a context regardless of its flags.
+    bool Locked = false,
+    string? LockReason = null);
 
 public record MaterialListItem(int Id, string Name, string Type, string Link);
 

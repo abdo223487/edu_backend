@@ -113,6 +113,18 @@ public class OnlineLessonsController : ControllerBase
             .Select(l => ToDto(l, materialsLookup.TryGetValue(l.Id, out var mats) ? mats : new List<MaterialListItem>()))
             .ToList();
 
+        // "الربط": only ever locks anything for a Student -- teacher/staff
+        // always see every lecture unlocked and playable.
+        if (User.IsInRole(Roles.Student))
+        {
+            var lockedMap = await GetLockedLectureMapAsync(User.GetUserId(), lectureEntities);
+            lectures = lectures.Select(dto =>
+            {
+                if (!lockedMap.TryGetValue(dto.Id, out var reason)) return dto;
+                return dto with { Link = null, VideoSourceType = null, ThumbnailUrl = null, Locked = true, LockReason = reason };
+            }).ToList();
+        }
+
         // FEATURE: same optional per-lecture view limit as LecturesController
         // -- only meaningful (and only ever computed) when a Student is the
         // one asking, and only for lectures that actually have a ViewLimit.
@@ -237,6 +249,8 @@ public class OnlineLessonsController : ControllerBase
         [FromForm(Name = "Name")] string name,
         [FromForm(Name = "YoutubeLink")] string? youtubeLink,
         [FromForm(Name = "ViewLimit")] string? viewLimitRaw,
+        [FromForm(Name = "RequireLinkExam")] string? requireLinkExamRaw,
+        [FromForm(Name = "RequireLinkAssignment")] string? requireLinkAssignmentRaw,
         IFormFile? videoFile)
     {
         var lesson = await _db.OnlineLessons.AsNoTracking().FirstOrDefaultAsync(o => o.Id == onlineLessonId);
@@ -251,6 +265,10 @@ public class OnlineLessonsController : ControllerBase
         // or <= 0 means unlimited views, same as every lecture before this
         // feature existed.
         int? viewLimit = int.TryParse(viewLimitRaw, out var vl) && vl > 0 ? vl : null;
+        // "الربط": each is its own independent switch on the form, same as
+        // LecturesController.Create.
+        var requireLinkExam = bool.TryParse(requireLinkExamRaw, out var rle) && rle;
+        var requireLinkAssignment = bool.TryParse(requireLinkAssignmentRaw, out var rla) && rla;
 
         string? storageFileKey = null;
         string? finalYoutubeLink = null;
@@ -283,6 +301,8 @@ public class OnlineLessonsController : ControllerBase
             OnlineLessonId = onlineLessonId,
             SchoolYear = lesson.SchoolYear,
             ViewLimit = viewLimit,
+            RequireLinkExam = requireLinkExam,
+            RequireLinkAssignment = requireLinkAssignment,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
         };
 
@@ -406,7 +426,49 @@ public class OnlineLessonsController : ControllerBase
         // RemainingViews stays null here (teacher-facing Create response and
         // the base of GetOnlineLesson's projection) — GetOnlineLesson fills
         // it in per-student afterward with `dto with { RemainingViews = ... }`.
-        return new(l.Id, l.Name, link, sourceType, l.ThumbnailUrl, l.CreatedAt, materials, l.ViewLimit, null);
+        return new(l.Id, l.Name, link, sourceType, l.ThumbnailUrl, l.CreatedAt, materials, l.ViewLimit, null, l.RequireLinkExam, l.RequireLinkAssignment, false, null);
+    }
+
+    /// <summary>
+    /// Same "الربط" gate as LecturesController.GetLockedLectureMapAsync, but
+    /// scoped to lectures inside ONE OnlineLesson container -- "previous
+    /// lecture" here just means the previous one by (CreatedAt, Id) within
+    /// this same container.
+    /// </summary>
+    private async Task<Dictionary<int, string>> GetLockedLectureMapAsync(int studentId, List<Lecture> orderedLectures)
+    {
+        var result = new Dictionary<int, string>();
+        for (var i = 1; i < orderedLectures.Count; i++)
+        {
+            var l = orderedLectures[i];
+            if (!l.RequireLinkExam && !l.RequireLinkAssignment) continue;
+            var previousLectureId = orderedLectures[i - 1].Id;
+
+            if (l.RequireLinkExam)
+            {
+                var examId = await _db.LectureExams.AsNoTracking()
+                    .Where(e => e.LectureId == previousLectureId).Select(e => (int?)e.Id).FirstOrDefaultAsync();
+                var passed = examId.HasValue && await _db.LectureExamResults.AsNoTracking()
+                    .AnyAsync(r => r.LectureExamId == examId.Value && r.StudentId == studentId);
+                if (!passed)
+                {
+                    result[l.Id] = "لازم تحل امتحان المحاضرة اللي قبلها الأول عشان تفتح المحاضرة دي.";
+                    continue;
+                }
+            }
+            if (l.RequireLinkAssignment)
+            {
+                var assignmentId = await _db.LectureAssignments.AsNoTracking()
+                    .Where(a => a.LectureId == previousLectureId).Select(a => (int?)a.Id).FirstOrDefaultAsync();
+                var done = assignmentId.HasValue && await _db.LectureAssignmentResults.AsNoTracking()
+                    .AnyAsync(r => r.LectureAssignmentId == assignmentId.Value && r.StudentId == studentId);
+                if (!done)
+                {
+                    result[l.Id] = "لازم تحل واجب المحاضرة اللي قبلها الأول عشان تفتح المحاضرة دي.";
+                }
+            }
+        }
+        return result;
     }
 
     /// <summary>Same rule as LecturesController.PlaybackInfo: at most one of StorageFileKey/YoutubeLink is ever set.</summary>

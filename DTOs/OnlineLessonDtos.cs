@@ -26,7 +26,13 @@ public record OnlineLectureDto(
     DateTime CreatedAt,
     List<MaterialListItem> Materials,
     int? ViewLimit = null,
-    int? RemainingViews = null);
+    int? RemainingViews = null,
+    bool RequireLinkExam = false,
+    bool RequireLinkAssignment = false,
+    // Same meaning as LectureListItem.Locked/LockReason -- see its doc
+    // comment. Only ever true in a student-facing GetOnlineLesson response.
+    bool Locked = false,
+    string? LockReason = null);
 
 public record OnlineLessonDetailDto(
     int Id,

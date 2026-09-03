@@ -149,6 +149,7 @@ public class LecturesController : ControllerBase
         IFormFile? videoFile;
         var groupIds = new List<int>();
         int? unitId, lessonIndex, requestSchoolYear, externalBookId, viewLimit;
+        bool requireLinkExam, requireLinkAssignment;
 
         if (Request.HasFormContentType)
         {
@@ -170,6 +171,9 @@ public class LecturesController : ControllerBase
             // Optional: max number of times a student may open this lecture's
             // video in total. Absent/empty/<=0 => unlimited, same as before.
             viewLimit = int.TryParse(form["ViewLimit"].ToString(), out var vl) && vl > 0 ? vl : null;
+            // "الربط": each is its own independent switch on the form.
+            requireLinkExam = bool.TryParse(form["RequireLinkExam"].ToString(), out var rle) && rle;
+            requireLinkAssignment = bool.TryParse(form["RequireLinkAssignment"].ToString(), out var rla) && rla;
         }
         else
         {
@@ -208,6 +212,12 @@ public class LecturesController : ControllerBase
             requestSchoolYear = GetInt("schoolYear", "SchoolYear");
             var rawViewLimit = GetInt("viewLimit", "ViewLimit");
             viewLimit = rawViewLimit is > 0 ? rawViewLimit : null;
+
+            bool GetBool(string camel, string pascal) =>
+                (root.TryGetProperty(camel, out var v1) && v1.ValueKind == JsonValueKind.True) ||
+                (root.TryGetProperty(pascal, out var v2) && v2.ValueKind == JsonValueKind.True);
+            requireLinkExam = GetBool("requireLinkExam", "RequireLinkExam");
+            requireLinkAssignment = GetBool("requireLinkAssignment", "RequireLinkAssignment");
         }
 
         if (!Enum.TryParse<AttendanceMethod>(attendanceMethodRaw, true, out var method))
@@ -308,6 +318,11 @@ public class LecturesController : ControllerBase
             // rather than erroring, since the client may still send a
             // leftover value if the teacher flips AttendanceMethod in the form.
             ViewLimit = method == AttendanceMethod.Online ? viewLimit : null,
+            // "الربط" only ever makes sense for an Online lecture with
+            // something playable before it -- silently drop for Center,
+            // same as ViewLimit above.
+            RequireLinkExam = method == AttendanceMethod.Online && requireLinkExam,
+            RequireLinkAssignment = method == AttendanceMethod.Online && requireLinkAssignment,
             TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
         };
 
@@ -347,6 +362,12 @@ public class LecturesController : ControllerBase
         // unlimited -- see the doc comment on UpdateLectureRequest.
         if (request.ViewLimit.HasValue && lecture.AttendanceMethod == AttendanceMethod.Online)
             lecture.ViewLimit = request.ViewLimit.Value > 0 ? request.ViewLimit.Value : null;
+
+        // "الربط": same Online-only restriction as ViewLimit above.
+        if (request.RequireLinkExam.HasValue && lecture.AttendanceMethod == AttendanceMethod.Online)
+            lecture.RequireLinkExam = request.RequireLinkExam.Value;
+        if (request.RequireLinkAssignment.HasValue && lecture.AttendanceMethod == AttendanceMethod.Online)
+            lecture.RequireLinkAssignment = request.RequireLinkAssignment.Value;
 
         await _db.SaveChangesAsync();
         return Ok(ToDto(lecture));
@@ -433,21 +454,27 @@ public class LecturesController : ControllerBase
         // the SQL level instead of materializing the full Lecture row
         // (TeacherId/Months/SchoolYear are never used here).
         var items = await query.OrderBy(l => l.Id)
-            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.ExternalBookId, l.ViewLimit })
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.ExternalBookId, l.ViewLimit, l.RequireLinkExam, l.RequireLinkAssignment, l.OnlineLessonId })
             .ToListAsync();
 
-        var remainingViewsMap = User.IsInRole(Roles.Student)
+        var isStudent = User.IsInRole(Roles.Student);
+        var remainingViewsMap = isStudent
             ? await GetRemainingViewsMapAsync(User.GetUserId(), items.Where(l => l.ViewLimit.HasValue).Select(l => l.Id).ToList())
             : new Dictionary<int, int>();
+        var lockedMap = isStudent
+            ? await GetLockedLectureMapAsync(User.GetUserId(), items.Select(l => (l.Id, l.UnitId, l.ExternalBookId, l.OnlineLessonId, l.RequireLinkExam, l.RequireLinkAssignment, l.CreatedAt)).ToList())
+            : new Dictionary<int, string>();
 
         return Ok(items.Select(l =>
         {
-            var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
+            var isLocked = lockedMap.TryGetValue(l.Id, out var lockReason);
+            var (link, sourceType) = isLocked ? (null, null) : PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
             return new LectureListItem(
-                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
+                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, isLocked ? null : l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
                 l.CreatedAt, l.ExternalBookId, l.ViewLimit,
-                l.ViewLimit.HasValue && remainingViewsMap.TryGetValue(l.Id, out var rem) ? rem : null);
+                l.ViewLimit.HasValue && remainingViewsMap.TryGetValue(l.Id, out var rem) ? rem : null,
+                l.RequireLinkExam, l.RequireLinkAssignment, isLocked, lockReason);
         }));
     }
 
@@ -464,17 +491,7 @@ public class LecturesController : ControllerBase
         var gId = groupId ?? User.GetGroupId(_tenant.CurrentTenantId);
         var query = _db.Lectures.AsNoTracking().AsQueryable();
 
-        // BUGFIX: the group filter used to be applied here unconditionally,
-        // BEFORE the student unlock/subscription gate below. That meant a
-        // student who redeemed a Code for a lecture belonging to a Unit/Group
-        // they aren't enrolled in got filtered out right here -- the lecture
-        // never even reached the unlock check, so the lesson came back empty
-        // despite a valid StudentLectureUnlocks row. For students, the group
-        // check is now folded into the OR below (skipped entirely when the
-        // lecture was unlocked via a code). For non-students (staff), keep
-        // the old unconditional behavior.
-        if (!User.IsInRole(Roles.Student) && gId.HasValue)
-            query = query.Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == gId.Value));
+        if (gId.HasValue) query = query.Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == gId.Value));
         if (!string.IsNullOrEmpty(attendanceMethod) &&
             Enum.TryParse<AttendanceMethod>(attendanceMethod, true, out var method))
             query = query.Where(l => l.AttendanceMethod == method);
@@ -510,22 +527,10 @@ public class LecturesController : ControllerBase
             // See identical note in ByYear: a lecture-level code unlock must
             // grant visibility to that lecture even when it belongs to a Unit
             // (or External Book) the student never subscribed to as a whole.
-            //
-            // BUGFIX: a code-unlocked lecture must also bypass the gId/group
-            // membership check above -- a student redeeming a code for a
-            // course they aren't enrolled in (and therefore aren't a member
-            // of that course's Group) still needs to see it. unlockedLectureIds
-            // is checked FIRST and short-circuits the group requirement entirely;
-            // only the non-unlocked path below still requires group membership.
             query = query.Where(l =>
-                unlockedLectureIds.Contains(l.Id) ||
-                (
-                    (!gId.HasValue || _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == gId.Value)) &&
-                    (
-                        (l.UnitId != null && subscribedIds.Contains(l.UnitId.Value)) ||
-                        (l.ExternalBookId != null && accessibleBookIds.Contains(l.ExternalBookId.Value))
-                    )
-                ));
+                (l.UnitId != null && (subscribedIds.Contains(l.UnitId.Value) || unlockedLectureIds.Contains(l.Id))) ||
+                (l.ExternalBookId != null && (accessibleBookIds.Contains(l.ExternalBookId.Value) || unlockedLectureIds.Contains(l.Id))) ||
+                (l.UnitId == null && l.ExternalBookId == null && unlockedLectureIds.Contains(l.Id)));
         }
 
         if (lessonIndex.HasValue) query = query.Where(l => l.LessonIndex == lessonIndex.Value);
@@ -534,21 +539,27 @@ public class LecturesController : ControllerBase
             .OrderBy(l => l.Id)
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
-            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.ExternalBookId, l.ViewLimit })
+            .Select(l => new { l.Id, l.Name, l.AttendanceMethod, l.YoutubeLink, l.StorageFileKey, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIdsCsv, l.CreatedAt, l.ExternalBookId, l.ViewLimit, l.RequireLinkExam, l.RequireLinkAssignment, l.OnlineLessonId })
             .ToListAsync();
 
-        var remainingViewsMap = User.IsInRole(Roles.Student)
+        var isStudent2 = User.IsInRole(Roles.Student);
+        var remainingViewsMap = isStudent2
             ? await GetRemainingViewsMapAsync(User.GetUserId(), items.Where(l => l.ViewLimit.HasValue).Select(l => l.Id).ToList())
             : new Dictionary<int, int>();
+        var lockedMap = isStudent2
+            ? await GetLockedLectureMapAsync(User.GetUserId(), items.Select(l => (l.Id, l.UnitId, l.ExternalBookId, l.OnlineLessonId, l.RequireLinkExam, l.RequireLinkAssignment, l.CreatedAt)).ToList())
+            : new Dictionary<int, string>();
 
         return Ok(items.Select(l =>
         {
-            var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
+            var isLocked = lockedMap.TryGetValue(l.Id, out var lockReason);
+            var (link, sourceType) = isLocked ? (null, null) : PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
             return new LectureListItem(
-                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
+                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, isLocked ? null : l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
                 l.CreatedAt, l.ExternalBookId, l.ViewLimit,
-                l.ViewLimit.HasValue && remainingViewsMap.TryGetValue(l.Id, out var rem) ? rem : null);
+                l.ViewLimit.HasValue && remainingViewsMap.TryGetValue(l.Id, out var rem) ? rem : null,
+                l.RequireLinkExam, l.RequireLinkAssignment, isLocked, lockReason);
         }));
     }
 
@@ -633,7 +644,80 @@ public class LecturesController : ControllerBase
         var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
         // Teacher-facing (Create/Update response) -- RemainingViews is a
         // per-student concept, always null here.
-        return new(l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIds, l.CreatedAt, l.ExternalBookId, l.ViewLimit, null);
+        return new(l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex, l.GroupIds, l.CreatedAt, l.ExternalBookId, l.ViewLimit, null, l.RequireLinkExam, l.RequireLinkAssignment, false, null);
+    }
+
+    /// <summary>
+    /// "الربط": for a batch of Online lectures being returned to ONE student,
+    /// finds which of them are locked because the previous Online lecture in
+    /// their same context (UnitId, ExternalBookId, or OnlineLessonId) hasn't
+    /// had its exam and/or assignment finished by that student yet.
+    /// Ordering within a context is by (CreatedAt, Id) -- the same order
+    /// every lecture list in this API already presents lectures in. The
+    /// first lecture of a context is never locked by this, regardless of its
+    /// own flags, since there's nothing before it to require.
+    /// Returns a map of LectureId -> LockReason (Arabic), only for the
+    /// lectures that came out locked -- absent means unlocked.
+    /// </summary>
+    private async Task<Dictionary<int, string>> GetLockedLectureMapAsync(
+        int studentId,
+        List<(int Id, int? UnitId, int? ExternalBookId, int? OnlineLessonId, bool RequireLinkExam, bool RequireLinkAssignment, DateTime CreatedAt)> lectures)
+    {
+        var result = new Dictionary<int, string>();
+        var gated = lectures.Where(l => l.RequireLinkExam || l.RequireLinkAssignment).ToList();
+        if (gated.Count == 0) return result;
+
+        // Group by context (Unit / ExternalBook / OnlineLesson) so "previous
+        // lecture" is computed relative to siblings only, never across
+        // unrelated courses/lessons.
+        var groups = gated.GroupBy(l => (l.UnitId, l.ExternalBookId, l.OnlineLessonId));
+        foreach (var group in groups)
+        {
+            IQueryable<Lecture> siblingsQuery = _db.Lectures.AsNoTracking();
+            if (group.Key.UnitId.HasValue) siblingsQuery = siblingsQuery.Where(l => l.UnitId == group.Key.UnitId.Value);
+            else if (group.Key.ExternalBookId.HasValue) siblingsQuery = siblingsQuery.Where(l => l.ExternalBookId == group.Key.ExternalBookId.Value);
+            else if (group.Key.OnlineLessonId.HasValue) siblingsQuery = siblingsQuery.Where(l => l.OnlineLessonId == group.Key.OnlineLessonId.Value);
+            else continue; // No context at all (a standalone lecture) -- nothing to link to.
+
+            var siblings = await siblingsQuery
+                .Where(l => l.AttendanceMethod == AttendanceMethod.Online)
+                .OrderBy(l => l.CreatedAt).ThenBy(l => l.Id)
+                .Select(l => l.Id)
+                .ToListAsync();
+
+            foreach (var l in group)
+            {
+                var pos = siblings.IndexOf(l.Id);
+                if (pos <= 0) continue; // first in context, or not found -- never locked.
+                var previousLectureId = siblings[pos - 1];
+
+                if (l.RequireLinkExam)
+                {
+                    var examId = await _db.LectureExams.AsNoTracking()
+                        .Where(e => e.LectureId == previousLectureId).Select(e => (int?)e.Id).FirstOrDefaultAsync();
+                    var passed = examId.HasValue && await _db.LectureExamResults.AsNoTracking()
+                        .AnyAsync(r => r.LectureExamId == examId.Value && r.StudentId == studentId);
+                    if (!passed)
+                    {
+                        result[l.Id] = "لازم تحل امتحان المحاضرة اللي قبلها الأول عشان تفتح المحاضرة دي.";
+                        continue;
+                    }
+                }
+                if (l.RequireLinkAssignment)
+                {
+                    var assignmentId = await _db.LectureAssignments.AsNoTracking()
+                        .Where(a => a.LectureId == previousLectureId).Select(a => (int?)a.Id).FirstOrDefaultAsync();
+                    var done = assignmentId.HasValue && await _db.LectureAssignmentResults.AsNoTracking()
+                        .AnyAsync(r => r.LectureAssignmentId == assignmentId.Value && r.StudentId == studentId);
+                    if (!done)
+                    {
+                        result[l.Id] = "لازم تحل واجب المحاضرة اللي قبلها الأول عشان تفتح المحاضرة دي.";
+                    }
+                }
+            }
+        }
+
+        return result;
     }
 
     /// <summary>
