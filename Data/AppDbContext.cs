@@ -53,6 +53,10 @@ public class AppDbContext : DbContext
     public DbSet<LectureExamResult> LectureExamResults => Set<LectureExamResult>();
     public DbSet<LectureExamAnswer> LectureExamAnswers => Set<LectureExamAnswer>();
     public DbSet<LectureExamStudentStart> LectureExamStudentStarts => Set<LectureExamStudentStart>();
+    public DbSet<LectureAssignment> LectureAssignments => Set<LectureAssignment>();
+    public DbSet<LectureAssignmentQuestion> LectureAssignmentQuestions => Set<LectureAssignmentQuestion>();
+    public DbSet<LectureAssignmentResult> LectureAssignmentResults => Set<LectureAssignmentResult>();
+    public DbSet<LectureAssignmentAnswer> LectureAssignmentAnswers => Set<LectureAssignmentAnswer>();
     public DbSet<Assignment> Assignments => Set<Assignment>();
     public DbSet<AssignmentQuestion> AssignmentQuestions => Set<AssignmentQuestion>();
     public DbSet<AssignmentSubmission> AssignmentSubmissions => Set<AssignmentSubmission>();
@@ -205,6 +209,8 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<LectureExam>().HasQueryFilter(le => le.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<LectureExamResult>().HasQueryFilter(lr => lr.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<LectureExamStudentStart>().HasQueryFilter(ls => ls.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<LectureAssignment>().HasQueryFilter(la => la.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<LectureAssignmentResult>().HasQueryFilter(lar => lar.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<CenterQuizResult>().HasQueryFilter(cr => cr.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<HomeworkResult>().HasQueryFilter(hr => hr.TeacherId == _tenant.CurrentTenantId);
 
@@ -239,6 +245,10 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<LectureExamStudentStart>().HasIndex(ls => ls.TeacherId);
         modelBuilder.Entity<LectureExam>().HasIndex(le => le.TeacherId);
         modelBuilder.Entity<LectureExam>().HasIndex(le => le.LectureId);
+        modelBuilder.Entity<LectureAssignmentResult>().HasIndex(lar => new { lar.LectureAssignmentId, lar.StudentId }).IsUnique();
+        modelBuilder.Entity<LectureAssignmentResult>().HasIndex(lar => lar.TeacherId);
+        modelBuilder.Entity<LectureAssignment>().HasIndex(la => la.TeacherId);
+        modelBuilder.Entity<LectureAssignment>().HasIndex(la => la.LectureId);
         modelBuilder.Entity<CenterQuizResult>().HasIndex(cr => new { cr.TeacherId, cr.StudentId });
         modelBuilder.Entity<HomeworkResult>().HasIndex(hr => new { hr.TeacherId, hr.StudentId });
 
@@ -402,6 +412,18 @@ public class AppDbContext : DbContext
             .HasOne(a => a.LectureExamResult)
             .WithMany(r => r.Answers)
             .HasForeignKey(a => a.LectureExamResultId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<LectureAssignmentQuestion>()
+            .HasOne(q => q.LectureAssignment)
+            .WithMany(la => la.Questions)
+            .HasForeignKey(q => q.LectureAssignmentId)
+            .OnDelete(DeleteBehavior.Cascade);
+
+        modelBuilder.Entity<LectureAssignmentAnswer>()
+            .HasOne(a => a.LectureAssignmentResult)
+            .WithMany(r => r.Answers)
+            .HasForeignKey(a => a.LectureAssignmentResultId)
             .OnDelete(DeleteBehavior.Cascade);
 
         modelBuilder.Entity<QuizAnswer>()

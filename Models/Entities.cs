@@ -1058,6 +1058,72 @@ public class LectureExamAnswer
 }
 
 /// <summary>
+/// A LECTURE ASSIGNMENT is the homework counterpart to LectureExam --
+/// identical shape and identical access gate (StudentCanAccessLectureAsync /
+/// GetEligibleStudentsForLectureAsync in LectureExamsController, mirrored in
+/// LectureAssignmentsController), attached directly to one Lecture, no
+/// Unit/GroupIds/Deadline of its own.
+///
+/// The ONLY difference from LectureExam: no timing at all. There's no
+/// DurationInMinutes and no per-student "start" row/personal countdown --
+/// a student can open it and submit whenever they like, exactly once.
+/// </summary>
+public class LectureAssignment
+{
+    public int Id { get; set; }
+    public string Title { get; set; } = default!;
+    public int LectureId { get; set; }
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this assignment belongs to.</summary>
+    public int TeacherId { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    public ICollection<LectureAssignmentQuestion> Questions { get; set; } = new List<LectureAssignmentQuestion>();
+}
+
+public class LectureAssignmentQuestion
+{
+    public int Id { get; set; }
+    public int LectureAssignmentId { get; set; }
+    [ForeignKey(nameof(LectureAssignmentId))] public LectureAssignment? LectureAssignment { get; set; }
+    public string Type { get; set; } = "MCQ";
+    public string Text { get; set; } = default!;
+    public string Answer { get; set; } = default!;
+    public int Mark { get; set; }
+    public string ChoicesCsv { get; set; } = string.Empty;
+    [NotMapped] public List<string> Choices
+    {
+        get => ChoicesCsv.Length == 0 ? new() : ChoicesCsv.Split('\u001F').ToList();
+        set => ChoicesCsv = string.Join('\u001F', value);
+    }
+    public string? ImageUrl { get; set; }
+}
+
+public class LectureAssignmentResult
+{
+    public int Id { get; set; }
+    public int LectureAssignmentId { get; set; }
+    public int StudentId { get; set; }
+    public int Score { get; set; }
+    public int TotalMarks { get; set; }
+    public DateTime GradedAt { get; set; } = DateTime.UtcNow;
+    public ICollection<LectureAssignmentAnswer> Answers { get; set; } = new List<LectureAssignmentAnswer>();
+
+    /// <summary>TENANT LAYER: copied from the parent LectureAssignment at creation time.</summary>
+    public int TeacherId { get; set; }
+}
+
+public class LectureAssignmentAnswer
+{
+    public int Id { get; set; }
+    public int LectureAssignmentResultId { get; set; }
+    [ForeignKey(nameof(LectureAssignmentResultId))] public LectureAssignmentResult? LectureAssignmentResult { get; set; }
+    public int QuestionId { get; set; }
+    public string Answer { get; set; } = default!;
+    public int? MarkAwarded { get; set; }
+}
+
+/// <summary>
 /// A per-student teacher override for one Quiz, created from the teacher's
 /// "Exams" quick action on a student's own details page (see
 /// QuizzesController.ForceReview / .Reopen). At most one row per
