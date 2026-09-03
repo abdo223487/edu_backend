@@ -90,7 +90,7 @@ public class QuizzesController : ControllerBase
             // Same subscription gate as Units/Lectures/Material/Notifications.
             // Quiz.UnitId is non-nullable (every quiz belongs to a unit), so
             // there's no "unscoped quiz" passthrough case here unlike the others.
-            var subscribedIds = User.GetUnitIds();
+            var subscribedIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, effectiveStudentId.Value);
             query = query.Where(q => subscribedIds.Contains(q.UnitId));
         }
         else if (studentId.HasValue)
@@ -355,10 +355,11 @@ public class QuizzesController : ControllerBase
         var quiz = await _db.Quizzes.Include(q => q.Questions).FirstOrDefaultAsync(q => q.Id == quizId);
         if (quiz == null) return NotFound(new { message = "Quiz not found." });
 
-        if (!User.GetUnitIds().Contains(quiz.UnitId))
+        var studentId = User.GetUserId();
+        var effectiveUnitIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId);
+        if (!effectiveUnitIds.Contains(quiz.UnitId))
             return StatusCode(403, new { message = "Not subscribed to this unit." });
 
-        var studentId = User.GetUserId();
         var priorResult = await _db.QuizResults.Include(r => r.Answers)
             .FirstOrDefaultAsync(r => r.QuizId == quizId && r.StudentId == studentId);
 
@@ -469,10 +470,10 @@ public class QuizzesController : ControllerBase
         var quiz = await _db.Quizzes.Include(q => q.Questions).FirstOrDefaultAsync(q => q.Id == request.QuizId);
         if (quiz == null) return NotFound(new { message = "Quiz not found." });
 
-        if (!User.GetUnitIds().Contains(quiz.UnitId))
-            return StatusCode(403, new { message = "Not subscribed to this unit." });
-
         var studentId = User.GetUserId();
+        var effectiveUnitIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId);
+        if (!effectiveUnitIds.Contains(quiz.UnitId))
+            return StatusCode(403, new { message = "Not subscribed to this unit." });
 
         // BUGFIX: same deadline gap as GetAsStudent — without this, a student
         // could still POST a grade after the exam window closed even if the

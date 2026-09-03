@@ -69,7 +69,7 @@ public class MaterialController : ControllerBase
         // that unit. Materials with no UnitId pass through untouched.
         if (User.IsInRole(Roles.Student))
         {
-            var subscribedIds = User.GetUnitIds();
+            var subscribedIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, User.GetUserId());
             query = query.Where(m => m.UnitId == null || subscribedIds.Contains(m.UnitId.Value));
         }
 
@@ -109,7 +109,7 @@ public class MaterialController : ControllerBase
             {
                 // Same gate as LecturesController.ByGroup: visible via a
                 // full Unit subscription OR a lecture-specific unlock.
-                if (!User.GetUnitIds().Contains(material.UnitId.Value) &&
+                if (!(await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId)).Contains(material.UnitId.Value) &&
                     !await _db.StudentLectureUnlocks.AnyAsync(u => u.StudentId == studentId && u.LectureId == material.LectureId))
                     return StatusCode(403, new { message = "Not subscribed to this unit." });
             }

@@ -60,7 +60,9 @@ public class AssignmentCentersController : ControllerBase
             var groupId = User.GetGroupId(_tenant.CurrentTenantId);
             if (groupId.HasValue) query = query.Where(a => _db.AssignmentCenterGroupLinks.Any(x => x.AssignmentCenterId == a.Id && x.GroupId == groupId.Value));
 
-            var subscribedIds = User.GetUnitIds();
+            // Merge JWT snapshot with live subscriptions so a teacher's fresh
+            // subscribe shows up immediately, not just after re-login.
+            var subscribedIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId.Value);
             query = query.Where(a => _db.AssignmentCenterUnitLinks.Any(x => x.AssignmentCenterId == a.Id && subscribedIds.Contains(x.UnitId)));
         }
         else if (schoolYear.HasValue)
@@ -174,10 +176,11 @@ public class AssignmentCentersController : ControllerBase
         var assignment = await _db.AssignmentCenters.AsNoTracking().Include(a => a.Questions).FirstOrDefaultAsync(a => a.Id == assignmentCenterId);
         if (assignment == null) return NotFound(new { message = "Assignment not found." });
 
-        if (!assignment.UnitIds.Any(id => User.GetUnitIds().Contains(id)))
+        var studentId = User.GetUserId();
+        var effectiveUnitIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId);
+        if (!assignment.UnitIds.Any(id => effectiveUnitIds.Contains(id)))
             return StatusCode(403, new { message = "Not subscribed to any unit of this assignment." });
 
-        var studentId = User.GetUserId();
         var submission = await _db.AssignmentCenterSubmissions.AsNoTracking().Include(s => s.Answers)
             .FirstOrDefaultAsync(s => s.AssignmentCenterId == assignmentCenterId && s.StudentId == studentId);
 
@@ -228,10 +231,10 @@ public class AssignmentCentersController : ControllerBase
             .FirstOrDefaultAsync(a => a.Id == request.AssignmentCenterId);
         if (assignment == null) return NotFound(new { message = "Assignment not found." });
 
-        if (!assignment.UnitIds.Any(id => User.GetUnitIds().Contains(id)))
-            return StatusCode(403, new { message = "Not subscribed to any unit of this assignment." });
-
         var studentId = User.GetUserId();
+        var effectiveUnitIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId);
+        if (!assignment.UnitIds.Any(id => effectiveUnitIds.Contains(id)))
+            return StatusCode(403, new { message = "Not subscribed to any unit of this assignment." });
 
         var alreadySubmitted = await _db.AssignmentCenterSubmissions
             .AnyAsync(s => s.AssignmentCenterId == assignment.Id && s.StudentId == studentId);

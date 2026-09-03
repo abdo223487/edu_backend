@@ -566,7 +566,7 @@ public class BankQuestionsController : ControllerBase
     [Authorize(Roles = Roles.Student)]
     public async Task<IActionResult> GetScope()
     {
-        var subscribedUnitIds = User.GetUnitIds();
+        var subscribedUnitIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, User.GetUserId());
         if (subscribedUnitIds.Count == 0) return Ok(new List<BankUnitScopeDto>());
 
         var units = await _db.Units.AsNoTracking().Where(u => subscribedUnitIds.Contains(u.Id))
@@ -636,14 +636,14 @@ public class BankQuestionsController : ControllerBase
     [Authorize(Roles = Roles.Student)]
     public async Task<IActionResult> StartAttempt([FromBody] StartBankAttemptRequest request)
     {
-        var subscribedUnitIds = User.GetUnitIds();
+        var studentId = User.GetUserId();
+        var subscribedUnitIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId);
         if (request.UnitIds.Any(id => !subscribedUnitIds.Contains(id)))
             return StatusCode(403, new { message = "Not subscribed to one or more of the selected units." });
 
         if (request.Count <= 0 || request.DurationMinutes <= 0)
             return BadRequest(new { message = "Count and duration must be positive." });
 
-        var studentId = User.GetUserId();
         var excludeSolved = request.ExcludeSolved == true;
         var weakOnly = request.WeakOnly == true;
         var useMixed = request.UseMixedDifficulty == true;

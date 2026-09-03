@@ -425,7 +425,7 @@ public class LecturesController : ControllerBase
         if (User.IsInRole(Roles.Student))
         {
             var studentId = User.GetUserId();
-            var subscribedIds = User.GetUnitIds();
+            var subscribedIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId);
             var studentGroupId = User.GetGroupId(_tenant.CurrentTenantId);
             var unlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
                 .Where(u => u.StudentId == studentId)
@@ -491,7 +491,17 @@ public class LecturesController : ControllerBase
         var gId = groupId ?? User.GetGroupId(_tenant.CurrentTenantId);
         var query = _db.Lectures.AsNoTracking().AsQueryable();
 
-        if (gId.HasValue) query = query.Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == gId.Value));
+        // BUGFIX: the group filter used to be applied here unconditionally,
+        // BEFORE the student unlock/subscription gate below. That meant a
+        // student who redeemed a Code for a lecture belonging to a Unit/Group
+        // they aren't enrolled in got filtered out right here -- the lecture
+        // never even reached the unlock check, so the lesson came back empty
+        // despite a valid StudentLectureUnlocks row. For students, the group
+        // check is now folded into the OR below (skipped entirely when the
+        // lecture was unlocked via a code). For non-students (staff), keep
+        // the old unconditional behavior.
+        if (!User.IsInRole(Roles.Student) && gId.HasValue)
+            query = query.Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == gId.Value));
         if (!string.IsNullOrEmpty(attendanceMethod) &&
             Enum.TryParse<AttendanceMethod>(attendanceMethod, true, out var method))
             query = query.Where(l => l.AttendanceMethod == method);
@@ -517,7 +527,7 @@ public class LecturesController : ControllerBase
         if (User.IsInRole(Roles.Student))
         {
             var studentId = User.GetUserId();
-            var subscribedIds = User.GetUnitIds();
+            var subscribedIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId);
             var unlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
                 .Where(u => u.StudentId == studentId)
                 .Select(u => u.LectureId)
@@ -527,10 +537,22 @@ public class LecturesController : ControllerBase
             // See identical note in ByYear: a lecture-level code unlock must
             // grant visibility to that lecture even when it belongs to a Unit
             // (or External Book) the student never subscribed to as a whole.
+            //
+            // BUGFIX: a code-unlocked lecture must also bypass the gId/group
+            // membership check above -- a student redeeming a code for a
+            // course they aren't enrolled in (and therefore aren't a member
+            // of that course's Group) still needs to see it. unlockedLectureIds
+            // is checked FIRST and short-circuits the group requirement entirely;
+            // only the non-unlocked path below still requires group membership.
             query = query.Where(l =>
-                (l.UnitId != null && (subscribedIds.Contains(l.UnitId.Value) || unlockedLectureIds.Contains(l.Id))) ||
-                (l.ExternalBookId != null && (accessibleBookIds.Contains(l.ExternalBookId.Value) || unlockedLectureIds.Contains(l.Id))) ||
-                (l.UnitId == null && l.ExternalBookId == null && unlockedLectureIds.Contains(l.Id)));
+                unlockedLectureIds.Contains(l.Id) ||
+                (
+                    (!gId.HasValue || _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == gId.Value)) &&
+                    (
+                        (l.UnitId != null && subscribedIds.Contains(l.UnitId.Value)) ||
+                        (l.ExternalBookId != null && accessibleBookIds.Contains(l.ExternalBookId.Value))
+                    )
+                ));
         }
 
         if (lessonIndex.HasValue) query = query.Where(l => l.LessonIndex == lessonIndex.Value);
@@ -575,7 +597,7 @@ public class LecturesController : ControllerBase
             if (lecture == null) return NotFound(new { message = "Lecture not found." });
             var studentId = User.GetUserId();
 
-            if (lecture.UnitId.HasValue && !User.GetUnitIds().Contains(lecture.UnitId.Value))
+            if (lecture.UnitId.HasValue && !(await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId)).Contains(lecture.UnitId.Value))
             {
                 // Same lecture-level-unlock exception as ByGroup/ByYear: a
                 // code redeemed for this one in-unit lecture should still let

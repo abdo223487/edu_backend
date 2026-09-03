@@ -79,7 +79,7 @@ public class LectureExamsController : ControllerBase
         if (lecture == null) return false;
 
         if (lecture.UnitId.HasValue)
-            return User.GetUnitIds().Contains(lecture.UnitId.Value)
+            return (await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId)).Contains(lecture.UnitId.Value)
                 || await _db.StudentLectureUnlocks.AnyAsync(u => u.StudentId == studentId && u.LectureId == lectureId);
 
         return lecture.OnlineLessonId.HasValue

@@ -49,7 +49,7 @@ public class NotificationsController : ControllerBase
             // unit (UnitId != null) is only visible if the student is subscribed
             // to that unit. Notifications with no UnitId (general announcements)
             // are unaffected — they were never unit-scoped to begin with.
-            var subscribedIds = User.GetUnitIds();
+            var subscribedIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, User.GetUserId());
             query = query.Where(n => n.UnitId == null || subscribedIds.Contains(n.UnitId.Value));
         }
         else if (groupId.HasValue)
