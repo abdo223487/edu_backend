@@ -121,7 +121,12 @@ public class OnlineLessonsController : ControllerBase
             lectures = lectures.Select(dto =>
             {
                 if (!lockedMap.TryGetValue(dto.Id, out var reason)) return dto;
-                return dto with { Link = null, VideoSourceType = null, ThumbnailUrl = null, Locked = true, LockReason = reason };
+                // NOTE: video fields (Link/VideoSourceType/ThumbnailUrl) are
+                // always sent, locked or not -- same as LecturesController.
+                // The client enforces the lock off Locked/LockReason, so
+                // there's no need (and no benefit) to strip the playback
+                // data server-side.
+                return dto with { Locked = true, LockReason = reason };
             }).ToList();
         }
 

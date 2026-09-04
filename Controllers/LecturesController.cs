@@ -468,9 +468,15 @@ public class LecturesController : ControllerBase
         return Ok(items.Select(l =>
         {
             var isLocked = lockedMap.TryGetValue(l.Id, out var lockReason);
-            var (link, sourceType) = isLocked ? (null, null) : PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
+            // NOTE: video fields are always sent, locked or not -- the lock
+            // is enforced client-side (the app shows a lock overlay and
+            // blocks opening the player based on `locked`/`lockReason`),
+            // exactly the same way a view-limit-exhausted lecture is
+            // handled. The server no longer strips link/sourceType/
+            // thumbnailUrl for a link-locked lecture.
+            var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
             return new LectureListItem(
-                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, isLocked ? null : l.ThumbnailUrl, l.UnitId, l.LessonIndex,
+                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
                 l.CreatedAt, l.ExternalBookId, l.ViewLimit,
                 l.ViewLimit.HasValue && remainingViewsMap.TryGetValue(l.Id, out var rem) ? rem : null,
@@ -575,9 +581,12 @@ public class LecturesController : ControllerBase
         return Ok(items.Select(l =>
         {
             var isLocked = lockedMap.TryGetValue(l.Id, out var lockReason);
-            var (link, sourceType) = isLocked ? (null, null) : PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
+            // NOTE: same as ByYear -- video fields are always sent, locked or
+            // not; the app enforces the lock client-side off `locked`/
+            // `lockReason`, same as a view-limit-exhausted lecture.
+            var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
             return new LectureListItem(
-                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, isLocked ? null : l.ThumbnailUrl, l.UnitId, l.LessonIndex,
+                l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
                 l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
                 l.CreatedAt, l.ExternalBookId, l.ViewLimit,
                 l.ViewLimit.HasValue && remainingViewsMap.TryGetValue(l.Id, out var rem) ? rem : null,
