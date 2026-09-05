@@ -93,7 +93,7 @@ public class UnitsController : ControllerBase
         var units = await query
             .Select(u => new UnitListItem(
                 u.Id, u.Name, u.SchoolYear, u.Month, u.ImageUrl,
-                !isStudent || subscribedIds.Contains(u.Id)))
+                !isStudent || subscribedIds.Contains(u.Id), u.Price))
             .ToListAsync();
 
         return Ok(units);
@@ -151,7 +151,7 @@ public class UnitsController : ControllerBase
             lessons = lessons.Where(l => unlockedLessonIndexes.Contains(l.LessonIndex));
 
         var dto = new UnitDetailDto(
-            unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl,
+            unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl, unit.Price,
             lessons.Select(l => new LessonDto(l.Id, l.LessonIndex, l.Name, l.ImageUrl)).ToList());
 
         return Ok(dto);
@@ -166,21 +166,25 @@ public class UnitsController : ControllerBase
         [FromForm] string name,
         [FromForm] int schoolYear,
         [FromForm] int? month,
+        // OPTIONAL: the course's price tag, set by the teacher at creation
+        // time. Null/omitted means no price shown for this course.
+        [FromForm] decimal? price,
         IFormFile image)
     {
         if (image == null || image.Length == 0)
             return BadRequest(new { message = "Image is required to create a Unit." });
 
-        return await CreateUnitInternal(name, schoolYear, month, image);
+        return await CreateUnitInternal(name, schoolYear, month, price, image);
     }
 
-    private async Task<IActionResult> CreateUnitInternal(string name, int schoolYear, int? month, IFormFile image)
+    private async Task<IActionResult> CreateUnitInternal(string name, int schoolYear, int? month, decimal? price, IFormFile image)
     {
         var unit = new Unit
         {
             Name = name,
             SchoolYear = schoolYear,
             Month = month,
+            Price = price,
             TeacherId = User.GetStaffTenantId()!.Value, // TENANT LAYER
             ImageUrl = await _files.SaveAsync(image, "units")
         };
@@ -188,7 +192,7 @@ public class UnitsController : ControllerBase
         _db.Units.Add(unit);
         await _db.SaveChangesAsync();
 
-        return StatusCode(201, new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl, true));
+        return StatusCode(201, new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl, true, unit.Price));
     }
 
     // Real client contract (confirmed from "edit Unit .dart"): ALWAYS multipart,

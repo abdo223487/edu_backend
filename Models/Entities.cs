@@ -209,6 +209,16 @@ public class Student
     public ICollection<StateHistoryEntry> StateHistory { get; set; } = new List<StateHistoryEntry>();
 
     /// <summary>
+    /// POINTS WALLET: cached running balance, kept in sync with every row
+    /// added to WalletTransactions (see WalletController) so reads don't
+    /// need to sum the whole history every time. The transactions table
+    /// remains the source of truth / audit trail; this is a denormalized
+    /// convenience field updated atomically alongside each transaction.
+    /// </summary>
+    [Column(TypeName = "decimal(10,2)")]
+    public decimal WalletBalance { get; set; } = 0;
+
+    /// <summary>
     /// MULTI-TENANT MEMBERSHIP: a student can now belong to a Group at MORE THAN
     /// ONE teacher (tenant) at the same time -- e.g. subscribed to Teacher A for
     /// Math and Teacher B for Physics. GroupId/Group above are kept as the
@@ -346,6 +356,16 @@ public class Unit
     public int SchoolYear { get; set; }
     public int? Month { get; set; }
     public string? ImageUrl { get; set; }
+
+    /// <summary>
+    /// OPTIONAL price tag for this course, set/edited by the teacher along
+    /// with the rest of the Unit's data (see UnitsController.CreateUnit /
+    /// EditUnit). Null means "no price shown" -- purely cosmetic/informational
+    /// unless the student also pays for it via their wallet (see
+    /// WalletController.PurchaseUnit), which debits exactly this amount.
+    /// </summary>
+    [Column(TypeName = "decimal(10,2)")]
+    public decimal? Price { get; set; }
 
     /// <summary>TENANT LAYER: which teacher (tenant) this unit belongs to.</summary>
     public int TeacherId { get; set; }
@@ -825,6 +845,45 @@ public class Code
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     /// <summary>TENANT LAYER: which teacher (tenant) this code belongs to.</summary>
+    public int TeacherId { get; set; }
+}
+
+/// <summary>
+/// One row per points-wallet movement for a student: a teacher/assistant
+/// manually crediting or debiting points (Type = "manual"), or a student
+/// spending points to unlock a Unit (Type = "purchase", see
+/// WalletController.PurchaseUnit). Append-only audit trail; Student.WalletBalance
+/// is the cached running total kept in sync with these rows.
+/// </summary>
+public class WalletTransaction
+{
+    public int Id { get; set; }
+    public int StudentId { get; set; }
+    [ForeignKey(nameof(StudentId))] public Student? Student { get; set; }
+
+    /// <summary>Positive = credit (points added), negative = debit (points removed/spent).</summary>
+    [Column(TypeName = "decimal(10,2)")]
+    public decimal Amount { get; set; }
+
+    /// <summary>Wallet balance right after this transaction was applied (audit convenience).</summary>
+    [Column(TypeName = "decimal(10,2)")]
+    public decimal BalanceAfter { get; set; }
+
+    /// <summary>"manual" (teacher add/deduct from the details page) or "purchase" (student spent points on a Unit).</summary>
+    public string Type { get; set; } = "manual";
+
+    /// <summary>Free-text note -- teacher's reason for a manual adjustment, or auto-filled for a purchase.</summary>
+    public string? Note { get; set; }
+
+    /// <summary>Set only for Type == "purchase": which Unit was unlocked this way.</summary>
+    public int? RelatedUnitId { get; set; }
+
+    /// <summary>Set only for Type == "manual": which staff account (Teacher/Assistant/AssistantAdmin) made the adjustment.</summary>
+    public int? CreatedByStaffId { get; set; }
+
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this transaction belongs to.</summary>
     public int TeacherId { get; set; }
 }
 
