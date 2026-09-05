@@ -207,6 +207,11 @@ public class UnitsController : ControllerBase
         [FromForm(Name = "Name")] string? name,
         [FromForm(Name = "Month")] int? month,
         [FromForm(Name = "ClearMonth")] bool? clearMonth,
+        // سعر الكورس (اختياري): نفس فكرة Month/ClearMonth بالظبط -- لو
+        // ClearPrice=true بيتشال السعر خالص، وإلا لو Price اتبعتت بتستبدل
+        // القديمة.
+        [FromForm(Name = "Price")] decimal? price,
+        [FromForm(Name = "ClearPrice")] bool? clearPrice,
         IFormFile? image)
     {
         var unit = await _db.Units.FirstOrDefaultAsync(e => e.Id == id);
@@ -216,6 +221,9 @@ public class UnitsController : ControllerBase
 
         if (clearMonth == true) unit.Month = null;
         else if (month.HasValue) unit.Month = month.Value;
+
+        if (clearPrice == true) unit.Price = null;
+        else if (price.HasValue) unit.Price = price.Value;
 
         if (image != null && image.Length > 0)
         {
@@ -230,11 +238,11 @@ public class UnitsController : ControllerBase
             // 3) Delete old file (only after the DB safely points to the new one)
             await _files.DeleteAsync(oldImageUrl);
 
-            return Ok(new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl, true));
+            return Ok(new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl, true, unit.Price));
         }
 
         await _db.SaveChangesAsync();
-        return Ok(new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl, true));
+        return Ok(new UnitListItem(unit.Id, unit.Name, unit.SchoolYear, unit.Month, unit.ImageUrl, true, unit.Price));
     }
 
     [HttpPost("delete")]
