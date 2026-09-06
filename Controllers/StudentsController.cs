@@ -1317,10 +1317,10 @@ public class StudentsController : ControllerBase
     // Used anywhere the app needs "ايه الـ ID بتاعي" — e.g. a student
     // wanting to give their ID to the teacher for an offline-recorded
     // notebook payment (see LecturesController.latest-center-by-year /
-    // OfflineNotebookPaymentsPage). Also carries SchoolYear (via the
-    // student's active, non-cancelled group membership) so screens like
-    // the class-schedule calendar can fetch the right year from the server
-    // instead of relying on anything cached on the device.
+    // OfflineNotebookPaymentsPage). Also carries SchoolYear (straight off
+    // Student itself) so screens like the class-schedule calendar can fetch
+    // the right year from the server instead of relying on anything cached
+    // on the device.
     [HttpGet("me")]
     [Authorize(Roles = Roles.Student)]
     public async Task<IActionResult> GetMe()
@@ -1328,18 +1328,12 @@ public class StudentsController : ControllerBase
         var studentId = User.GetUserId();
         var student = await _db.Students.AsNoTracking()
             .Where(s => s.Id == studentId)
-            .Select(s => new { s.Id, s.Name })
+            .Select(s => new { s.Id, s.Name, s.SchoolYear })
             .FirstOrDefaultAsync();
 
         if (student == null) return NotFound(new { message = "Student not found." });
 
-        var schoolYear = await _db.StudentGroupMemberships
-            .Where(m => m.StudentId == studentId && !m.IsCancelled)
-            .OrderByDescending(m => m.CreatedAt)
-            .Select(m => (int?)m.Group!.SchoolYear)
-            .FirstOrDefaultAsync();
-
-        return Ok(new { student.Id, student.Name, schoolYear });
+        return Ok(student);
     }
 
     // POST Students/logout-everywhere
