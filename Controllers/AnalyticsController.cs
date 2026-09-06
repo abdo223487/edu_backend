@@ -18,6 +18,7 @@ namespace EduApi.Controllers;
 ///  GET Analytics/students?p=..&groupId=..|&schoolYear=..
 ///  GET Analytics/failed-students?p=..
 ///  GET Analytics/top-students                          (teacher AND student use this route)
+///  GET Analytics/my-rank?byYear=..                     (student's own rank within the same scope as top-students)
 ///  GET Analytics/attendance?groupId=..|&schoolYear=..
 ///  GET Analytics/sheet                                  (file download)
 ///  GET Analytics/sheet/lectures/{id}                     (file download)
@@ -222,6 +223,75 @@ public class AnalyticsController : ControllerBase
             });
 
         return Ok(items);
+    }
+
+    // GET Analytics/my-rank?byYear=true|false  (student only)
+    // Same scoping/ranking logic as top-students (group by default, whole
+    // school year if byYear=true), but returns the CALLING student's own
+    // position instead of just the top 5 -- powers the "رتبتك ايه" card on
+    // the Hall-of-Champions page. Every scoped student is ranked (even ones
+    // with zero quiz results, who just rank last) so "out of N" is always a
+    // real, complete count.
+    [HttpGet("my-rank")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> GetMyRank([FromQuery] bool byYear = false)
+    {
+        var studentId = User.GetUserId();
+
+        int? effectiveGroupId = null;
+        int? schoolYear = null;
+        if (byYear)
+        {
+            schoolYear = await _db.Students.AsNoTracking()
+                .Where(s => s.Id == studentId).Select(s => (int?)s.SchoolYear).FirstOrDefaultAsync();
+        }
+        else
+        {
+            effectiveGroupId = User.GetGroupId(_tenant.CurrentTenantId);
+        }
+
+        var scopedStudentsQuery = _db.Students.AsNoTracking().AsQueryable();
+        if (effectiveGroupId.HasValue) scopedStudentsQuery = scopedStudentsQuery.Where(s => s.GroupMemberships.Any(m => m.GroupId == effectiveGroupId.Value));
+        else if (schoolYear.HasValue) scopedStudentsQuery = scopedStudentsQuery.Where(s => s.SchoolYear == schoolYear.Value);
+
+        var scopedStudentIds = await scopedStudentsQuery.Select(s => s.Id).ToListAsync();
+        if (!scopedStudentIds.Contains(studentId)) scopedStudentIds.Add(studentId); // safety: always include the caller
+
+        var totalsByStudent = await _db.CenterQuizResults.AsNoTracking()
+            .Where(r => scopedStudentIds.Contains(r.StudentId))
+            .GroupBy(r => r.StudentId)
+            .Select(g => new { StudentId = g.Key, TotalMarks = g.Sum(x => x.Marks) })
+            .ToDictionaryAsync(x => x.StudentId, x => x.TotalMarks);
+
+        // Every scoped student gets a row -- 0 for anyone with no quiz
+        // results yet, so the ranking (and "out of N") reflects the WHOLE
+        // group/year, not just students who've already sat a quiz.
+        var ranked = scopedStudentIds
+            .Select(id => new { StudentId = id, TotalMarks = totalsByStudent.TryGetValue(id, out var m) ? m : 0 })
+            .OrderByDescending(x => x.TotalMarks)
+            .ToList();
+
+        var myIndex = ranked.FindIndex(x => x.StudentId == studentId);
+        var myRank = myIndex + 1;
+        var myTotal = ranked[myIndex].TotalMarks;
+
+        // Points behind the student directly above -- null if already #1 (or
+        // tied for #1), since there's nobody to catch up to.
+        int? pointsToNextRank = null;
+        if (myIndex > 0)
+        {
+            var aheadTotal = ranked[myIndex - 1].TotalMarks;
+            pointsToNextRank = aheadTotal > myTotal ? aheadTotal - myTotal : null;
+        }
+
+        return Ok(new
+        {
+            rank = myRank,
+            totalStudents = ranked.Count,
+            totalMarks = myTotal,
+            pointsToNextRank,
+            scope = byYear ? "schoolYear" : "group"
+        });
     }
 
     [HttpGet("attendance")]
