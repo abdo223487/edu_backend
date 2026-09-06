@@ -768,6 +768,53 @@ public class BillingPayment
 }
 
 
+/// <summary>
+/// One row per (Teacher, SchoolYear, DayOfWeek): a free-text description of
+/// what lesson/class happens that weekday for that school year -- e.g.
+/// Saturday -> "فيزياء", Sunday -> "كيمياء". This is a recurring WEEKLY
+/// timetable (not tied to a specific calendar date), edited by the teacher
+/// from the "مواعيد الحصص" dashboard button and viewed read-only by students
+/// from their own profile. DayOfWeek follows System.DayOfWeek (0=Sunday ..
+/// 6=Saturday) for consistency with .NET, NOT the Arabic week order -- the
+/// Flutter side is responsible for displaying/ordering Saturday-first.
+/// </summary>
+/// <summary>
+/// DEPRECATED: superseded by <see cref="ClassScheduleEntry"/> below (a real
+/// per-date calendar instead of a recurring weekday). Left in place (and its
+/// table left in the database) only so the earlier migration isn't rewritten
+/// after already being applied to production -- nothing reads/writes this
+/// anymore.
+/// </summary>
+public class ClassScheduleDay
+{
+    public int Id { get; set; }
+    public int SchoolYear { get; set; }
+    public int DayOfWeek { get; set; }
+    public string? Text { get; set; }
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this schedule day belongs to.</summary>
+    public int TeacherId { get; set; }
+}
+
+/// <summary>
+/// One row per actual calendar date with a lesson on it ("مواعيد الحصص"):
+/// e.g. 2026-09-12 -> "فيزياء - وحدة 3". This is a REAL calendar (month/year,
+/// like a phone calendar), not a recurring weekly pattern -- the teacher picks
+/// a specific date and writes what happens that day, and the student can
+/// browse month by month to see the whole year's plan. Only dates that
+/// actually have a lesson get a row; everything else is implicitly empty.
+/// </summary>
+public class ClassScheduleEntry
+{
+    public int Id { get; set; }
+    public int SchoolYear { get; set; }
+    public DateOnly Date { get; set; }
+    public string? Text { get; set; }
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this schedule entry belongs to.</summary>
+    public int TeacherId { get; set; }
+}
+
 public class Code
 {
     public int Id { get; set; }

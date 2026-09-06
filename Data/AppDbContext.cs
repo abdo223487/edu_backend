@@ -41,6 +41,8 @@ public class AppDbContext : DbContext
     public DbSet<BillingPayment> BillingPayments => Set<BillingPayment>();
     public DbSet<Code> Codes => Set<Code>();
     public DbSet<WalletTransaction> WalletTransactions => Set<WalletTransaction>();
+    public DbSet<ClassScheduleDay> ClassScheduleDays => Set<ClassScheduleDay>();
+    public DbSet<ClassScheduleEntry> ClassScheduleEntries => Set<ClassScheduleEntry>();
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<Attendance> Attendances => Set<Attendance>();
     public DbSet<Dismissal> Dismissals => Set<Dismissal>();
@@ -122,6 +124,8 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Billing>().HasQueryFilter(b => b.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Code>().HasQueryFilter(c => c.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<WalletTransaction>().HasQueryFilter(w => w.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<ClassScheduleDay>().HasQueryFilter(d => d.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<ClassScheduleEntry>().HasQueryFilter(d => d.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Notification>().HasQueryFilter(n => n.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Quiz>().HasQueryFilter(q => q.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Assignment>().HasQueryFilter(a => a.TeacherId == _tenant.CurrentTenantId);
@@ -157,6 +161,14 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Code>().HasIndex(c => c.TeacherId);
         modelBuilder.Entity<WalletTransaction>().HasIndex(w => w.TeacherId);
         modelBuilder.Entity<WalletTransaction>().HasIndex(w => w.StudentId);
+        modelBuilder.Entity<ClassScheduleDay>().HasIndex(d => d.TeacherId);
+        modelBuilder.Entity<ClassScheduleDay>()
+            .HasIndex(d => new { d.TeacherId, d.SchoolYear, d.DayOfWeek })
+            .IsUnique();
+        modelBuilder.Entity<ClassScheduleEntry>().HasIndex(d => d.TeacherId);
+        modelBuilder.Entity<ClassScheduleEntry>()
+            .HasIndex(d => new { d.TeacherId, d.SchoolYear, d.Date })
+            .IsUnique();
         // Every attendance record now looks up Codes by TriggerLectureId
         // (IssueTriggeredCodesAsync) — same performance reasoning as the
         // TeacherId indexes above.
