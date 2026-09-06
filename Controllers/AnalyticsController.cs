@@ -277,7 +277,7 @@ public class AnalyticsController : ControllerBase
 
         // Points behind the student directly above -- null if already #1 (or
         // tied for #1), since there's nobody to catch up to.
-        int? pointsToNextRank = null;
+        decimal? pointsToNextRank = null;
         if (myIndex > 0)
         {
             var aheadTotal = ranked[myIndex - 1].TotalMarks;
