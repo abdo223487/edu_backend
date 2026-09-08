@@ -289,7 +289,7 @@ public class CodesController : ControllerBase
         // single-code ToDto below -- a student's own row might not be
         // "visible" under this tenant if they somehow redeemed a code
         // without a matching membership.
-        var students = studentIds.Count == 0 ? new Dictionary<int, (string Name, string? Phone)>()
+        var students = studentIds.Count == 0 ? new Dictionary<int, (string Name, string? PhoneNumber)>()
             : (await _db.Students.IgnoreQueryFilters().Where(s => studentIds.Contains(s.Id))
                 .Select(s => new { s.Id, s.Name, s.PhoneNumber }).ToListAsync())
                 .ToDictionary(s => s.Id, s => (s.Name, s.PhoneNumber));
@@ -310,7 +310,7 @@ public class CodesController : ControllerBase
             if (c.UsedByStudentId.HasValue && students.TryGetValue(c.UsedByStudentId.Value, out var student))
             {
                 groupNamesByStudent.TryGetValue(c.UsedByStudentId.Value, out var groupName);
-                redeemedBy = new { name = student.Name, groupName = groupName ?? "", phoneNumber = student.Phone };
+                redeemedBy = new { name = student.Name, groupName = groupName ?? "", phoneNumber = student.PhoneNumber };
             }
 
             return new
