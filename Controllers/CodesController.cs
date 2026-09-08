@@ -246,6 +246,18 @@ public class CodesController : ControllerBase
         });
     }
 
+    // PERF: this used to call ToDto(c) inside the foreach below, and ToDto
+    // does up to 6 separate DB round-trips per code (Units, Lectures,
+    // OnlineLessons, ExternalBooks, and -- only for a redeemed code --
+    // Student + group name). With N codes that's up to 6*N sequential
+    // queries for one list screen; on a teacher with a lot of codes (or
+    // right after a lecture-linked template just back-filled a clone for
+    // every attendee -- see TriggeredCodeIssuer.IssueForExistingAttendeesAsync)
+    // this alone was enough to make the codes screen hang loading for a
+    // long time. This batches every lookup into ONE query per referenced
+    // table, covering every code in the result at once, and builds each
+    // DTO from in-memory dictionaries afterwards -- no awaits left inside
+    // the per-code loop at all.
     [HttpGet]
     public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? triggerLectureId, [FromQuery] int? sourceCodeTemplateId)
     {
@@ -255,9 +267,73 @@ public class CodesController : ControllerBase
         if (sourceCodeTemplateId.HasValue) query = query.Where(c => c.SourceCodeTemplateId == sourceCodeTemplateId.Value);
 
         var codes = await query.ToListAsync();
-        var dtos = new List<object>();
-        foreach (var c in codes) dtos.Add(await ToDto(c));
-        return Ok(dtos);
+        if (codes.Count == 0) return Ok(new List<object>());
+
+        var unitIds = codes.SelectMany(c => c.UnitIds).Distinct().ToList();
+        var lectureIds = codes.SelectMany(c => c.LectureIds).Distinct().ToList();
+        var onlineLessonIds = codes.SelectMany(c => c.OnlineLessonIds).Distinct().ToList();
+        var externalBookIds = codes.SelectMany(c => c.ExternalBookIds).Distinct().ToList();
+        var studentIds = codes.Where(c => c.UsedByStudentId.HasValue)
+            .Select(c => c.UsedByStudentId!.Value).Distinct().ToList();
+
+        var unitNames = unitIds.Count == 0 ? new Dictionary<int, string>()
+            : await _db.Units.Where(u => unitIds.Contains(u.Id)).ToDictionaryAsync(u => u.Id, u => u.Name);
+        var lectureNames = lectureIds.Count == 0 ? new Dictionary<int, string>()
+            : await _db.Lectures.Where(l => lectureIds.Contains(l.Id)).ToDictionaryAsync(l => l.Id, l => l.Name);
+        var onlineLessonNames = onlineLessonIds.Count == 0 ? new Dictionary<int, string>()
+            : await _db.OnlineLessons.Where(o => onlineLessonIds.Contains(o.Id)).ToDictionaryAsync(o => o.Id, o => o.Name);
+        var externalBookNames = externalBookIds.Count == 0 ? new Dictionary<int, string>()
+            : await _db.ExternalBooks.Where(e => externalBookIds.Contains(e.Id)).ToDictionaryAsync(e => e.Id, e => e.Name);
+
+        // MULTI-TENANT: IgnoreQueryFilters() for the same reason as the
+        // single-code ToDto below -- a student's own row might not be
+        // "visible" under this tenant if they somehow redeemed a code
+        // without a matching membership.
+        var students = studentIds.Count == 0 ? new Dictionary<int, (string Name, string? Phone)>()
+            : (await _db.Students.IgnoreQueryFilters().Where(s => studentIds.Contains(s.Id))
+                .Select(s => new { s.Id, s.Name, s.PhoneNumber }).ToListAsync())
+                .ToDictionary(s => s.Id, s => (s.Name, s.PhoneNumber));
+
+        // Every code here belongs to the CURRENT tenant only (Code carries
+        // its own tenant query filter), so a single tenant-scoped group
+        // lookup covers every redeemed code's TeacherId at once -- no need
+        // to resolve it per-code like ToDto does for the single-code case.
+        var groupNamesByStudent = studentIds.Count == 0 ? new Dictionary<int, string>()
+            : await _db.StudentGroupMemberships
+                .Where(m => studentIds.Contains(m.StudentId))
+                .Select(m => new { m.StudentId, GroupName = m.Group!.Name })
+                .ToDictionaryAsync(m => m.StudentId, m => m.GroupName);
+
+        object ToDtoFast(Code c)
+        {
+            object? redeemedBy = null;
+            if (c.UsedByStudentId.HasValue && students.TryGetValue(c.UsedByStudentId.Value, out var student))
+            {
+                groupNamesByStudent.TryGetValue(c.UsedByStudentId.Value, out var groupName);
+                redeemedBy = new { name = student.Name, groupName = groupName ?? "", phoneNumber = student.Phone };
+            }
+
+            return new
+            {
+                id = c.Id,
+                code = c.Value,
+                schoolYear = c.SchoolYear,
+                units = c.UnitIds.Where(unitNames.ContainsKey).Select(id => new { id, name = unitNames[id] }).ToList(),
+                lectures = c.LectureIds.Where(lectureNames.ContainsKey).Select(id => new { id, name = lectureNames[id] }).ToList(),
+                onlineLessons = c.OnlineLessonIds.Where(onlineLessonNames.ContainsKey).Select(id => new { id, name = onlineLessonNames[id] }).ToList(),
+                externalBooks = c.ExternalBookIds.Where(externalBookNames.ContainsKey).Select(id => new { id, name = externalBookNames[id] }).ToList(),
+                unlocks = c.UnitIds.Concat(c.LectureIds).Concat(c.OnlineLessonIds).Concat(c.ExternalBookIds).ToList(),
+                isUsed = c.IsUsed,
+                isRedeemed = c.IsUsed,
+                redeemedBy,
+                redeemedAt = c.UsedAt?.ToString("O"),
+                isTemplate = c.IsTemplate,
+                triggerLectureId = c.TriggerLectureId,
+                sourceCodeTemplateId = c.SourceCodeTemplateId
+            };
+        }
+
+        return Ok(codes.Select(ToDtoFast).ToList());
     }
 
     [HttpGet("{codeId:int}")]
