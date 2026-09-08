@@ -682,11 +682,13 @@ public class LecturesController : ControllerBase
     /// "الربط": for a batch of Online lectures being returned to ONE student,
     /// finds which of them are locked because the previous Online lecture in
     /// their same context (UnitId, ExternalBookId, or OnlineLessonId) hasn't
-    /// had its exam and/or assignment finished by that student yet.
-    /// Ordering within a context is by (CreatedAt, Id) -- the same order
-    /// every lecture list in this API already presents lectures in. The
-    /// first lecture of a context is never locked by this, regardless of its
-    /// own flags, since there's nothing before it to require.
+    /// had EVERY one of its exams and/or EVERY one of its assignments
+    /// finished by that student yet -- a previous lecture can carry more
+    /// than one exam/assignment, and all of them (not just one) must be
+    /// done. Ordering within a context is by (CreatedAt, Id) -- the same
+    /// order every lecture list in this API already presents lectures in.
+    /// The first lecture of a context is never locked by this, regardless of
+    /// its own flags, since there's nothing before it to require.
     /// Returns a map of LectureId -> LockReason (Arabic), only for the
     /// lectures that came out locked -- absent means unlocked.
     /// </summary>
@@ -724,25 +726,46 @@ public class LecturesController : ControllerBase
 
                 if (l.RequireLinkExam)
                 {
-                    var examId = await _db.LectureExams.AsNoTracking()
-                        .Where(e => e.LectureId == previousLectureId).Select(e => (int?)e.Id).FirstOrDefaultAsync();
-                    var passed = examId.HasValue && await _db.LectureExamResults.AsNoTracking()
-                        .AnyAsync(r => r.LectureExamId == examId.Value && r.StudentId == studentId);
-                    if (!passed)
+                    // FIX: the previous lecture can have MULTIPLE exams (no
+                    // unique index on LectureExam.LectureId), and this used
+                    // to only check ONE of them (FirstOrDefaultAsync) --
+                    // meaning a student could pass just one out of, say,
+                    // four exams on the previous lecture and still unlock
+                    // this one. Now requires a passing LectureExamResult for
+                    // EVERY exam attached to the previous lecture.
+                    var examIds = await _db.LectureExams.AsNoTracking()
+                        .Where(e => e.LectureId == previousLectureId).Select(e => e.Id).ToListAsync();
+                    var passedExamIds = examIds.Count == 0
+                        ? new HashSet<int>()
+                        : (await _db.LectureExamResults.AsNoTracking()
+                            .Where(r => examIds.Contains(r.LectureExamId) && r.StudentId == studentId)
+                            .Select(r => r.LectureExamId)
+                            .ToListAsync()).ToHashSet();
+                    // No exams at all on the previous lecture -> nothing to
+                    // require, same as before (examId.HasValue was false).
+                    var allExamsPassed = examIds.Count == 0 || examIds.All(passedExamIds.Contains);
+                    if (!allExamsPassed)
                     {
-                        result[l.Id] = "لازم تحل امتحان المحاضرة اللي قبلها الأول عشان تفتح المحاضرة دي.";
+                        result[l.Id] = "لازم تحل كل امتحانات المحاضرة اللي قبلها الأول عشان تفتح المحاضرة دي.";
                         continue;
                     }
                 }
                 if (l.RequireLinkAssignment)
                 {
-                    var assignmentId = await _db.LectureAssignments.AsNoTracking()
-                        .Where(a => a.LectureId == previousLectureId).Select(a => (int?)a.Id).FirstOrDefaultAsync();
-                    var done = assignmentId.HasValue && await _db.LectureAssignmentResults.AsNoTracking()
-                        .AnyAsync(r => r.LectureAssignmentId == assignmentId.Value && r.StudentId == studentId);
-                    if (!done)
+                    // Same fix as above: require EVERY assignment on the
+                    // previous lecture to have a result, not just one.
+                    var assignmentIds = await _db.LectureAssignments.AsNoTracking()
+                        .Where(a => a.LectureId == previousLectureId).Select(a => a.Id).ToListAsync();
+                    var doneAssignmentIds = assignmentIds.Count == 0
+                        ? new HashSet<int>()
+                        : (await _db.LectureAssignmentResults.AsNoTracking()
+                            .Where(r => assignmentIds.Contains(r.LectureAssignmentId) && r.StudentId == studentId)
+                            .Select(r => r.LectureAssignmentId)
+                            .ToListAsync()).ToHashSet();
+                    var allAssignmentsDone = assignmentIds.Count == 0 || assignmentIds.All(doneAssignmentIds.Contains);
+                    if (!allAssignmentsDone)
                     {
-                        result[l.Id] = "لازم تحل واجب المحاضرة اللي قبلها الأول عشان تفتح المحاضرة دي.";
+                        result[l.Id] = "لازم تحل كل واجبات المحاضرة اللي قبلها الأول عشان تفتح المحاضرة دي.";
                     }
                 }
             }

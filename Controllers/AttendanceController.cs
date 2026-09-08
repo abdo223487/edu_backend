@@ -374,45 +374,15 @@ public class AttendanceController : ControllerBase
             .Where(c => c.IsTemplate && c.TriggerLectureId == lectureId)
             .ToListAsync();
 
+        // One clone per student per template, ever — re-attending (not that
+        // duplicate Attendance rows are even possible, see the 400 check
+        // above) or attending a re-created lecture with the same template
+        // must never mint a second code for the same student. Enforced
+        // inside IssueOneAsync so this stays identical to the retroactive
+        // backfill path in CodesController.Generate (see
+        // Common.TriggeredCodeIssuer).
         foreach (var template in templates)
-        {
-            // One clone per student per template, ever — re-attending (not
-            // that duplicate Attendance rows are even possible, see the 400
-            // check above) or attending a re-created lecture with the same
-            // template must never mint a second code for the same student.
-            var alreadyIssued = await _db.Codes.AnyAsync(c =>
-                c.SourceCodeTemplateId == template.Id && c.UsedByStudentId == studentId);
-            if (alreadyIssued) continue;
-
-            var issued = new Code
-            {
-                Value = await CodeGenerator.GenerateUniqueAsync(_db),
-                SchoolYear = template.SchoolYear,
-                UnitIds = template.UnitIds,
-                LectureIds = template.LectureIds,
-                TeacherId = template.TeacherId,
-                SourceCodeTemplateId = template.Id,
-                IsUsed = true,
-                UsedByStudentId = studentId,
-                UsedAt = DateTime.UtcNow
-            };
-            _db.Codes.Add(issued);
-
-            // Same unlock-granting behavior as StudentsController.RedeemCode —
-            // the code is issued already "redeemed", so apply its effects
-            // immediately instead of waiting for a redeem call that will
-            // never come.
-            foreach (var unitId in issued.UnitIds)
-            {
-                if (!await _db.StudentUnitSubscriptions.AnyAsync(s => s.StudentId == studentId && s.UnitId == unitId))
-                    _db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = template.TeacherId, StudentId = studentId, UnitId = unitId });
-            }
-            foreach (var lecId in issued.LectureIds)
-            {
-                if (!await _db.StudentLectureUnlocks.AnyAsync(u => u.StudentId == studentId && u.LectureId == lecId))
-                    _db.StudentLectureUnlocks.Add(new StudentLectureUnlock { TeacherId = template.TeacherId, StudentId = studentId, LectureId = lecId });
-            }
-        }
+            await Common.TriggeredCodeIssuer.IssueOneAsync(_db, template, studentId);
     }
 
     // NOTE: Students carry a tenant-scoped global query filter (visible only

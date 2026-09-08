@@ -337,6 +337,22 @@ public class CodesController : ControllerBase
             try
             {
                 await _db.SaveChangesAsync();
+
+                // FEATURE: a TriggerLectureId template must reach BOTH sides of
+                // "who attends this Center lecture" — students who already have
+                // an Attendance row for it (registered/attended before this
+                // template even existed) AND students who attend it from now on.
+                // The "from now on" half is handled by
+                // AttendanceController.IssueTriggeredCodesAsync at record-time;
+                // this backfills the "already attended" half right away, once,
+                // using the exact same clone/unlock logic (Common.TriggeredCodeIssuer)
+                // so neither path can ever drift out of sync with the other.
+                if (code.IsTemplate)
+                {
+                    await Common.TriggeredCodeIssuer.IssueForExistingAttendeesAsync(_db, code);
+                    await _db.SaveChangesAsync();
+                }
+
                 return Ok(await ToDto(code));
             }
             catch (DbUpdateException) when (attempt < maxAttempts)
