@@ -67,6 +67,115 @@ public static class TriggeredCodeIssuer
     }
 
     /// <summary>
+    /// Single-student, multi-template version of the same batching idea as
+    /// IssueForExistingAttendeesAsync below. Called from
+    /// AttendanceController.IssueTriggeredCodesAsync every time an
+    /// attendance is recorded for a Center lecture that has one or more
+    /// TriggerLectureId templates attached.
+    ///
+    /// PERF: calling IssueOneAsync in a loop here is N templates x (1
+    /// already-issued check + ~1 GenerateUniqueAsync round-trip + up to 4
+    /// per-unlock-type existence checks) sequential DB round-trips for a
+    /// single attendance event. That's fine for ONE template, but a Center
+    /// lecture can have several templates attached (e.g. one per unit
+    /// unlocked by attending it), and this cost was scaling with that count
+    /// on every single scan/manual-entry -- not just on the one-time
+    /// backfill path. This version brings it back down to a small, fixed
+    /// number of round-trips (one templates lookup, one already-issued
+    /// lookup, one used-Values preload, one existence lookup per unlock
+    /// type) no matter how many templates are attached to the lecture.
+    /// </summary>
+    public static async Task IssueForAttendeeAsync(AppDbContext db, List<Code> templates, int studentId)
+    {
+        if (templates.Count == 0) return;
+
+        var templateIds = templates.Select(t => t.Id).ToList();
+
+        var alreadyIssuedTemplateIds = (await db.Codes
+            .Where(c => c.SourceCodeTemplateId.HasValue && templateIds.Contains(c.SourceCodeTemplateId.Value) && c.UsedByStudentId == studentId)
+            .Select(c => c.SourceCodeTemplateId!.Value)
+            .ToListAsync())
+            .ToHashSet();
+
+        var pending = templates.Where(t => !alreadyIssuedTemplateIds.Contains(t.Id)).ToList();
+        if (pending.Count == 0) return;
+
+        var usedValues = (await db.Codes.IgnoreQueryFilters().Select(c => c.Value).ToListAsync()).ToHashSet();
+
+        // One existence-lookup query per unlock type, covering every
+        // pending template's ids at once, instead of one query per
+        // (template, id) pair.
+        var allUnitIds = pending.SelectMany(t => t.UnitIds).Distinct().ToList();
+        var existingUnitSubs = allUnitIds.Count == 0
+            ? new HashSet<int>()
+            : (await db.StudentUnitSubscriptions
+                .Where(s => s.StudentId == studentId && allUnitIds.Contains(s.UnitId))
+                .Select(s => s.UnitId).ToListAsync()).ToHashSet();
+
+        var allLectureIds = pending.SelectMany(t => t.LectureIds).Distinct().ToList();
+        var existingLectureUnlocks = allLectureIds.Count == 0
+            ? new HashSet<int>()
+            : (await db.StudentLectureUnlocks
+                .Where(u => u.StudentId == studentId && allLectureIds.Contains(u.LectureId))
+                .Select(u => u.LectureId).ToListAsync()).ToHashSet();
+
+        var allOnlineLessonIds = pending.SelectMany(t => t.OnlineLessonIds).Distinct().ToList();
+        var existingOnlineLessonUnlocks = allOnlineLessonIds.Count == 0
+            ? new HashSet<int>()
+            : (await db.StudentOnlineLessonUnlocks
+                .Where(u => u.StudentId == studentId && allOnlineLessonIds.Contains(u.OnlineLessonId))
+                .Select(u => u.OnlineLessonId).ToListAsync()).ToHashSet();
+
+        var allExternalBookIds = pending.SelectMany(t => t.ExternalBookIds).Distinct().ToList();
+        var existingExternalBookSubs = allExternalBookIds.Count == 0
+            ? new HashSet<int>()
+            : (await db.StudentExternalBookSubscriptions
+                .Where(s => s.StudentId == studentId && allExternalBookIds.Contains(s.ExternalBookId))
+                .Select(s => s.ExternalBookId).ToListAsync()).ToHashSet();
+
+        foreach (var template in pending)
+        {
+            var issued = new Code
+            {
+                Value = GenerateUniqueLocally(usedValues),
+                SchoolYear = template.SchoolYear,
+                UnitIds = template.UnitIds,
+                LectureIds = template.LectureIds,
+                OnlineLessonIds = template.OnlineLessonIds,
+                ExternalBookIds = template.ExternalBookIds,
+                TeacherId = template.TeacherId,
+                SourceCodeTemplateId = template.Id,
+                IsUsed = true,
+                UsedByStudentId = studentId,
+                UsedAt = DateTime.UtcNow
+            };
+            db.Codes.Add(issued);
+
+            foreach (var unitId in template.UnitIds)
+                if (existingUnitSubs.Add(unitId))
+                    db.StudentUnitSubscriptions.Add(new StudentUnitSubscription { TeacherId = template.TeacherId, StudentId = studentId, UnitId = unitId });
+
+            foreach (var lecId in template.LectureIds)
+                if (existingLectureUnlocks.Add(lecId))
+                    db.StudentLectureUnlocks.Add(new StudentLectureUnlock { TeacherId = template.TeacherId, StudentId = studentId, LectureId = lecId });
+
+            foreach (var onlineLessonId in template.OnlineLessonIds)
+                if (existingOnlineLessonUnlocks.Add(onlineLessonId))
+                    db.StudentOnlineLessonUnlocks.Add(new StudentOnlineLessonUnlock { TeacherId = template.TeacherId, StudentId = studentId, OnlineLessonId = onlineLessonId });
+
+            foreach (var externalBookId in template.ExternalBookIds)
+                if (existingExternalBookSubs.Add(externalBookId))
+                    db.StudentExternalBookSubscriptions.Add(new StudentExternalBookSubscription { TeacherId = template.TeacherId, StudentId = studentId, ExternalBookId = externalBookId });
+        }
+
+        // NOTE: same "Add() as both membership-test and mark-seen" reasoning
+        // as IssueForExistingAttendeesAsync below -- each template is only
+        // ever visited once in `pending`, so a given (unitId/lecId/etc.) can
+        // only legitimately need to be added once across this whole loop
+        // even when it's shared by more than one template.
+    }
+
+    /// <summary>
     /// Backfills clones of <paramref name="template"/> for every student who
     /// already has an Attendance row for TriggerLectureId as of right now --
     /// i.e. everyone who attended the Center lecture BEFORE this template

@@ -5,6 +5,7 @@ using EduApi.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 
 namespace EduApi.Controllers;
 
@@ -121,10 +122,25 @@ public class AttendanceController : ControllerBase
 
         try
         {
-            await _db.SaveChangesAsync();
+            await SaveChangesWithTransientRetryAsync();
         }
-        catch (DbUpdateException)
+        catch (DbUpdateException ex)
         {
+            if (!IsUniqueConstraintViolation(ex))
+            {
+                // Not a real conflict (a dropped/timed-out connection to
+                // Neon, mid-query, etc.) -- the retry above already tried
+                // once more and still failed, or the failure happened on
+                // the retry itself. Either way nothing was committed
+                // (SaveChangesAsync hadn't succeeded), so this is safe to
+                // surface as a plain server error rather than the
+                // misleading "conflicting update" message, which tells the
+                // teacher this was a race with another write when it
+                // wasn't one.
+                _logger.LogWarning(ex, "Non-conflict DbUpdateException while recording attendance for lecture {LectureId}, student {StudentId}.", lectureId, studentId.Value);
+                return StatusCode(500, new { message = "A server error occurred while saving. Please try again." });
+            }
+
             // Now that Code also has a unique index (SourceCodeTemplateId +
             // UsedByStudentId -- see AppDbContext), a duplicate insert here
             // could be either the Attendance row OR a triggered Code, since
@@ -269,21 +285,33 @@ public class AttendanceController : ControllerBase
 
             try
             {
-                await _db.SaveChangesAsync();
+                await SaveChangesWithTransientRetryAsync();
             }
-            catch (DbUpdateException)
+            catch (DbUpdateException ex)
             {
-                // Almost certainly the unique index catching a genuine race
-                // (e.g. the same student scanned twice in two overlapping
-                // requests, or an offline-sync replay) that slipped past the
-                // AnyAsync check above because it ran concurrently with
-                // another request. Detach everything this iteration added so
-                // the failed insert doesn't get retried (and fail again) on
-                // the next item's SaveChangesAsync call.
+                // Detach everything this iteration added so the failed
+                // insert doesn't get retried (and fail again) on the next
+                // item's SaveChangesAsync call.
                 _db.Entry(attendance).State = EntityState.Detached;
                 foreach (var entry in _db.ChangeTracker.Entries().Where(e => e.State == EntityState.Added).ToList())
                     entry.State = EntityState.Detached;
 
+                if (!IsUniqueConstraintViolation(ex))
+                {
+                    // Same distinction as the single Record endpoint: a
+                    // transient connection/timeout failure isn't a real
+                    // conflict with another write, so don't call it one.
+                    _logger.LogWarning(ex, "Non-conflict DbUpdateException while recording bulk attendance item for lecture {LectureId}, student {StudentId}.", lectureId, studentId.Value);
+                    failed.Add(new { studentId = requestedId, reason = "A server error occurred while saving. Please try again." });
+                    continue;
+                }
+
+                // Almost certainly the unique index catching a genuine race
+                // (e.g. the same student scanned twice in two overlapping
+                // requests, or an offline-sync replay) that slipped past the
+                // AnyAsync check above because it ran concurrently with
+                // another request.
+                //
                 // Now that Code also has its own unique index, don't assume
                 // it was the attendance that collided -- re-check, same
                 // reasoning as the single Record endpoint above.
@@ -368,6 +396,56 @@ public class AttendanceController : ControllerBase
     private Task<int?> ResolveManualStudentIdAsync(string? identifier)
         => Common.StudentIdentifierResolver.ResolveAsync(_db, identifier, ignoreTenantFilter: true);
 
+    // Every DbUpdateException from SaveChangesAsync used to be reported as
+    // the same "conflicting update" 409, whether it was a genuine unique-
+    // index collision (another request wrote the same row first -- a real
+    // conflict, safe to just tell the client to retry) or a transient
+    // failure with no real conflict at all (e.g. Neon dropping/timing out
+    // the connection mid-statement). Those need different handling: a real
+    // conflict is a client-facing 409/400 depending on which row collided;
+    // a transient failure is safe to retry ourselves once (nothing had
+    // committed yet) and, if it still fails, is a genuine 500 -- not a
+    // "someone else changed this at the same time" message that just
+    // confuses the teacher and prompts a same-input retry that will
+    // predictably 400 as "already recorded" or keep failing the same way.
+    private static bool IsUniqueConstraintViolation(DbUpdateException ex)
+        => ex.InnerException is PostgresException pg && pg.SqlState == PostgresErrorCodes.UniqueViolation;
+
+    // Retries SaveChangesAsync itself (not the reads before it) exactly
+    // once when the failure isn't a real unique-index conflict. Safe to
+    // retry: EF hasn't committed anything on a failed SaveChangesAsync, so
+    // replaying the same pending inserts is idempotent from the DB's point
+    // of view (no partial write to duplicate or lose). Real conflicts
+    // (IsUniqueConstraintViolation) are NOT retried here -- they're
+    // meaningful and need the caller's re-check logic, not a blind replay.
+    private async Task SaveChangesWithTransientRetryAsync()
+    {
+        try
+        {
+            await _db.SaveChangesAsync();
+        }
+        catch (DbUpdateException ex) when (!IsUniqueConstraintViolation(ex))
+        {
+            await _db.SaveChangesAsync();
+        }
+    }
+
+    // PERF: this used to call TriggeredCodeIssuer.IssueOneAsync in a loop,
+    // one call per template attached to this lecture -- each call doing its
+    // own already-issued check, unique-code round-trip, and up to four
+    // unlock-existence checks. That's fine when a lecture has exactly one
+    // template, but a Center lecture can have several (e.g. one per
+    // unit/online-lesson it unlocks), and every one of those templates
+    // multiplied the round-trip count on THIS request -- i.e. on every
+    // single scan/manual-entry, not just the one-time backfill. With
+    // several templates on a busy lecture that was enough sequential
+    // round-trips to start colliding with concurrent requests on the
+    // SaveChangesAsync below, surfacing as the "conflicting update" 409.
+    // Now delegates to IssueForAttendeeAsync, which does the same batching
+    // (one preload per unlock type across ALL pending templates) that
+    // IssueForExistingAttendeesAsync already used for the backfill path --
+    // so the round-trip count here stays fixed regardless of how many
+    // templates are attached to the lecture.
     private async Task IssueTriggeredCodesAsync(int lectureId, int studentId)
     {
         var templates = await _db.Codes
@@ -378,11 +456,10 @@ public class AttendanceController : ControllerBase
         // duplicate Attendance rows are even possible, see the 400 check
         // above) or attending a re-created lecture with the same template
         // must never mint a second code for the same student. Enforced
-        // inside IssueOneAsync so this stays identical to the retroactive
-        // backfill path in CodesController.Generate (see
+        // inside IssueForAttendeeAsync so this stays identical to the
+        // retroactive backfill path in CodesController.Generate (see
         // Common.TriggeredCodeIssuer).
-        foreach (var template in templates)
-            await Common.TriggeredCodeIssuer.IssueOneAsync(_db, template, studentId);
+        await Common.TriggeredCodeIssuer.IssueForAttendeeAsync(_db, templates, studentId);
     }
 
     // NOTE: Students carry a tenant-scoped global query filter (visible only
