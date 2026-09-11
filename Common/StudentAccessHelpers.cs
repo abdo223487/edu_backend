@@ -30,4 +30,28 @@ public static class StudentAccessHelpers
         unitIds.UnionWith(liveUnitIds);
         return unitIds;
     }
+
+    /// <summary>
+    /// External Book ids the given student can currently reach: a direct
+    /// redeemed-code subscription, plus any book whose optional UnitId is
+    /// one the student is subscribed to (effective unit ids, JWT snapshot
+    /// unioned with a live read -- see GetEffectiveUnitIdsAsync above).
+    /// Mirrors LecturesController.GetAccessibleExternalBookIdsAsync /
+    /// ExternalBooksController.IsSubscribedAsync so every place that gates
+    /// access on ExternalBookId agrees on the same rule.
+    /// </summary>
+    public static async Task<HashSet<int>> GetEffectiveExternalBookIdsAsync(AppDbContext db, ClaimsPrincipal user, int studentId)
+    {
+        var subscribedUnitIds = await GetEffectiveUnitIdsAsync(db, user, studentId);
+
+        var directIds = await db.StudentExternalBookSubscriptions.AsNoTracking()
+            .Where(s => s.StudentId == studentId).Select(s => s.ExternalBookId).ToListAsync();
+        var viaUnitIds = await db.ExternalBooks.AsNoTracking()
+            .Where(e => e.UnitId != null && subscribedUnitIds.Contains(e.UnitId.Value))
+            .Select(e => e.Id).ToListAsync();
+
+        var result = directIds.ToHashSet();
+        result.UnionWith(viaUnitIds);
+        return result;
+    }
 }

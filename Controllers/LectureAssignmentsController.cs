@@ -60,12 +60,16 @@ public class LectureAssignmentsController : ControllerBase
     {
         var lecture = await _db.Lectures.AsNoTracking()
             .Where(l => l.Id == lectureId)
-            .Select(l => new { l.UnitId, l.OnlineLessonId })
+            .Select(l => new { l.UnitId, l.ExternalBookId, l.OnlineLessonId })
             .FirstOrDefaultAsync();
         if (lecture == null) return false;
 
         if (lecture.UnitId.HasValue)
             return (await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId)).Contains(lecture.UnitId.Value)
+                || await _db.StudentLectureUnlocks.AnyAsync(u => u.StudentId == studentId && u.LectureId == lectureId);
+
+        if (lecture.ExternalBookId.HasValue)
+            return (await Common.StudentAccessHelpers.GetEffectiveExternalBookIdsAsync(_db, User, studentId)).Contains(lecture.ExternalBookId.Value)
                 || await _db.StudentLectureUnlocks.AnyAsync(u => u.StudentId == studentId && u.LectureId == lectureId);
 
         return lecture.OnlineLessonId.HasValue
@@ -80,7 +84,7 @@ public class LectureAssignmentsController : ControllerBase
     {
         var lecture = await _db.Lectures.AsNoTracking()
             .Where(l => l.Id == lectureId)
-            .Select(l => new { l.UnitId, l.OnlineLessonId, l.GroupIdsCsv })
+            .Select(l => new { l.UnitId, l.ExternalBookId, l.OnlineLessonId, l.GroupIdsCsv })
             .FirstOrDefaultAsync();
         if (lecture == null) return new();
 
@@ -91,6 +95,29 @@ public class LectureAssignmentsController : ControllerBase
                 .Select(u => u.StudentId).ToListAsync();
             return await _db.Students.AsNoTracking().Include(s => s.Group)
                 .Where(s => unlockedIds.Contains(s.Id)).ToListAsync();
+        }
+
+        // External-book lectures have no GroupIds concept of their own, so
+        // any student who can reach the book gets the assignment/exam --
+        // direct redeemed-code subscription OR access via the book's linked Unit.
+        if (lecture.ExternalBookId.HasValue)
+        {
+            var bookUnitId = await _db.ExternalBooks.AsNoTracking()
+                .Where(e => e.Id == lecture.ExternalBookId.Value)
+                .Select(e => e.UnitId).FirstOrDefaultAsync();
+
+            var unlockedIds = await _db.StudentLectureUnlocks.AsNoTracking()
+                .Where(u => u.LectureId == lectureId).Select(u => u.StudentId).ToListAsync();
+            var directBookIds = await _db.StudentExternalBookSubscriptions.AsNoTracking()
+                .Where(s => s.ExternalBookId == lecture.ExternalBookId.Value)
+                .Select(s => s.StudentId).ToListAsync();
+
+            return await _db.Students.AsNoTracking().Include(s => s.Group)
+                .Where(s =>
+                    unlockedIds.Contains(s.Id) ||
+                    directBookIds.Contains(s.Id) ||
+                    (bookUnitId != null && s.UnitSubscriptions.Any(x => x.UnitId == bookUnitId.Value)))
+                .ToListAsync();
         }
 
         var lectureGroupIds = string.IsNullOrEmpty(lecture.GroupIdsCsv)
@@ -126,11 +153,17 @@ public class LectureAssignmentsController : ControllerBase
             .Select(u => u.OnlineLessonId)
             .ToListAsync();
 
+        // Same "direct code subscription OR access via the book's linked
+        // Unit" rule as ExternalBooksController.IsSubscribedAsync.
+        var accessibleBookIds = (await Common.StudentAccessHelpers
+            .GetEffectiveExternalBookIdsAsync(_db, User, studentId)).ToList();
+
         return await _db.Lectures.AsNoTracking()
             .Where(l =>
                 (l.UnitId != null && subscribedUnitIds.Contains(l.UnitId.Value)) ||
                 directlyUnlockedLectureIds.Contains(l.Id) ||
-                (l.OnlineLessonId != null && unlockedOnlineLessonIds.Contains(l.OnlineLessonId.Value)))
+                (l.OnlineLessonId != null && unlockedOnlineLessonIds.Contains(l.OnlineLessonId.Value)) ||
+                (l.ExternalBookId != null && accessibleBookIds.Contains(l.ExternalBookId.Value)))
             .Select(l => l.Id)
             .ToListAsync();
     }
