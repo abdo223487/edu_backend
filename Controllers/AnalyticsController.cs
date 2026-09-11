@@ -167,8 +167,36 @@ public class AnalyticsController : ControllerBase
     public async Task<IActionResult> GetTopStudents(
         [FromQuery] int? groupId = null, [FromQuery] int? schoolYear = null, [FromQuery] bool byYear = false)
     {
-        // Priority: explicit groupId > explicit schoolYear/byYear > student's own group from JWT.
-        var effectiveGroupId = groupId ?? (User.IsInRole(Roles.Student) ? User.GetGroupId(_tenant.CurrentTenantId) : null);
+        // BUGFIX: this used to compute effectiveGroupId FIRST from the
+        // caller's own JWT group whenever they're a Student with no
+        // explicit groupId -- which is true on every student "top-students?
+        // byYear=true" call too, since the client never sends its own
+        // groupId. That made the group-scoped branch win unconditionally
+        // for a student, byYear was never even read, and a student's
+        // "top of my year" screen silently showed the exact same list as
+        // "top of my group". Priority is now: explicit groupId > byYear
+        // (explicit schoolYear, or the caller's own school year when
+        // they're a Student) > the caller's own group from JWT -- same
+        // shape GetMyRank below already uses correctly.
+        int? effectiveGroupId = groupId;
+        int? effectiveSchoolYear = null;
+
+        if (!effectiveGroupId.HasValue)
+        {
+            if (byYear)
+            {
+                effectiveSchoolYear = schoolYear ?? (User.IsInRole(Roles.Student)
+                    ? await _db.Students.AsNoTracking()
+                        .Where(s => s.Id == User.GetUserId())
+                        .Select(s => (int?)s.SchoolYear)
+                        .FirstOrDefaultAsync()
+                    : null);
+            }
+            else
+            {
+                effectiveGroupId = User.IsInRole(Roles.Student) ? User.GetGroupId(_tenant.CurrentTenantId) : null;
+            }
+        }
 
         // Scope the student pool FIRST (by group / school year), then rank
         // within that scope. Ranking globally and only filtering afterwards
@@ -176,7 +204,7 @@ public class AnalyticsController : ControllerBase
         // empty unless one of the world's top-5 scorers happened to be in it.
         var scopedStudentsQuery = _db.Students.AsNoTracking().AsQueryable();
         if (effectiveGroupId.HasValue) scopedStudentsQuery = scopedStudentsQuery.Where(s => s.GroupMemberships.Any(m => m.GroupId == effectiveGroupId.Value));
-        else if (schoolYear.HasValue) scopedStudentsQuery = scopedStudentsQuery.Where(s => s.SchoolYear == schoolYear.Value);
+        else if (effectiveSchoolYear.HasValue) scopedStudentsQuery = scopedStudentsQuery.Where(s => s.SchoolYear == effectiveSchoolYear.Value);
 
         var scopedStudentIds = await scopedStudentsQuery.Select(s => s.Id).ToListAsync();
 
