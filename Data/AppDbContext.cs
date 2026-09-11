@@ -60,6 +60,8 @@ public class AppDbContext : DbContext
     public DbSet<LectureAssignmentQuestion> LectureAssignmentQuestions => Set<LectureAssignmentQuestion>();
     public DbSet<LectureAssignmentResult> LectureAssignmentResults => Set<LectureAssignmentResult>();
     public DbSet<LectureAssignmentAnswer> LectureAssignmentAnswers => Set<LectureAssignmentAnswer>();
+    public DbSet<LectureExamStudentOverride> LectureExamStudentOverrides => Set<LectureExamStudentOverride>();
+    public DbSet<LectureAssignmentStudentOverride> LectureAssignmentStudentOverrides => Set<LectureAssignmentStudentOverride>();
     public DbSet<Assignment> Assignments => Set<Assignment>();
     public DbSet<AssignmentQuestion> AssignmentQuestions => Set<AssignmentQuestion>();
     public DbSet<AssignmentSubmission> AssignmentSubmissions => Set<AssignmentSubmission>();
@@ -227,6 +229,8 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<LectureExamStudentStart>().HasQueryFilter(ls => ls.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<LectureAssignment>().HasQueryFilter(la => la.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<LectureAssignmentResult>().HasQueryFilter(lar => lar.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<LectureExamStudentOverride>().HasQueryFilter(o => o.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<LectureAssignmentStudentOverride>().HasQueryFilter(o => o.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<CenterQuizResult>().HasQueryFilter(cr => cr.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<HomeworkResult>().HasQueryFilter(hr => hr.TeacherId == _tenant.CurrentTenantId);
 
@@ -265,6 +269,11 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<LectureAssignmentResult>().HasIndex(lar => lar.TeacherId);
         modelBuilder.Entity<LectureAssignment>().HasIndex(la => la.TeacherId);
         modelBuilder.Entity<LectureAssignment>().HasIndex(la => la.LectureId);
+        // At most one override row per (lectureExam/lectureAssignment, student) — same shape/reason as QuizStudentOverride above.
+        modelBuilder.Entity<LectureExamStudentOverride>().HasIndex(o => new { o.LectureExamId, o.StudentId }).IsUnique();
+        modelBuilder.Entity<LectureExamStudentOverride>().HasIndex(o => o.TeacherId);
+        modelBuilder.Entity<LectureAssignmentStudentOverride>().HasIndex(o => new { o.LectureAssignmentId, o.StudentId }).IsUnique();
+        modelBuilder.Entity<LectureAssignmentStudentOverride>().HasIndex(o => o.TeacherId);
         modelBuilder.Entity<CenterQuizResult>().HasIndex(cr => new { cr.TeacherId, cr.StudentId });
         modelBuilder.Entity<HomeworkResult>().HasIndex(hr => new { hr.TeacherId, hr.StudentId });
 

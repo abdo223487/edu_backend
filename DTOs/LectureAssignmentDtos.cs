@@ -15,3 +15,24 @@ public record EditLectureAssignmentQuestionRequest(int LectureAssignmentId, int 
 // assignment doesn't have any of them (see LectureAssignment in
 // Models/Entities.cs). Title is the only thing that can change.
 public record EditLectureAssignmentRequest(int LectureAssignmentId, string Title);
+
+// GET LectureAssignments?studentId=..&p=.. — one item per LectureAssignment
+// attached to any lecture the given student can reach, teacher-facing list
+// used by TeacherStudentAssignmentsPage's "واجبات الحصص" tab. Same field
+// naming as LectureExamListItem, minus timing.
+public record LectureAssignmentListItem(
+    int Id,
+    string Title,
+    int LectureId,
+    string LectureTitle,
+    bool IsTaken,
+    int? Score,
+    int? TotalMarks,
+    bool ReopenActive,
+    bool ForceReviewGranted);
+
+// POST LectureAssignments/force-review — same idea as ForceAssignmentReviewRequest.
+public record ForceLectureAssignmentReviewRequest(int LectureAssignmentId, int StudentId);
+
+// POST LectureAssignments/reopen — same idea as ReopenAssignmentRequest.
+public record ReopenLectureAssignmentRequest(int LectureAssignmentId, int StudentId, int Minutes);

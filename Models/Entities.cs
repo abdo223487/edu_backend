@@ -1248,6 +1248,54 @@ public class LectureAssignmentAnswer
 }
 
 /// <summary>
+/// Same idea as QuizStudentOverride, for LectureExams (the per-lecture exam
+/// kind, see LectureExam) — created from the teacher's "امتحانات الحصص"
+/// quick action on a student's own details page (see
+/// LectureExamsController.ForceReview / .Reopen). At most one row per
+/// (LectureExamId, StudentId) — see AppDbContext's unique index.
+///
+/// A LectureExam's timing is personal (LectureExamStudentStart +
+/// DurationInMinutes) instead of a shared Deadline, so ReopenExpiresAt here
+/// means something slightly different than it does for a Quiz: while an
+/// active reopen window exists, it IS the hard cutoff for this student's
+/// attempt — the exam's own DurationInMinutes/personal-start-row logic is
+/// bypassed entirely for as long as the window lasts (see
+/// LectureExamsController.GetAsStudent).
+/// </summary>
+public class LectureExamStudentOverride
+{
+    public int Id { get; set; }
+    public int LectureExamId { get; set; }
+    public int StudentId { get; set; }
+
+    /// <summary>TENANT LAYER: copied from the parent LectureExam at creation time.</summary>
+    public int TeacherId { get; set; }
+
+    public bool ForceReview { get; set; } = false;
+    public DateTime? ReopenExpiresAt { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>
+/// Same idea as AssignmentStudentOverride, for LectureAssignments — see
+/// LectureAssignmentsController.ForceReview / .Reopen. At most one row per
+/// (LectureAssignmentId, StudentId) — see AppDbContext's unique index.
+/// </summary>
+public class LectureAssignmentStudentOverride
+{
+    public int Id { get; set; }
+    public int LectureAssignmentId { get; set; }
+    public int StudentId { get; set; }
+
+    /// <summary>TENANT LAYER: copied from the parent LectureAssignment at creation time.</summary>
+    public int TeacherId { get; set; }
+
+    public bool ForceReview { get; set; } = false;
+    public DateTime? ReopenExpiresAt { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>
 /// A per-student teacher override for one Quiz, created from the teacher's
 /// "Exams" quick action on a student's own details page (see
 /// QuizzesController.ForceReview / .Reopen). At most one row per

@@ -108,6 +108,162 @@ public class LectureAssignmentsController : ControllerBase
             .ToListAsync();
     }
 
+    // Field-for-field copy of LectureExamsController.GetAccessibleLectureIdsForStudentAsync.
+    private async Task<List<int>> GetAccessibleLectureIdsForStudentAsync(int studentId)
+    {
+        var subscribedUnitIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+            .Where(su => su.StudentId == studentId)
+            .Select(su => su.UnitId)
+            .ToListAsync();
+
+        var directlyUnlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
+            .Where(u => u.StudentId == studentId)
+            .Select(u => u.LectureId)
+            .ToListAsync();
+
+        var unlockedOnlineLessonIds = await _db.StudentOnlineLessonUnlocks.AsNoTracking()
+            .Where(u => u.StudentId == studentId)
+            .Select(u => u.OnlineLessonId)
+            .ToListAsync();
+
+        return await _db.Lectures.AsNoTracking()
+            .Where(l =>
+                (l.UnitId != null && subscribedUnitIds.Contains(l.UnitId.Value)) ||
+                directlyUnlockedLectureIds.Contains(l.Id) ||
+                (l.OnlineLessonId != null && unlockedOnlineLessonIds.Contains(l.OnlineLessonId.Value)))
+            .Select(l => l.Id)
+            .ToListAsync();
+    }
+
+    // GET LectureAssignments?studentId=..&p=.. — teacher viewing a specific
+    // student's lecture-assignment list, feeding TeacherStudentAssignmentsPage's
+    // "واجبات الحصص" tab. Same idea as LectureExamsController.GetAll.
+    [HttpGet]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> GetAll([FromQuery] int studentId, [FromQuery] int p = 1)
+    {
+        var accessibleLectureIds = await GetAccessibleLectureIdsForStudentAsync(studentId);
+
+        var assignments = await _db.LectureAssignments.AsNoTracking()
+            .Where(a => accessibleLectureIds.Contains(a.LectureId))
+            .OrderByDescending(a => a.Id)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
+            .ToListAsync();
+
+        var assignmentIds = assignments.Select(a => a.Id).ToList();
+        var lectureIds = assignments.Select(a => a.LectureId).Distinct().ToList();
+
+        var lectureNamesById = await _db.Lectures.AsNoTracking()
+            .Where(l => lectureIds.Contains(l.Id))
+            .ToDictionaryAsync(l => l.Id, l => l.Name);
+
+        var resultsByAssignment = await _db.LectureAssignmentResults.AsNoTracking()
+            .Where(r => assignmentIds.Contains(r.LectureAssignmentId) && r.StudentId == studentId)
+            .ToDictionaryAsync(r => r.LectureAssignmentId, r => r);
+
+        var overridesByAssignment = await _db.LectureAssignmentStudentOverrides.AsNoTracking()
+            .Where(o => o.StudentId == studentId && assignmentIds.Contains(o.LectureAssignmentId))
+            .ToDictionaryAsync(o => o.LectureAssignmentId);
+
+        var nowUtc = DateTime.UtcNow;
+
+        var items = assignments.Select(a =>
+        {
+            overridesByAssignment.TryGetValue(a.Id, out var ov);
+            var reopenActive = ov?.ReopenExpiresAt != null && ov.ReopenExpiresAt.Value > nowUtc;
+            var result = resultsByAssignment.TryGetValue(a.Id, out var r) ? r : null;
+
+            return new LectureAssignmentListItem(
+                a.Id,
+                a.Title,
+                a.LectureId,
+                lectureNamesById.TryGetValue(a.LectureId, out var name) ? name : "",
+                result != null,
+                result?.Score,
+                result?.TotalMarks,
+                reopenActive,
+                ov?.ForceReview == true);
+        });
+
+        return Ok(items);
+    }
+
+    // Teacher-only — same idea as AssignmentsController.ForceReview, from a
+    // student's "واجبات الحصص" quick action list.
+    [HttpPost("force-review")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> ForceReview([FromBody] ForceLectureAssignmentReviewRequest request)
+    {
+        var assignment = await _db.LectureAssignments.AsNoTracking().FirstOrDefaultAsync(a => a.Id == request.LectureAssignmentId);
+        if (assignment == null) return NotFound(new { message = "Lecture assignment not found." });
+
+        var alreadySubmitted = await _db.LectureAssignmentResults
+            .AnyAsync(r => r.LectureAssignmentId == request.LectureAssignmentId && r.StudentId == request.StudentId);
+        if (alreadySubmitted)
+            return Conflict(new { message = "الطالب سلّم الواجب بالفعل." });
+
+        var overrideRow = await _db.LectureAssignmentStudentOverrides
+            .FirstOrDefaultAsync(o => o.LectureAssignmentId == request.LectureAssignmentId && o.StudentId == request.StudentId);
+        if (overrideRow == null)
+        {
+            overrideRow = new LectureAssignmentStudentOverride
+            {
+                LectureAssignmentId = request.LectureAssignmentId,
+                StudentId = request.StudentId,
+                TeacherId = assignment.TeacherId
+            };
+            _db.LectureAssignmentStudentOverrides.Add(overrideRow);
+        }
+
+        overrideRow.ForceReview = true;
+        overrideRow.ReopenExpiresAt = null;
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "تم فتح الواجب للطالب كمراجعة." });
+    }
+
+    // Teacher-only — same idea as AssignmentsController.Reopen. Wipes any
+    // prior submission so the student gets a genuinely clean re-attempt.
+    // ReopenExpiresAt here is mostly informational (a LectureAssignment has
+    // no deadline to bypass) but is still honored by GetAsStudent/Grade so
+    // the "متاح له إعادة فتح شغالة دلوقتي" banner and the takers list stay
+    // consistent with Quizzes/Assignments.
+    [HttpPost("reopen")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> Reopen([FromBody] ReopenLectureAssignmentRequest request)
+    {
+        if (request.Minutes <= 0)
+            return BadRequest(new { message = "عدد الدقايق لازم يكون أكبر من صفر." });
+
+        var assignment = await _db.LectureAssignments.AsNoTracking().FirstOrDefaultAsync(a => a.Id == request.LectureAssignmentId);
+        if (assignment == null) return NotFound(new { message = "Lecture assignment not found." });
+
+        var priorResults = await _db.LectureAssignmentResults
+            .Where(r => r.LectureAssignmentId == request.LectureAssignmentId && r.StudentId == request.StudentId)
+            .ToListAsync();
+        if (priorResults.Count > 0) _db.LectureAssignmentResults.RemoveRange(priorResults);
+
+        var overrideRow = await _db.LectureAssignmentStudentOverrides
+            .FirstOrDefaultAsync(o => o.LectureAssignmentId == request.LectureAssignmentId && o.StudentId == request.StudentId);
+        if (overrideRow == null)
+        {
+            overrideRow = new LectureAssignmentStudentOverride
+            {
+                LectureAssignmentId = request.LectureAssignmentId,
+                StudentId = request.StudentId,
+                TeacherId = assignment.TeacherId
+            };
+            _db.LectureAssignmentStudentOverrides.Add(overrideRow);
+        }
+
+        overrideRow.ForceReview = false;
+        overrideRow.ReopenExpiresAt = DateTime.UtcNow.AddMinutes(request.Minutes);
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "تم إعادة فتح الواجب للطالب.", reopenExpiresAt = overrideRow.ReopenExpiresAt });
+    }
+
     // Used by the video player: "does this lecture have assignment(s)
     // attached, and (for a student) have I submitted each one?" Returns 200
     // with data:[] when the lecture simply has none, so the client can
@@ -250,6 +406,39 @@ public class LectureAssignmentsController : ControllerBase
 
         var priorResult = await _db.LectureAssignmentResults.Include(r => r.Answers)
             .FirstOrDefaultAsync(r => r.LectureAssignmentId == lectureAssignmentId && r.StudentId == studentId);
+
+        // TEACHER OVERRIDE: the teacher used "افتح كمراجعة" on this
+        // student's lecture-assignment list (see ForceReview above). Drop
+        // them into review mode right now with an auto-zero result, exactly
+        // like AssignmentsController/QuizzesController's ForceReview path —
+        // a reopen (see Reopen above) needs no special handling here since
+        // it already wiped the prior result, so the student simply lands
+        // back in the normal "hasn't submitted yet" branch below.
+        if (priorResult == null)
+        {
+            var overrideRow = await _db.LectureAssignmentStudentOverrides
+                .FirstOrDefaultAsync(o => o.LectureAssignmentId == lectureAssignmentId && o.StudentId == studentId);
+
+            if (overrideRow?.ForceReview == true)
+            {
+                var totalMarks = assignment.Questions.Sum(q => q.Mark);
+                var forcedReview = new LectureAssignmentResult
+                {
+                    LectureAssignmentId = assignment.Id,
+                    StudentId = studentId,
+                    TotalMarks = totalMarks,
+                    Score = 0,
+                    TeacherId = assignment.TeacherId
+                };
+                foreach (var q in assignment.Questions)
+                    forcedReview.Answers.Add(new LectureAssignmentAnswer { QuestionId = q.Id, Answer = "", MarkAwarded = 0 });
+
+                _db.LectureAssignmentResults.Add(forcedReview);
+                await _db.SaveChangesAsync();
+
+                priorResult = forcedReview;
+            }
+        }
 
         var reviewMode = priorResult != null;
         if (reviewMode) Response.Headers["x-redirected-to"] = "review";

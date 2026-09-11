@@ -124,6 +124,177 @@ public class LectureExamsController : ControllerBase
             .ToListAsync();
     }
 
+    // Every lecture a given student can currently reach, computed the same
+    // way GetEligibleStudentsForLectureAsync checks it in reverse (per
+    // lecture -> which students), just keyed on one student -> which
+    // lectures. Used by GetAll's studentId branch below, since a
+    // LectureExam has no GroupIds/UnitIds of its own to query directly.
+    private async Task<List<int>> GetAccessibleLectureIdsForStudentAsync(int studentId)
+    {
+        var subscribedUnitIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+            .Where(su => su.StudentId == studentId)
+            .Select(su => su.UnitId)
+            .ToListAsync();
+
+        var directlyUnlockedLectureIds = await _db.StudentLectureUnlocks.AsNoTracking()
+            .Where(u => u.StudentId == studentId)
+            .Select(u => u.LectureId)
+            .ToListAsync();
+
+        var unlockedOnlineLessonIds = await _db.StudentOnlineLessonUnlocks.AsNoTracking()
+            .Where(u => u.StudentId == studentId)
+            .Select(u => u.OnlineLessonId)
+            .ToListAsync();
+
+        return await _db.Lectures.AsNoTracking()
+            .Where(l =>
+                (l.UnitId != null && subscribedUnitIds.Contains(l.UnitId.Value)) ||
+                directlyUnlockedLectureIds.Contains(l.Id) ||
+                (l.OnlineLessonId != null && unlockedOnlineLessonIds.Contains(l.OnlineLessonId.Value)))
+            .Select(l => l.Id)
+            .ToListAsync();
+    }
+
+    // GET LectureExams?studentId=..&p=.. — teacher viewing a specific
+    // student's lecture-exam list, same idea/paging as
+    // QuizzesController.GetAll's studentId branch, feeding
+    // TeacherStudentExamsPage's "امتحانات الحصص" tab. Every LectureExam
+    // attached to any lecture this student can reach, newest first, with
+    // this student's own take/override status on each — including the
+    // force-review/reopen actions below.
+    [HttpGet]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> GetAll([FromQuery] int studentId, [FromQuery] int p = 1)
+    {
+        var accessibleLectureIds = await GetAccessibleLectureIdsForStudentAsync(studentId);
+
+        var exams = await _db.LectureExams.AsNoTracking()
+            .Where(e => accessibleLectureIds.Contains(e.LectureId))
+            .OrderByDescending(e => e.Id)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
+            .ToListAsync();
+
+        var examIds = exams.Select(e => e.Id).ToList();
+        var lectureIds = exams.Select(e => e.LectureId).Distinct().ToList();
+
+        var lectureNamesById = await _db.Lectures.AsNoTracking()
+            .Where(l => lectureIds.Contains(l.Id))
+            .ToDictionaryAsync(l => l.Id, l => l.Name);
+
+        var resultsByExam = await _db.LectureExamResults.AsNoTracking()
+            .Where(r => examIds.Contains(r.LectureExamId) && r.StudentId == studentId)
+            .ToDictionaryAsync(r => r.LectureExamId, r => r);
+
+        var overridesByExam = await _db.LectureExamStudentOverrides.AsNoTracking()
+            .Where(o => o.StudentId == studentId && examIds.Contains(o.LectureExamId))
+            .ToDictionaryAsync(o => o.LectureExamId);
+
+        var nowUtc = DateTime.UtcNow;
+
+        var items = exams.Select(e =>
+        {
+            overridesByExam.TryGetValue(e.Id, out var ov);
+            var reopenActive = ov?.ReopenExpiresAt != null && ov.ReopenExpiresAt.Value > nowUtc;
+            var result = resultsByExam.TryGetValue(e.Id, out var r) ? r : null;
+
+            return new LectureExamListItem(
+                e.Id,
+                e.Title,
+                e.LectureId,
+                lectureNamesById.TryGetValue(e.LectureId, out var name) ? name : "",
+                result != null,
+                result?.Score,
+                result?.TotalMarks,
+                reopenActive,
+                ov?.ForceReview == true);
+        });
+
+        return Ok(items);
+    }
+
+    // Teacher-only — same idea as QuizzesController.ForceReview, from a
+    // student's "امتحانات الحصص" quick action list. See
+    // LectureExamStudentOverride for the full explanation. Drops the
+    // student straight into review mode the NEXT time they open this exam,
+    // regardless of whether their personal window has started/expired.
+    [HttpPost("force-review")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> ForceReview([FromBody] ForceLectureExamReviewRequest request)
+    {
+        var exam = await _db.LectureExams.AsNoTracking().FirstOrDefaultAsync(e => e.Id == request.LectureExamId);
+        if (exam == null) return NotFound(new { message = "Lecture exam not found." });
+
+        var alreadyTaken = await _db.LectureExamResults
+            .AnyAsync(r => r.LectureExamId == request.LectureExamId && r.StudentId == request.StudentId);
+        if (alreadyTaken)
+            return Conflict(new { message = "الطالب سلّم الامتحان بالفعل." });
+
+        var overrideRow = await _db.LectureExamStudentOverrides
+            .FirstOrDefaultAsync(o => o.LectureExamId == request.LectureExamId && o.StudentId == request.StudentId);
+        if (overrideRow == null)
+        {
+            overrideRow = new LectureExamStudentOverride
+            {
+                LectureExamId = request.LectureExamId,
+                StudentId = request.StudentId,
+                TeacherId = exam.TeacherId
+            };
+            _db.LectureExamStudentOverrides.Add(overrideRow);
+        }
+
+        overrideRow.ForceReview = true;
+        overrideRow.ReopenExpiresAt = null;
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "تم فتح الامتحان للطالب كمراجعة." });
+    }
+
+    // Teacher-only — same idea as QuizzesController.Reopen. Wipes any prior
+    // start row/result for this student so the reopened attempt is
+    // genuinely clean, and grants a fresh window that lasts exactly
+    // `Minutes` from now — bypassing the exam's own DurationInMinutes for
+    // the duration of the window (see GetAsStudent below).
+    [HttpPost("reopen")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> Reopen([FromBody] ReopenLectureExamRequest request)
+    {
+        if (request.Minutes <= 0)
+            return BadRequest(new { message = "عدد الدقايق لازم يكون أكبر من صفر." });
+
+        var exam = await _db.LectureExams.AsNoTracking().FirstOrDefaultAsync(e => e.Id == request.LectureExamId);
+        if (exam == null) return NotFound(new { message = "Lecture exam not found." });
+
+        var priorResults = await _db.LectureExamResults
+            .Where(r => r.LectureExamId == request.LectureExamId && r.StudentId == request.StudentId)
+            .ToListAsync();
+        if (priorResults.Count > 0) _db.LectureExamResults.RemoveRange(priorResults);
+
+        var priorStarts = await _db.LectureExamStudentStarts
+            .Where(s => s.LectureExamId == request.LectureExamId && s.StudentId == request.StudentId)
+            .ToListAsync();
+        if (priorStarts.Count > 0) _db.LectureExamStudentStarts.RemoveRange(priorStarts);
+
+        var overrideRow = await _db.LectureExamStudentOverrides
+            .FirstOrDefaultAsync(o => o.LectureExamId == request.LectureExamId && o.StudentId == request.StudentId);
+        if (overrideRow == null)
+        {
+            overrideRow = new LectureExamStudentOverride
+            {
+                LectureExamId = request.LectureExamId,
+                StudentId = request.StudentId,
+                TeacherId = exam.TeacherId
+            };
+            _db.LectureExamStudentOverrides.Add(overrideRow);
+        }
+
+        overrideRow.ForceReview = false;
+        overrideRow.ReopenExpiresAt = DateTime.UtcNow.AddMinutes(request.Minutes);
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "تم إعادة فتح الامتحان للطالب.", reopenExpiresAt = overrideRow.ReopenExpiresAt });
+    }
+
     // Get-or-lazily-create this student's personal start row. In normal use
     // this always succeeds and just returns the (possibly brand new) row.
     private async Task<LectureExamStudentStart> GetOrCreateStartAsync(LectureExam exam, int studentId)
@@ -342,7 +513,44 @@ public class LectureExamsController : ControllerBase
         var priorResult = await _db.LectureExamResults.Include(r => r.Answers)
             .FirstOrDefaultAsync(r => r.LectureExamId == lectureExamId && r.StudentId == studentId);
 
-        if (priorResult == null)
+        var overrideRow = await _db.LectureExamStudentOverrides
+            .FirstOrDefaultAsync(o => o.LectureExamId == lectureExamId && o.StudentId == studentId);
+        var hasActiveReopen = overrideRow?.ReopenExpiresAt != null && overrideRow.ReopenExpiresAt.Value > DateTime.UtcNow;
+
+        // TEACHER OVERRIDE: the teacher used "افتح كمراجعة" on this
+        // student's lecture-exam list (see ForceReview above). Drop them
+        // into review mode right now with an auto-zero result, regardless
+        // of their personal window.
+        if (priorResult == null && overrideRow?.ForceReview == true)
+        {
+            var totalMarks = exam.Questions.Sum(q => q.Mark);
+            var forcedReview = new LectureExamResult
+            {
+                LectureExamId = exam.Id,
+                StudentId = studentId,
+                TotalMarks = totalMarks,
+                Score = 0,
+                TeacherId = exam.TeacherId
+            };
+            foreach (var q in exam.Questions)
+                forcedReview.Answers.Add(new LectureExamAnswer { QuestionId = q.Id, Answer = "", MarkAwarded = 0 });
+
+            _db.LectureExamResults.Add(forcedReview);
+            await _db.SaveChangesAsync();
+
+            priorResult = forcedReview;
+        }
+        // TEACHER OVERRIDE: an active reopen window (see Reopen above) --
+        // Reopen already wiped any prior start row, so this is a genuinely
+        // fresh attempt. The window's own expiry IS the hard cutoff for
+        // this attempt; the exam's own DurationInMinutes/personal-start-row
+        // logic below is skipped entirely while the window is active.
+        else if (priorResult == null && hasActiveReopen)
+        {
+            // Nothing to do here -- fall through to the fresh-questions
+            // response below. Grade() enforces the ReopenExpiresAt cutoff.
+        }
+        else if (priorResult == null)
         {
             // First time opening it (or re-opening before submitting) --
             // this is exactly what starts/continues this student's personal
@@ -412,18 +620,29 @@ public class LectureExamsController : ControllerBase
         if (alreadySubmitted)
             return Conflict(new { message = "تم تسليم هذا الامتحان من قبل." });
 
-        // Must have opened it through GetAsStudent first (that's what
-        // starts the personal clock) -- a direct grade POST with no start
-        // row is treated as "too late to even start", same spirit as
-        // QuizzesController's Deadline check.
-        var start = await _db.LectureExamStudentStarts
-            .FirstOrDefaultAsync(s => s.LectureExamId == exam.Id && s.StudentId == studentId);
-        if (start == null)
-            return StatusCode(410, new { message = "انتهى وقت الامتحان." });
+        // TEACHER OVERRIDE: an active reopen window (see Reopen in this
+        // controller) bypasses the personal-start-row/DurationInMinutes
+        // check entirely below -- the window's own expiry is the only
+        // cutoff that matters while it's active.
+        var overrideRow = await _db.LectureExamStudentOverrides
+            .FirstOrDefaultAsync(o => o.LectureExamId == exam.Id && o.StudentId == studentId);
+        var hasActiveReopen = overrideRow?.ReopenExpiresAt != null && overrideRow.ReopenExpiresAt.Value > DateTime.UtcNow;
 
-        var personalDeadline = start.StartedAt.AddMinutes(exam.DurationInMinutes);
-        if (DateTime.UtcNow > personalDeadline)
-            return StatusCode(410, new { message = "انتهى وقت الامتحان." });
+        if (!hasActiveReopen)
+        {
+            // Must have opened it through GetAsStudent first (that's what
+            // starts the personal clock) -- a direct grade POST with no start
+            // row is treated as "too late to even start", same spirit as
+            // QuizzesController's Deadline check.
+            var start = await _db.LectureExamStudentStarts
+                .FirstOrDefaultAsync(s => s.LectureExamId == exam.Id && s.StudentId == studentId);
+            if (start == null)
+                return StatusCode(410, new { message = "انتهى وقت الامتحان." });
+
+            var personalDeadline = start.StartedAt.AddMinutes(exam.DurationInMinutes);
+            if (DateTime.UtcNow > personalDeadline)
+                return StatusCode(410, new { message = "انتهى وقت الامتحان." });
+        }
 
         var totalMarks = exam.Questions.Sum(q => q.Mark);
         var score = 0;
