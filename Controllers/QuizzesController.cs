@@ -701,10 +701,10 @@ public class QuizzesController : ControllerBase
     }
 
     // Lets a teacher fix the exam's own basic info (name/late-review policy)
-    // after creation — separate from edit-question above, which only touches
-    // individual questions. Deliberately does NOT let group/unit/StartAt/
-    // Deadline be changed here, since those affect who the exam is even
-    // visible to and interact with already-in-progress attempts.
+    // plus its StartAt/Deadline window after creation — separate from
+    // edit-question above, which only touches individual questions.
+    // Deliberately still does NOT let group/unit be changed here, since
+    // those affect who the exam is even visible to.
     [HttpPost("edit")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> EditQuiz([FromBody] EditQuizRequest request)
@@ -714,9 +714,13 @@ public class QuizzesController : ControllerBase
 
         if (string.IsNullOrWhiteSpace(request.Title))
             return BadRequest(new { message = "اسم الامتحان مطلوب." });
+        if (request.Deadline <= request.StartAt)
+            return BadRequest(new { message = "وقت النهاية لازم يكون بعد وقت البداية." });
 
         quiz.Title = request.Title;
         quiz.AllowLateReview = request.AllowLateReview;
+        quiz.StartAt = request.StartAt;
+        quiz.Deadline = request.Deadline;
 
         await _db.SaveChangesAsync();
 

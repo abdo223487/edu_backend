@@ -35,12 +35,11 @@ public record ChangeAnswerMarkRequest(int QuizId, int StudentId, int QuestionId,
 public record EditQuestionRequest(int QuizId, int QuestionId, string Text, int Mark, List<string>? Choices, string Answer);
 
 // POST Quizzes/edit
-// body: { "quizId": int, "title": "...", "allowLateReview": bool }
-// Lets a teacher fix the exam's own basic info (name/late-review policy)
-// after creation, without touching its questions/groups/unit. Deliberately
-// does NOT let StartAt/Deadline be changed here either (same reasoning as
-// group/unit -- see EditQuiz).
-public record EditQuizRequest(int QuizId, string Title, bool AllowLateReview);
+// body: { "quizId": int, "title": "...", "allowLateReview": bool, "startAt": "...", "deadline": "..." }
+// Lets a teacher fix the exam's own basic info (name/late-review policy),
+// plus its StartAt/Deadline window, after creation -- without touching its
+// questions/groups/unit.
+public record EditQuizRequest(int QuizId, string Title, bool AllowLateReview, DateTime StartAt, DateTime Deadline);
 
 // Field names match Takers.dart's expected JSON exactly: quizMark (not
 // "score"), totalQuizMarks (not "totalMarks"), date, groupName.

@@ -99,6 +99,26 @@ public class AssignmentCenterAnswer
     public int? MarkAwarded { get; set; }
 }
 
+/// <summary>
+/// Per-student teacher override for an AssignmentCenter -- same shape/idea
+/// as AssignmentStudentOverride, letting a teacher grant one specific
+/// student either a forced-review peek or a fresh reopen window without
+/// touching the assignment-center's own shared Deadline.
+/// </summary>
+public class AssignmentCenterStudentOverride
+{
+    public int Id { get; set; }
+    public int AssignmentCenterId { get; set; }
+    public int StudentId { get; set; }
+
+    /// <summary>TENANT LAYER: copied from the parent AssignmentCenter at creation time.</summary>
+    public int TeacherId { get; set; }
+
+    public bool ForceReview { get; set; } = false;
+    public DateTime? ReopenExpiresAt { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 /// <summary>The 4 fixed bubble letters, shared by teacher (create) and student (answer) sides.</summary>
 public static class AssignmentCenterChoices
 {

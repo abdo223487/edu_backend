@@ -48,22 +48,48 @@ public class AssignmentCentersController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? unitId, [FromQuery] int p = 1)
+    public async Task<IActionResult> GetAll([FromQuery] int? schoolYear, [FromQuery] int? unitId, [FromQuery] int? studentId, [FromQuery] int p = 1)
     {
         var query = _db.AssignmentCenters.AsNoTracking().AsQueryable();
-        int? studentId = null;
+        int? effectiveStudentId = null;
 
         if (User.IsInRole(Roles.Student))
         {
-            studentId = User.GetUserId();
+            effectiveStudentId = User.GetUserId();
 
             var groupId = User.GetGroupId(_tenant.CurrentTenantId);
             if (groupId.HasValue) query = query.Where(a => _db.AssignmentCenterGroupLinks.Any(x => x.AssignmentCenterId == a.Id && x.GroupId == groupId.Value));
 
             // Merge JWT snapshot with live subscriptions so a teacher's fresh
             // subscribe shows up immediately, not just after re-login.
-            var subscribedIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId.Value);
+            var subscribedIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, effectiveStudentId.Value);
             query = query.Where(a => _db.AssignmentCenterUnitLinks.Any(x => x.AssignmentCenterId == a.Id && subscribedIds.Contains(x.UnitId)));
+        }
+        else if (studentId.HasValue)
+        {
+            // TEACHER VIEWING A SPECIFIC STUDENT'S ASSIGNMENT-CENTER LIST —
+            // same idea as QuizzesController/AssignmentsController.GetAll's
+            // studentId-for-teacher branch, feeding TeacherStudentExamsPage's
+            // "سنتر الاسايمنت" tab.
+            effectiveStudentId = studentId.Value;
+
+            var targetGroupId = await _db.StudentGroupMemberships.AsNoTracking()
+                .Where(m => m.StudentId == studentId.Value)
+                .Select(m => (int?)m.GroupId)
+                .FirstOrDefaultAsync();
+            if (targetGroupId == null)
+            {
+                var student = await _db.Students.AsNoTracking().FirstOrDefaultAsync(s => s.Id == studentId.Value);
+                if (student != null && await _db.Groups.AsNoTracking().AnyAsync(g => g.Id == student.GroupId && g.TeacherId == _tenant.CurrentTenantId))
+                    targetGroupId = student.GroupId;
+            }
+            if (targetGroupId.HasValue) query = query.Where(a => _db.AssignmentCenterGroupLinks.Any(x => x.AssignmentCenterId == a.Id && x.GroupId == targetGroupId.Value));
+
+            var targetUnitIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+                .Where(su => su.StudentId == studentId.Value)
+                .Select(su => su.UnitId)
+                .ToListAsync();
+            query = query.Where(a => _db.AssignmentCenterUnitLinks.Any(x => x.AssignmentCenterId == a.Id && targetUnitIds.Contains(x.UnitId)));
         }
         else if (schoolYear.HasValue)
         {
@@ -80,9 +106,44 @@ public class AssignmentCentersController : ControllerBase
 
         var ids = assignments.Select(a => a.Id).ToList();
 
-        var submittedIds = studentId.HasValue
-            ? (await _db.AssignmentCenterSubmissions.AsNoTracking()
+        // TEACHER-FOR-STUDENT BRANCH: return the same field shape
+        // (id/title/isTaken/score/totalMarks/reopenActive/forceReviewGranted)
+        // QuizzesController/LectureExamsController use, so the shared
+        // _ExamsLikeListTab widget can drive this tab too.
+        if (studentId.HasValue)
+        {
+            var resultsByAssignment = await _db.AssignmentCenterSubmissions.AsNoTracking()
                 .Where(s => s.StudentId == studentId.Value && ids.Contains(s.AssignmentCenterId))
+                .ToDictionaryAsync(s => s.AssignmentCenterId, s => s);
+
+            var overridesByAssignment = await _db.AssignmentCenterStudentOverrides.AsNoTracking()
+                .Where(o => o.StudentId == studentId.Value && ids.Contains(o.AssignmentCenterId))
+                .ToDictionaryAsync(o => o.AssignmentCenterId);
+
+            var nowUtc = DateTime.UtcNow;
+
+            var studentItems = assignments.Select(a =>
+            {
+                overridesByAssignment.TryGetValue(a.Id, out var ov);
+                var reopenActive = ov?.ReopenExpiresAt != null && ov.ReopenExpiresAt.Value > nowUtc;
+                var result = resultsByAssignment.TryGetValue(a.Id, out var r) ? r : null;
+
+                return new AssignmentCenterStudentListItem(
+                    a.Id,
+                    a.Title,
+                    result != null,
+                    result?.Score,
+                    result?.TotalMarks,
+                    reopenActive,
+                    ov?.ForceReview == true);
+            });
+
+            return Ok(studentItems);
+        }
+
+        var submittedIds = effectiveStudentId.HasValue
+            ? (await _db.AssignmentCenterSubmissions.AsNoTracking()
+                .Where(s => s.StudentId == effectiveStudentId.Value && ids.Contains(s.AssignmentCenterId))
                 .Select(s => s.AssignmentCenterId).ToListAsync()).ToHashSet()
             : new HashSet<int>();
 
@@ -93,7 +154,7 @@ public class AssignmentCentersController : ControllerBase
             a.GroupIds,
             a.Deadline,
             a.SchoolYear,
-            studentId.HasValue && submittedIds.Contains(a.Id),
+            effectiveStudentId.HasValue && submittedIds.Contains(a.Id),
             a.AllowLateReview));
 
         return Ok(items);
@@ -184,15 +245,25 @@ public class AssignmentCentersController : ControllerBase
         var submission = await _db.AssignmentCenterSubmissions.AsNoTracking().Include(s => s.Answers)
             .FirstOrDefaultAsync(s => s.AssignmentCenterId == assignmentCenterId && s.StudentId == studentId);
 
-        var deadlinePassed = DateTime.UtcNow > assignment.Deadline;
+        // TEACHER OVERRIDE: force-review/reopen granted via the teacher's
+        // "سنتر الاسايمنت" quick action — see AssignmentCenterStudentOverride
+        // / AssignmentCentersController.ForceReview/Reopen.
+        var overrideRow = await _db.AssignmentCenterStudentOverrides.AsNoTracking()
+            .FirstOrDefaultAsync(o => o.AssignmentCenterId == assignmentCenterId && o.StudentId == studentId);
+        var hasForceReview = overrideRow?.ForceReview == true;
+        var hasActiveReopen = overrideRow?.ReopenExpiresAt != null && overrideRow.ReopenExpiresAt.Value > DateTime.UtcNow;
+        var effectiveDeadline = hasActiveReopen ? overrideRow!.ReopenExpiresAt!.Value : assignment.Deadline;
+
+        var deadlinePassed = hasActiveReopen ? false : DateTime.UtcNow > effectiveDeadline;
 
         // Same policy as Assignments/as-student: a student who never
         // submitted is blocked entirely (410) once the deadline passes, if
-        // the teacher turned off late-review access for this assignment.
-        if (submission == null && deadlinePassed && !assignment.AllowLateReview)
+        // the teacher turned off late-review access for this assignment —
+        // unless a force-review override lets them through anyway.
+        if (submission == null && deadlinePassed && !assignment.AllowLateReview && !hasForceReview)
             return StatusCode(410, new { message = "انتهى وقت تسليم الواجب." });
 
-        var revealAnswers = deadlinePassed && (submission != null || assignment.AllowLateReview);
+        var revealAnswers = hasForceReview || (deadlinePassed && (submission != null || assignment.AllowLateReview));
         if (submission != null || revealAnswers) Response.Headers["x-redirected-to"] = "review";
 
         var items = assignment.Questions.Select(q =>
@@ -214,7 +285,7 @@ public class AssignmentCentersController : ControllerBase
 
         return Ok(new
         {
-            deadline = assignment.Deadline,
+            deadline = effectiveDeadline,
             hasSubmitted = submission != null,
             deadlinePassed,
             score = submission != null && revealAnswers ? submission.Score : (int?)null,
@@ -241,7 +312,13 @@ public class AssignmentCentersController : ControllerBase
         if (alreadySubmitted)
             return Conflict(new { message = "تم تسليم هذا الواجب من قبل." });
 
-        if (DateTime.UtcNow > assignment.Deadline)
+        // TEACHER OVERRIDE: an active reopen window (see Reopen in this
+        // controller) lets the student submit past the assignment's own
+        // Deadline, using the window's own expiry as the cutoff instead.
+        var hasActiveReopen = await _db.AssignmentCenterStudentOverrides.AsNoTracking()
+            .AnyAsync(o => o.AssignmentCenterId == assignment.Id && o.StudentId == studentId && o.ReopenExpiresAt != null && o.ReopenExpiresAt.Value > DateTime.UtcNow);
+
+        if (!hasActiveReopen && DateTime.UtcNow > assignment.Deadline)
             return StatusCode(410, new { message = "انتهى وقت تسليم الواجب." });
 
         var totalMarks = assignment.Questions.Sum(q => q.Mark);
@@ -428,6 +505,85 @@ public class AssignmentCentersController : ControllerBase
         await _db.SaveChangesAsync();
 
         return Ok(new AssignmentCenterQuestionTeacherDto(question.Id, question.Text, question.Answer, question.Mark));
+    }
+
+    // Teacher-only, called from a student's own "الامتحانات" quick action
+    // (TeacherStudentExamsPage's "سنتر الاسايمنت" tab) via its 3-dot menu on
+    // a not-yet-submitted assignment center. Same idea as
+    // QuizzesController.ForceReview/AssignmentsController.ForceReview — see
+    // AssignmentCenterStudentOverride for the full explanation. Drops the
+    // student straight into review mode the NEXT time they open it, even
+    // without ever submitting.
+    [HttpPost("force-review")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> ForceReview([FromBody] ForceAssignmentCenterReviewRequest request)
+    {
+        var assignment = await _db.AssignmentCenters.AsNoTracking().FirstOrDefaultAsync(a => a.Id == request.AssignmentCenterId);
+        if (assignment == null) return NotFound(new { message = "Assignment not found." });
+
+        var alreadySubmitted = await _db.AssignmentCenterSubmissions
+            .AnyAsync(s => s.AssignmentCenterId == request.AssignmentCenterId && s.StudentId == request.StudentId);
+        if (alreadySubmitted)
+            return Conflict(new { message = "الطالب سلّم الواجب بالفعل." });
+
+        var overrideRow = await _db.AssignmentCenterStudentOverrides
+            .FirstOrDefaultAsync(o => o.AssignmentCenterId == request.AssignmentCenterId && o.StudentId == request.StudentId);
+        if (overrideRow == null)
+        {
+            overrideRow = new AssignmentCenterStudentOverride
+            {
+                AssignmentCenterId = request.AssignmentCenterId,
+                StudentId = request.StudentId,
+                TeacherId = assignment.TeacherId
+            };
+            _db.AssignmentCenterStudentOverrides.Add(overrideRow);
+        }
+
+        overrideRow.ForceReview = true;
+        overrideRow.ReopenExpiresAt = null;
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "تم فتح الواجب للطالب كمراجعة." });
+    }
+
+    // Teacher-only, same entry point as ForceReview above. Wipes any prior
+    // submission for this student and grants them a brand-new window of
+    // exactly "minutes" starting now — bypassing the assignment center's own
+    // Deadline entirely for this student, same idea as
+    // QuizzesController.Reopen/AssignmentsController.Reopen.
+    [HttpPost("reopen")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> Reopen([FromBody] ReopenAssignmentCenterRequest request)
+    {
+        if (request.Minutes <= 0)
+            return BadRequest(new { message = "عدد الدقايق لازم يكون أكبر من صفر." });
+
+        var assignment = await _db.AssignmentCenters.AsNoTracking().FirstOrDefaultAsync(a => a.Id == request.AssignmentCenterId);
+        if (assignment == null) return NotFound(new { message = "Assignment not found." });
+
+        var priorSubmissions = await _db.AssignmentCenterSubmissions
+            .Where(s => s.AssignmentCenterId == request.AssignmentCenterId && s.StudentId == request.StudentId)
+            .ToListAsync();
+        if (priorSubmissions.Count > 0) _db.AssignmentCenterSubmissions.RemoveRange(priorSubmissions);
+
+        var overrideRow = await _db.AssignmentCenterStudentOverrides
+            .FirstOrDefaultAsync(o => o.AssignmentCenterId == request.AssignmentCenterId && o.StudentId == request.StudentId);
+        if (overrideRow == null)
+        {
+            overrideRow = new AssignmentCenterStudentOverride
+            {
+                AssignmentCenterId = request.AssignmentCenterId,
+                StudentId = request.StudentId,
+                TeacherId = assignment.TeacherId
+            };
+            _db.AssignmentCenterStudentOverrides.Add(overrideRow);
+        }
+
+        overrideRow.ForceReview = false;
+        overrideRow.ReopenExpiresAt = DateTime.UtcNow.AddMinutes(request.Minutes);
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "تم إعادة فتح الواجب للطالب.", reopenExpiresAt = overrideRow.ReopenExpiresAt });
     }
 
     [HttpPost("delete/{assignmentCenterId:int}")]
