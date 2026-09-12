@@ -53,6 +53,14 @@ public record ForceAssignmentCenterReviewRequest(int AssignmentCenterId, int Stu
 // POST AssignmentCenters/reopen — same idea as ReopenQuizRequest.
 public record ReopenAssignmentCenterRequest(int AssignmentCenterId, int StudentId, int Minutes);
 
+// POST AssignmentCenters/edit
+// body: { "assignmentCenterId": int, "title": "...", "deadline": "...", "allowLateReview": bool }
+// Lets a teacher fix the assignment center's own basic info (name/deadline/
+// late-review policy) after creation — separate from edit-question above,
+// which only touches individual questions. Deliberately does NOT let
+// group/unit be changed here, since that affects who it's even visible to.
+public record EditAssignmentCenterRequest(int AssignmentCenterId, string Title, DateTime Deadline, bool AllowLateReview);
+
 public record AssignmentCenterTakerDto(
     int StudentId,
     string StudentName,

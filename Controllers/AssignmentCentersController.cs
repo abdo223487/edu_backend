@@ -507,6 +507,37 @@ public class AssignmentCentersController : ControllerBase
         return Ok(new AssignmentCenterQuestionTeacherDto(question.Id, question.Text, question.Answer, question.Mark));
     }
 
+    // Lets a teacher fix the assignment center's own basic info
+    // (name/deadline/late-review policy) after creation — separate from
+    // edit-question above, which only touches individual questions.
+    // Deliberately does NOT let group/unit be changed here, since that
+    // affects who it's even visible to. Same idea as
+    // AssignmentsController.EditAssignment.
+    [HttpPost("edit")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> EditAssignmentCenter([FromBody] EditAssignmentCenterRequest request)
+    {
+        var assignment = await _db.AssignmentCenters.FirstOrDefaultAsync(a => a.Id == request.AssignmentCenterId);
+        if (assignment == null) return NotFound(new { message = "Assignment not found." });
+
+        if (string.IsNullOrWhiteSpace(request.Title))
+            return BadRequest(new { message = "اسم الواجب مطلوب." });
+
+        assignment.Title = request.Title;
+        assignment.Deadline = request.Deadline;
+        assignment.AllowLateReview = request.AllowLateReview;
+
+        await _db.SaveChangesAsync();
+
+        return Ok(new
+        {
+            id = assignment.Id,
+            title = assignment.Title,
+            deadline = assignment.Deadline,
+            allowLateReview = assignment.AllowLateReview
+        });
+    }
+
     // Teacher-only, called from a student's own "الامتحانات" quick action
     // (TeacherStudentExamsPage's "سنتر الاسايمنت" tab) via its 3-dot menu on
     // a not-yet-submitted assignment center. Same idea as
