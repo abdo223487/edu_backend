@@ -8,20 +8,24 @@ using Microsoft.EntityFrameworkCore;
 
 namespace EduApi.Controllers;
 
-public record CreateGoogleDriveMaterialRequest(string? Name, string Link, int? SchoolYear, int? UnitId, int? Months);
+public record CreateGoogleDriveMaterialRequest(string? Name, string Link, int? SchoolYear, int? UnitId, int? Months, List<int>? GroupIds);
 
 /// <summary>Body for POST Material/direct-upload -- see that endpoint's doc comment.</summary>
-public record CreateDirectUploadMaterialRequest(string? Name, string Link, int? SchoolYear, int? UnitId, int? Months);
+public record CreateDirectUploadMaterialRequest(string? Name, string Link, int? SchoolYear, int? UnitId, int? Months, List<int>? GroupIds);
+
+/// <summary>Body for POST Material/{id}/groups -- see that endpoint's doc comment.</summary>
+public record UpdateMaterialGroupsRequest(List<int>? GroupIds);
 
 /// <summary>
 /// Route: api/Material (singular, matching Flutter's "Material" endpoint - NOT renamed to "Materials").
-///  GET    Material?schoolYear=..&unitId=..     (teacher) -> each item includes "unitName"
+///  GET    Material?schoolYear=..&unitId=..     (teacher) -> each item includes "unitName", "groupIds", "groupNames"
 ///  GET    Material                             (student, unfiltered)
 ///  GET    Material/{id}
-///  POST   Material/google-drive
-///  POST   Material/file                        (multipart, field name "Files", supports multiple)
+///  POST   Material/google-drive                (optional GroupIds -- see doc comment on Material.GroupIds)
+///  POST   Material/file                        (multipart, field name "Files", supports multiple; optional "GroupIds" CSV form field)
 ///  GET    Material/pdf-upload-url               (presigned R2 PUT URL for direct client-side upload)
-///  POST   Material/direct-upload                (create a Material row from an already-R2-uploaded file)
+///  POST   Material/direct-upload                (create a Material row from an already-R2-uploaded file; optional GroupIds)
+///  POST   Material/{id}/groups                  (edit which groups an existing Drive link/PDF is restricted to)
 ///  POST   Material/delete?materialId=..
 /// </summary>
 [ApiController]
@@ -75,12 +79,32 @@ public class MaterialController : ControllerBase
 
         var materials = await query.ToListAsync();
 
+        // GROUP SCOPING: a material with GroupIds set is only for students
+        // who are a member of at least one of those groups -- lets a
+        // teacher upload one Drive link/PDF for a course but restrict it to
+        // one/some of that course's groups instead of every group. A
+        // material with no GroupIds keeps the old "everyone" behavior.
+        if (User.IsInRole(Roles.Student))
+        {
+            var studentId = User.GetUserId();
+            var studentGroupIds = await _db.StudentGroupMemberships.AsNoTracking()
+                .Where(g => g.StudentId == studentId).Select(g => g.GroupId).ToListAsync();
+            materials = materials.Where(m => m.GroupIds.Count == 0 || m.GroupIds.Any(studentGroupIds.Contains)).ToList();
+        }
+
         // Hydrate unitName (Material.UnitId is a plain int?, no navigation
         // property) so Drive/PDF list screens can show the real unit name
         // instead of a hardcoded "Unit" placeholder.
         var unitIds = materials.Where(m => m.UnitId.HasValue).Select(m => m.UnitId!.Value).Distinct().ToList();
         var unitNames = await _db.Units.AsNoTracking().Where(u => unitIds.Contains(u.Id))
             .ToDictionaryAsync(u => u.Id, u => u.Name);
+
+        // Hydrate groupNames for teacher-facing list/edit UI (same idea as
+        // unitNames above -- GroupIds are just ids, client needs the names
+        // to render the current selection when editing).
+        var allGroupIds = materials.SelectMany(m => m.GroupIds).Distinct().ToList();
+        var groupNames = await _db.Groups.AsNoTracking().Where(g => allGroupIds.Contains(g.Id))
+            .ToDictionaryAsync(g => g.Id, g => g.Name);
 
         var result = materials.Select(m => new
         {
@@ -89,7 +113,9 @@ public class MaterialController : ControllerBase
             type = m.Type,
             link = m.Link,
             unitId = m.UnitId,
-            unitName = m.UnitId.HasValue && unitNames.TryGetValue(m.UnitId.Value, out var n) ? n : null
+            unitName = m.UnitId.HasValue && unitNames.TryGetValue(m.UnitId.Value, out var n) ? n : null,
+            groupIds = m.GroupIds,
+            groupNames = m.GroupIds.Select(gid => groupNames.TryGetValue(gid, out var gn) ? gn : $"#{gid}").ToList()
         });
 
         return Ok(result);
@@ -104,6 +130,18 @@ public class MaterialController : ControllerBase
         if (User.IsInRole(Roles.Student))
         {
             var studentId = User.GetUserId();
+
+            // GROUP SCOPING: same rule as GetAll -- a material restricted to
+            // specific groups must not be reachable by id either, or the
+            // group check on the list endpoint would be trivially bypassed
+            // by a student who already knows/guesses the Material id.
+            if (material.GroupIds.Count > 0)
+            {
+                var studentGroupIds = await _db.StudentGroupMemberships.AsNoTracking()
+                    .Where(g => g.StudentId == studentId).Select(g => g.GroupId).ToListAsync();
+                if (!material.GroupIds.Any(studentGroupIds.Contains))
+                    return StatusCode(403, new { message = "Not available for your group." });
+            }
 
             if (material.UnitId.HasValue)
             {
@@ -155,6 +193,11 @@ public class MaterialController : ControllerBase
                 .Select(u => u.Name).FirstOrDefaultAsync();
         }
 
+        var groupNames = material.GroupIds.Count > 0
+            ? await _db.Groups.AsNoTracking().Where(g => material.GroupIds.Contains(g.Id))
+                .Select(g => new { g.Id, g.Name }).ToDictionaryAsync(g => g.Id, g => g.Name)
+            : new Dictionary<int, string>();
+
         return Ok(new
         {
             id = material.Id,
@@ -162,7 +205,9 @@ public class MaterialController : ControllerBase
             type = material.Type,
             link = material.Link,
             unitId = material.UnitId,
-            unitName
+            unitName,
+            groupIds = material.GroupIds,
+            groupNames = material.GroupIds.Select(gid => groupNames.TryGetValue(gid, out var gn) ? gn : $"#{gid}").ToList()
         });
     }
 
@@ -179,6 +224,7 @@ public class MaterialController : ControllerBase
             SchoolYear = request.SchoolYear,
             UnitId = request.UnitId,
             Months = request.Months,
+            GroupIds = request.GroupIds?.Distinct().ToList() ?? new(),
             TeacherId = _tenant.CurrentTenantId.Value // TENANT LAYER
         };
         _db.Materials.Add(material);
@@ -187,6 +233,7 @@ public class MaterialController : ControllerBase
         var unitName = request.UnitId.HasValue
             ? await _db.Units.Where(u => u.Id == request.UnitId.Value).Select(u => u.Name).FirstOrDefaultAsync()
             : null;
+        var groupNames = await GetGroupNamesAsync(material.GroupIds);
 
         return StatusCode(201, new
         {
@@ -195,7 +242,9 @@ public class MaterialController : ControllerBase
             type = material.Type,
             link = material.Link,
             unitId = material.UnitId,
-            unitName
+            unitName,
+            groupIds = material.GroupIds,
+            groupNames
         });
     }
 
@@ -253,6 +302,7 @@ public class MaterialController : ControllerBase
             SchoolYear = request.SchoolYear,
             UnitId = request.UnitId,
             Months = request.Months,
+            GroupIds = request.GroupIds?.Distinct().ToList() ?? new(),
             TeacherId = _tenant.CurrentTenantId.Value // TENANT LAYER
         };
         _db.Materials.Add(material);
@@ -261,6 +311,7 @@ public class MaterialController : ControllerBase
         var unitName = request.UnitId.HasValue
             ? await _db.Units.Where(u => u.Id == request.UnitId.Value).Select(u => u.Name).FirstOrDefaultAsync()
             : null;
+        var groupNames = await GetGroupNamesAsync(material.GroupIds);
 
         return StatusCode(201, new
         {
@@ -269,7 +320,9 @@ public class MaterialController : ControllerBase
             type = material.Type,
             link = material.Link,
             unitId = material.UnitId,
-            unitName
+            unitName,
+            groupIds = material.GroupIds,
+            groupNames
         });
     }
 
@@ -282,12 +335,22 @@ public class MaterialController : ControllerBase
     public async Task<IActionResult> UploadFile(
         [FromForm(Name = "Files")] List<IFormFile> files,
         [FromForm] int? schoolYear,
-        [FromForm] int? unitId)
+        [FromForm] int? unitId,
+        // Multipart form fields can't bind a List<int> directly, so the
+        // client sends a comma-separated string here (e.g. "3,5,9"), same
+        // shape as every *IdsCsv column on the server side. Optional --
+        // omitted/empty means "visible to every group" like before.
+        [FromForm] string? groupIds)
     {
         if (files == null || files.Count == 0)
             return BadRequest(new { message = "At least one file is required." });
 
         if (_tenant.CurrentTenantId == null) return Forbid();
+
+        var parsedGroupIds = string.IsNullOrWhiteSpace(groupIds)
+            ? new List<int>()
+            : groupIds.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(int.Parse).Distinct().ToList();
 
         var created = new List<object>();
 
@@ -303,6 +366,7 @@ public class MaterialController : ControllerBase
                 Link = url,
                 SchoolYear = schoolYear,
                 UnitId = unitId,
+                GroupIds = parsedGroupIds,
                 TeacherId = _tenant.CurrentTenantId.Value // TENANT LAYER
             };
             _db.Materials.Add(material);
@@ -314,6 +378,7 @@ public class MaterialController : ControllerBase
         var unitName = unitId.HasValue
             ? await _db.Units.Where(u => u.Id == unitId.Value).Select(u => u.Name).FirstOrDefaultAsync()
             : null;
+        var groupNames = await GetGroupNamesAsync(parsedGroupIds);
 
         var result = created.Cast<Material>().Select(material => new
         {
@@ -322,12 +387,51 @@ public class MaterialController : ControllerBase
             type = material.Type,
             link = material.Link,
             unitId = material.UnitId,
-            unitName
+            unitName,
+            groupIds = material.GroupIds,
+            groupNames
         }).ToList();
 
         // Single-file uploads keep returning one object (back-compat with any
         // caller expecting that shape); multi-file uploads return an array.
         return StatusCode(201, result.Count == 1 ? result[0] : result);
+    }
+
+    private async Task<List<string>> GetGroupNamesAsync(List<int> groupIds)
+    {
+        if (groupIds.Count == 0) return new();
+        var names = await _db.Groups.AsNoTracking().Where(g => groupIds.Contains(g.Id))
+            .ToDictionaryAsync(g => g.Id, g => g.Name);
+        return groupIds.Select(gid => names.TryGetValue(gid, out var n) ? n : $"#{gid}").ToList();
+    }
+
+    // POST Material/{id}/groups -- the "تعديل" (edit) button on a Drive
+    // link/PDF card: lets a teacher change which groups it's restricted to
+    // AFTER it was already created, without needing to delete and re-upload
+    // it. Pass an empty/omitted GroupIds to make it visible to every group
+    // again. Returns the material with its refreshed groupIds/groupNames so
+    // the edit dialog can immediately show the new selection.
+    [HttpPost("{id:int}/groups")]
+    public async Task<IActionResult> UpdateGroups(int id, [FromBody] UpdateMaterialGroupsRequest request)
+    {
+        var material = await _db.Materials.FirstOrDefaultAsync(m => m.Id == id && m.NotebookId == null);
+        if (material == null) return NotFound(new { message = "Material not found." });
+
+        material.GroupIds = request.GroupIds?.Distinct().ToList() ?? new();
+        await _db.SaveChangesAsync();
+
+        var groupNames = await GetGroupNamesAsync(material.GroupIds);
+
+        return Ok(new
+        {
+            id = material.Id,
+            name = material.Name,
+            type = material.Type,
+            link = material.Link,
+            unitId = material.UnitId,
+            groupIds = material.GroupIds,
+            groupNames
+        });
     }
 
     [HttpPost("delete")]

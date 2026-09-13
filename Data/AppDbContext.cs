@@ -86,6 +86,7 @@ public class AppDbContext : DbContext
     // SaveChangesAsync override below for how these stay in sync with
     // Lecture/Assignment/Notification/Quiz.GroupIds (and Assignment.UnitIds).
     public DbSet<LectureGroupLink> LectureGroupLinks => Set<LectureGroupLink>();
+    public DbSet<MaterialGroupLink> MaterialGroupLinks => Set<MaterialGroupLink>();
     public DbSet<AssignmentGroupLink> AssignmentGroupLinks => Set<AssignmentGroupLink>();
     public DbSet<AssignmentUnitLink> AssignmentUnitLinks => Set<AssignmentUnitLink>();
     public DbSet<AssignmentCenterGroupLink> AssignmentCenterGroupLinks => Set<AssignmentCenterGroupLink>();
@@ -533,6 +534,11 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<LectureGroupLink>().HasIndex(x => new { x.LectureId, x.GroupId }).IsUnique();
         modelBuilder.Entity<LectureGroupLink>().HasIndex(x => x.GroupId);
 
+        modelBuilder.Entity<MaterialGroupLink>()
+            .HasOne<Material>().WithMany().HasForeignKey(x => x.MaterialId).OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<MaterialGroupLink>().HasIndex(x => new { x.MaterialId, x.GroupId }).IsUnique();
+        modelBuilder.Entity<MaterialGroupLink>().HasIndex(x => x.GroupId);
+
         modelBuilder.Entity<AssignmentGroupLink>()
             .HasOne<Assignment>().WithMany().HasForeignKey(x => x.AssignmentId).OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<AssignmentGroupLink>().HasIndex(x => new { x.AssignmentId, x.GroupId }).IsUnique();
@@ -592,7 +598,7 @@ public class AppDbContext : DbContext
         var touched = ChangeTracker.Entries()
             .Where(e => e.State is EntityState.Added or EntityState.Modified)
             .Select(e => e.Entity)
-            .Where(e => e is Lecture or Assignment or AssignmentCenter or Notification or Quiz)
+            .Where(e => e is Lecture or Assignment or AssignmentCenter or Notification or Quiz or Material)
             .ToList();
 
         // SUPERADMIN DELETED-ITEMS FEATURE: must run BEFORE base.SaveChangesAsync
@@ -612,6 +618,12 @@ public class AppDbContext : DbContext
                         await LectureGroupLinks.Where(x => x.LectureId == l.Id).ExecuteDeleteAsync(cancellationToken);
                         if (l.GroupIds.Count > 0)
                             LectureGroupLinks.AddRange(l.GroupIds.Distinct().Select(gid => new LectureGroupLink { LectureId = l.Id, GroupId = gid }));
+                        break;
+
+                    case Material m:
+                        await MaterialGroupLinks.Where(x => x.MaterialId == m.Id).ExecuteDeleteAsync(cancellationToken);
+                        if (m.GroupIds.Count > 0)
+                            MaterialGroupLinks.AddRange(m.GroupIds.Distinct().Select(gid => new MaterialGroupLink { MaterialId = m.Id, GroupId = gid }));
                         break;
 
                     case Assignment a:

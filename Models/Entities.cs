@@ -674,6 +674,36 @@ public class Material
 
     /// <summary>TENANT LAYER: which teacher (tenant) this material belongs to.</summary>
     public int TeacherId { get; set; }
+
+    /// <summary>
+    /// Groups (as a joined string of ids) this material is restricted to.
+    /// Optional -- same "empty = everyone" convention as everywhere else
+    /// that has GroupIds (Lecture, Assignment, ...). When empty, the
+    /// material is visible to every student otherwise entitled to it (via
+    /// UnitId subscription / LectureId unlock / unrestricted), exactly like
+    /// before this feature existed. When non-empty, a student must ALSO be
+    /// a member of at least one of these groups (see
+    /// StudentGroupMemberships) to see it -- lets a teacher upload one PDF
+    /// for a course but only for one/some of that course's groups.
+    /// </summary>
+    public string GroupIdsCsv { get; set; } = string.Empty;
+    [NotMapped] public List<int> GroupIds
+    {
+        get => GroupIdsCsv.Length == 0 ? new() : GroupIdsCsv.Split(',').Select(int.Parse).ToList();
+        set => GroupIdsCsv = string.Join(',', value);
+    }
+}
+
+/// <summary>
+/// Real join row backing Material.GroupIds (kept in sync automatically from
+/// GroupIdsCsv by AppDbContext.SaveChangesAsync), same pattern as
+/// LectureGroupLink -- see that class's doc comment.
+/// </summary>
+public class MaterialGroupLink
+{
+    public int Id { get; set; }
+    public int MaterialId { get; set; }
+    public int GroupId { get; set; }
 }
 
 public class Notebook
