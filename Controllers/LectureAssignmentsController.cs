@@ -728,4 +728,247 @@ public class LectureAssignmentsController : ControllerBase
         await _db.SaveChangesAsync();
         return Ok(new { message = "Lecture assignment deleted." });
     }
+
+    /// <summary>
+    /// Teacher-facing "كارت الواجبات" screen: every subscribed/unlocked
+    /// student for ONE container -- a Unit (course), an OnlineLesson, or an
+    /// ExternalBook (exactly one of unitId/onlineLessonId/externalBookId is
+    /// required) -- tagged with how many of that container's homework items
+    /// they've completed. "Homework" here is the union of THREE separate
+    /// features that all count toward the same total:
+    ///   - LectureAssignment: attached directly to one lecture (completion =
+    ///     LectureAssignmentResult) -- available for any container type.
+    ///   - Assignment ("اساينمنت"): Unit-wide, free-text/MCQ/True-False/
+    ///     Written questions (completion = AssignmentSubmission) -- Unit
+    ///     containers only, since Assignment.UnitIds links to Units, never
+    ///     an OnlineLesson/ExternalBook.
+    ///   - AssignmentCenter ("سنتر اسايمنت"): Unit-wide bubble-sheet
+    ///     (completion = AssignmentCenterSubmission) -- Unit containers only,
+    ///     same reasoning.
+    /// Status is "Full" (completed every one), "Partial" (completed some),
+    /// "None" (completed none), or "NoHomework" (nothing to grade yet).
+    /// Paged + searched by name/phone/id, same shape as
+    /// LectureExams/summary and Attendance/summary (which this mirrors
+    /// closely -- see there for the per-Group-vs-flat-total split and the
+    /// multi-tenant StudentGroupMembership note).
+    /// </summary>
+    private record HomeworkStudentRow(int Id, string Name, string? PhoneNumber, int GroupId);
+
+    // GET LectureAssignments/summary?unitId=..           (Center course)
+    //     LectureAssignments/summary?onlineLessonId=..    (Online lesson)
+    //     LectureAssignments/summary?externalBookId=..    (External book)
+    //     ...&groupId=..&p=..&q=.. (groupId only applies to unitId/externalBookId)
+    [HttpGet("summary")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
+    public async Task<IActionResult> GetHomeworkSummary(
+        [FromQuery] int? unitId, [FromQuery] int? onlineLessonId, [FromQuery] int? externalBookId,
+        [FromQuery] int? groupId, [FromQuery] int p = 1, [FromQuery] string? q = null)
+    {
+        var sourcesGiven = new[] { unitId.HasValue, onlineLessonId.HasValue, externalBookId.HasValue }.Count(x => x);
+        if (sourcesGiven != 1)
+            return BadRequest(new { message = "Pass exactly one of unitId, onlineLessonId, or externalBookId." });
+
+        string containerName;
+        List<int> reachableStudentIds;
+        List<int> containerLectureIds;
+        bool isGroupScoped = unitId.HasValue || externalBookId.HasValue;
+
+        if (unitId.HasValue)
+        {
+            var unit = await _db.Units.AsNoTracking().FirstOrDefaultAsync(u => u.Id == unitId.Value);
+            if (unit == null) return NotFound(new { message = "Unit not found." });
+            containerName = unit.Name;
+
+            reachableStudentIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+                .Where(s => s.UnitId == unitId.Value).Select(s => s.StudentId).ToListAsync();
+            containerLectureIds = await _db.Lectures.AsNoTracking()
+                .Where(l => l.UnitId == unitId.Value).Select(l => l.Id).ToListAsync();
+        }
+        else if (onlineLessonId.HasValue)
+        {
+            var onlineLesson = await _db.OnlineLessons.AsNoTracking().FirstOrDefaultAsync(o => o.Id == onlineLessonId.Value);
+            if (onlineLesson == null) return NotFound(new { message = "Online lesson not found." });
+            containerName = onlineLesson.Name;
+
+            reachableStudentIds = await _db.StudentOnlineLessonUnlocks.AsNoTracking()
+                .Where(u => u.OnlineLessonId == onlineLessonId.Value).Select(u => u.StudentId).Distinct().ToListAsync();
+            containerLectureIds = await _db.Lectures.AsNoTracking()
+                .Where(l => l.OnlineLessonId == onlineLessonId.Value).Select(l => l.Id).ToListAsync();
+        }
+        else
+        {
+            var book = await _db.ExternalBooks.AsNoTracking().FirstOrDefaultAsync(b => b.Id == externalBookId!.Value);
+            if (book == null) return NotFound(new { message = "External book not found." });
+            containerName = book.Name;
+
+            reachableStudentIds = await _db.StudentExternalBookSubscriptions.AsNoTracking()
+                .Where(s => s.ExternalBookId == externalBookId!.Value).Select(s => s.StudentId).ToListAsync();
+            containerLectureIds = await _db.Lectures.AsNoTracking()
+                .Where(l => l.ExternalBookId == externalBookId!.Value).Select(l => l.Id).ToListAsync();
+        }
+
+        // MULTI-TENANT: see the identical note on LectureExamsController.GetExamsSummary.
+        List<HomeworkStudentRow> candidates;
+        if (isGroupScoped)
+        {
+            var tenantId = _tenant.CurrentTenantId;
+            var membershipQuery = _db.StudentGroupMemberships.AsNoTracking()
+                .Where(m => reachableStudentIds.Contains(m.StudentId) && m.Group!.TeacherId == tenantId);
+            if (groupId.HasValue) membershipQuery = membershipQuery.Where(m => m.GroupId == groupId.Value);
+
+            candidates = await membershipQuery
+                .Select(m => new HomeworkStudentRow(m.StudentId, m.Student!.Name, m.Student!.PhoneNumber, m.GroupId))
+                .ToListAsync();
+        }
+        else
+        {
+            candidates = await _db.Students.AsNoTracking()
+                .Where(s => reachableStudentIds.Contains(s.Id))
+                .Select(s => new HomeworkStudentRow(s.Id, s.Name, s.PhoneNumber, 0))
+                .ToListAsync();
+        }
+
+        var trimmedQ = q?.Trim();
+        var isNumericQuery = !string.IsNullOrEmpty(trimmedQ) && trimmedQ.All(char.IsDigit);
+        var isIdLikeQuery = isNumericQuery && trimmedQ!.Length <= 5 && !trimmedQ.StartsWith('0');
+
+        IEnumerable<HomeworkStudentRow> filtered = candidates;
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+        {
+            var normalizedQ = StudentIdentifierResolver.NormalizeArabic(trimmedQ);
+            filtered = candidates.Where(s =>
+                isIdLikeQuery
+                    ? s.Id.ToString().Contains(trimmedQ)
+                    : StudentIdentifierResolver.NormalizeArabic(s.Name).Contains(normalizedQ, StringComparison.OrdinalIgnoreCase) ||
+                      (s.PhoneNumber != null && s.PhoneNumber.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)) ||
+                      (isNumericQuery && s.Id.ToString().Contains(trimmedQ)));
+        }
+
+        var paged = filtered.OrderBy(s => s.Name)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
+            .ToList();
+
+        var pagedIds = paged.Select(s => s.Id).ToList();
+        var groupNames = await _db.GetTenantGroupNamesAsync(pagedIds);
+
+        // LectureAssignments attached to a lecture of this container.
+        var lectureAssignmentsInContainer = await _db.LectureAssignments.AsNoTracking()
+            .Where(a => containerLectureIds.Contains(a.LectureId))
+            .Select(a => new { a.Id, a.LectureId })
+            .ToListAsync();
+        var lectureAssignmentIds = lectureAssignmentsInContainer.Select(a => a.Id).ToList();
+
+        // Unit-wide Assignment / AssignmentCenter items -- only exist for a
+        // Unit container (see class doc comment above).
+        var assignmentsInUnit = unitId.HasValue
+            ? await _db.AssignmentUnitLinks.AsNoTracking()
+                .Where(x => x.UnitId == unitId.Value).Select(x => x.AssignmentId).Distinct().ToListAsync()
+            : new List<int>();
+        var assignmentCentersInUnit = unitId.HasValue
+            ? await _db.AssignmentCenterUnitLinks.AsNoTracking()
+                .Where(x => x.UnitId == unitId.Value).Select(x => x.AssignmentCenterId).Distinct().ToListAsync()
+            : new List<int>();
+
+        Dictionary<int, int> totalByGroup;
+        int flatTotal = 0;
+        if (isGroupScoped)
+        {
+            totalByGroup = new Dictionary<int, int>();
+            var pagedGroupIds = paged.Select(s => s.GroupId).Distinct().ToList();
+            foreach (var gid in pagedGroupIds)
+            {
+                var lectureIdsForGroup = await _db.LectureGroupLinks.AsNoTracking()
+                    .Where(x => x.GroupId == gid && containerLectureIds.Contains(x.LectureId))
+                    .Select(x => x.LectureId)
+                    .ToListAsync();
+                var lectureAssignmentCount = lectureAssignmentsInContainer.Count(a => lectureIdsForGroup.Contains(a.LectureId));
+
+                var assignmentCount = assignmentsInUnit.Count == 0
+                    ? 0
+                    : await _db.AssignmentGroupLinks.AsNoTracking()
+                        .Where(x => x.GroupId == gid && assignmentsInUnit.Contains(x.AssignmentId))
+                        .Select(x => x.AssignmentId).Distinct().CountAsync();
+
+                var assignmentCenterCount = assignmentCentersInUnit.Count == 0
+                    ? 0
+                    : await _db.AssignmentCenterGroupLinks.AsNoTracking()
+                        .Where(x => x.GroupId == gid && assignmentCentersInUnit.Contains(x.AssignmentCenterId))
+                        .Select(x => x.AssignmentCenterId).Distinct().CountAsync();
+
+                totalByGroup[gid] = lectureAssignmentCount + assignmentCount + assignmentCenterCount;
+            }
+        }
+        else
+        {
+            // OnlineLesson: no Group-targeting and no Unit-wide items either
+            // (see class doc comment) -- just the LectureAssignments.
+            totalByGroup = new Dictionary<int, int>();
+            flatTotal = lectureAssignmentIds.Count;
+        }
+
+        // LectureAssignmentResult completion (distinct-guarded, same
+        // reasoning as LectureExamResult in LectureExamsController).
+        var completedCounts = await _db.LectureAssignmentResults.AsNoTracking()
+            .Where(r => pagedIds.Contains(r.StudentId) && lectureAssignmentIds.Contains(r.LectureAssignmentId))
+            .Select(r => new { r.StudentId, r.LectureAssignmentId })
+            .Distinct()
+            .GroupBy(r => r.StudentId)
+            .Select(g => new { StudentId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.StudentId, x => x.Count);
+
+        if (assignmentsInUnit.Count > 0)
+        {
+            var assignmentCompletedCounts = await _db.AssignmentSubmissions.AsNoTracking()
+                .Where(r => pagedIds.Contains(r.StudentId) && assignmentsInUnit.Contains(r.AssignmentId))
+                .Select(r => new { r.StudentId, r.AssignmentId })
+                .Distinct()
+                .GroupBy(r => r.StudentId)
+                .Select(g => new { StudentId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.StudentId, x => x.Count);
+            foreach (var (studentId, count) in assignmentCompletedCounts)
+                completedCounts[studentId] = completedCounts.GetValueOrDefault(studentId, 0) + count;
+        }
+
+        if (assignmentCentersInUnit.Count > 0)
+        {
+            var centerCompletedCounts = await _db.AssignmentCenterSubmissions.AsNoTracking()
+                .Where(r => pagedIds.Contains(r.StudentId) && assignmentCentersInUnit.Contains(r.AssignmentCenterId))
+                .Select(r => new { r.StudentId, r.AssignmentCenterId })
+                .Distinct()
+                .GroupBy(r => r.StudentId)
+                .Select(g => new { StudentId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.StudentId, x => x.Count);
+            foreach (var (studentId, count) in centerCompletedCounts)
+                completedCounts[studentId] = completedCounts.GetValueOrDefault(studentId, 0) + count;
+        }
+
+        var result = paged.Select(s =>
+        {
+            var total = isGroupScoped ? totalByGroup.GetValueOrDefault(s.GroupId, 0) : flatTotal;
+            var completed = completedCounts.GetValueOrDefault(s.Id, 0);
+            var status = total == 0 ? "NoHomework" : completed == 0 ? "None" : completed >= total ? "Full" : "Partial";
+            return new HomeworkStudentItem(
+                s.Id, s.Name, s.PhoneNumber, groupNames.GetValueOrDefault(s.Id) ?? "", completed, total, status);
+        }).ToList();
+
+        return Ok(new HomeworkSummaryResponse(containerName, result));
+    }
 }
+
+// One row per student in the LectureAssignments/summary response.
+// "Completed"/"Total" cover ALL THREE homework kinds a student can face:
+// LectureAssignment, Assignment ("اساينمنت"), and AssignmentCenter ("سنتر
+// اسايمنت") -- see GetHomeworkSummary's doc comment. Status is one of "Full"
+// (completed every one), "Partial" (completed some), "None" (completed
+// none), or "NoHomework" (nothing to grade yet).
+public record HomeworkStudentItem(
+    int StudentId,
+    string Name,
+    string? PhoneNumber,
+    string GroupName,
+    int CompletedCount,
+    int TotalHomework,
+    string Status);
+
+public record HomeworkSummaryResponse(string ContainerName, List<HomeworkStudentItem> Students);

@@ -611,4 +611,128 @@ public class AttendanceController : ControllerBase
             _logger.LogWarning(ex, "Unexpected error while sending WhatsApp attendance notification for student {StudentId}.", studentId);
         }
     }
+
+    /// <summary>
+    /// Teacher-facing "كارت الحاضرين" screen: for one Unit (course), every
+    /// subscribed student (optionally narrowed to one Group), tagged with
+    /// how many of the Center lectures visible to their own Group they've
+    /// actually attended at least once -- "Full" (attended every one of
+    /// them), "Partial" (attended some), "None" (never attended), or
+    /// "NoLectures" (their Group has no Center lecture in this Unit yet, so
+    /// there's nothing to compare against). Paged + searched by
+    /// name/phone/id exactly like Students/Lecture-viewers.
+    /// </summary>
+    private record AttendanceStudentRow(int Id, string Name, string? PhoneNumber, int GroupId);
+
+    // GET Attendance/summary?unitId=..&groupId=..&p=..&q=..
+    [HttpGet("summary")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
+    public async Task<IActionResult> GetAttendanceSummary(
+        [FromQuery] int unitId, [FromQuery] int? groupId, [FromQuery] int p = 1, [FromQuery] string? q = null)
+    {
+        var unit = await _db.Units.AsNoTracking().FirstOrDefaultAsync(u => u.Id == unitId);
+        if (unit == null) return NotFound(new { message = "Unit not found." });
+
+        // Course enrollment (subscribed to the Unit), narrowed to one Group
+        // when given -- same "all groups vs one group" split as the numeric
+        // stats screens elsewhere (GroupNumericOptionsPage: groupId == null
+        // means "كل المجموعات").
+        //
+        // MULTI-TENANT: resolved via StudentGroupMembership (this tenant's
+        // own relationship row via Group.TeacherId), never
+        // Student.GroupId directly -- that field is the student's
+        // original/legacy group and can belong to a different teacher
+        // entirely if the student is linked to more than one. See
+        // StudentsController.ListStudents, which this mirrors.
+        var subscribedIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+            .Where(s => s.UnitId == unitId).Select(s => s.StudentId).ToListAsync();
+
+        var tenantId = _tenant.CurrentTenantId;
+        var membershipQuery = _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => subscribedIds.Contains(m.StudentId) && m.Group!.TeacherId == tenantId);
+        if (groupId.HasValue) membershipQuery = membershipQuery.Where(m => m.GroupId == groupId.Value);
+
+        var candidates = await membershipQuery
+            .Select(m => new AttendanceStudentRow(m.StudentId, m.Student!.Name, m.Student!.PhoneNumber, m.GroupId))
+            .ToListAsync();
+
+        var trimmedQ = q?.Trim();
+        var isNumericQuery = !string.IsNullOrEmpty(trimmedQ) && trimmedQ.All(char.IsDigit);
+        var isIdLikeQuery = isNumericQuery && trimmedQ!.Length <= 5 && !trimmedQ.StartsWith('0');
+
+        IEnumerable<AttendanceStudentRow> filtered = candidates;
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+        {
+            var normalizedQ = StudentIdentifierResolver.NormalizeArabic(trimmedQ);
+            filtered = candidates.Where(s =>
+                isIdLikeQuery
+                    ? s.Id.ToString().Contains(trimmedQ)
+                    : StudentIdentifierResolver.NormalizeArabic(s.Name).Contains(normalizedQ, StringComparison.OrdinalIgnoreCase) ||
+                      (s.PhoneNumber != null && s.PhoneNumber.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)) ||
+                      (isNumericQuery && s.Id.ToString().Contains(trimmedQ)));
+        }
+
+        var paged = filtered.OrderBy(s => s.Name)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
+            .ToList();
+
+        var pagedIds = paged.Select(s => s.Id).ToList();
+        var groupNames = await _db.GetTenantGroupNamesAsync(pagedIds);
+
+        // Center lecture count per Group targeted within this Unit -- a
+        // student can only ever have attended lectures visible to their own
+        // Group, so "total" has to be computed per-Group, not once for the
+        // whole Unit.
+        var pagedGroupIds = paged.Select(s => s.GroupId).Distinct().ToList();
+        var totalByGroup = new Dictionary<int, int>();
+        foreach (var gid in pagedGroupIds)
+        {
+            totalByGroup[gid] = await _db.Lectures.AsNoTracking()
+                .Where(l => l.UnitId == unitId && l.AttendanceMethod == AttendanceMethod.Center)
+                .Where(l => _db.LectureGroupLinks.Any(x => x.LectureId == l.Id && x.GroupId == gid))
+                .CountAsync();
+        }
+
+        // Distinct-lecture attendance count per student, restricted to
+        // lectures of this Unit specifically. Attendance has no navigation
+        // property to Lecture, so join explicitly on LectureId instead of
+        // reaching through a.Lecture.
+        var unitLectureIds = await _db.Lectures.AsNoTracking()
+            .Where(l => l.UnitId == unitId).Select(l => l.Id).ToListAsync();
+
+        var attendedCounts = await _db.Attendances.AsNoTracking()
+            .Where(a => pagedIds.Contains(a.StudentId) && unitLectureIds.Contains(a.LectureId))
+            .Select(a => new { a.StudentId, a.LectureId })
+            .Distinct()
+            .GroupBy(a => a.StudentId)
+            .Select(g => new { StudentId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.StudentId, x => x.Count);
+
+        var result = paged.Select(s =>
+        {
+            var total = totalByGroup.GetValueOrDefault(s.GroupId, 0);
+            var attended = attendedCounts.GetValueOrDefault(s.Id, 0);
+            var status = total == 0 ? "NoLectures" : attended == 0 ? "None" : attended >= total ? "Full" : "Partial";
+            return new AttendanceStudentItem(
+                s.Id, s.Name, s.PhoneNumber, groupNames.GetValueOrDefault(s.Id) ?? "", attended, total, status);
+        }).ToList();
+
+        return Ok(new AttendanceSummaryResponse(unit.Id, unit.Name, result));
+    }
 }
+
+// One row per student in the Attendance/summary response. Status is one of
+// "Full" (attended every Center lecture visible to their Group in this
+// Unit), "Partial" (attended some), "None" (attended none), or "NoLectures"
+// (their Group has no Center lecture in this Unit yet -- nothing to grade).
+public record AttendanceStudentItem(
+    int StudentId,
+    string Name,
+    string? PhoneNumber,
+    string GroupName,
+    int AttendedCount,
+    int TotalLectures,
+    string Status);
+
+public record AttendanceSummaryResponse(int UnitId, string UnitName, List<AttendanceStudentItem> Students);

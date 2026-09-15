@@ -97,3 +97,25 @@ public record StudentLectureViewItem(
 // lecture's own ViewLimit (and every other student's remaining count) is
 // left alone.
 public record AdjustStudentViewsRequest(int StudentId, int LectureId, int Delta);
+
+// GET Lectures/{id}/viewers?p=..&q=.. (teacher) — one row per student who can
+// reach this ONE lecture, paged/searched like Students. Status is one of
+// "NotViewed" (never opened), "Partial" (opened, views remain), "Full" (used
+// every allowed view), or "Watched" (opened at least once, lecture has no
+// ViewLimit so there's nothing to run out of).
+public record LectureViewerItem(
+    int StudentId,
+    string Name,
+    string? PhoneNumber,
+    string GroupName,
+    int ViewsUsed,
+    int? ViewLimit,
+    int? ExtraViews,
+    int? RemainingViews,
+    string Status);
+
+public record LectureViewersResponse(
+    int LectureId,
+    string LectureName,
+    int? ViewLimit,
+    List<LectureViewerItem> Students);

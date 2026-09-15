@@ -19,6 +19,7 @@ namespace EduApi.Controllers;
 ///  GET    Lectures/by-group?groupId=..&attendanceMethod=..&unitId=..&lessonIndex=..&noUnitOnly=..&p=..
 ///  GET    Lectures/{id}/materials
 ///  POST   Lectures/{id}/materials/file       (multipart, field name "Files")
+///  GET    Lectures/{id}/viewers?p=..&q=..    (teacher-facing per-lecture "who watched this" screen)
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -999,6 +1000,133 @@ public class LecturesController : ControllerBase
         return Ok(new StudentLectureViewItem(
             lecture.Id, lecture.Name, lecture.ViewLimit.Value, usage.ViewsUsed, usage.ExtraViews, remaining));
     }
+
+    /// <summary>
+    /// Teacher-facing "مشاهدات الفيديو" screen for ONE lecture: every student
+    /// who can currently reach it (same reachability rules as
+    /// GetStudentViews, just inverted -- one lecture, many students instead
+    /// of one student, many lectures), each tagged with how many times
+    /// they've opened it and whether they've used all/some/none of their
+    /// allowed views. Paged + searchable by name/phone/id, exactly like
+    /// Students (GET Students) -- see ListStudents in StudentsController for
+    /// the same search-semantics this mirrors.
+    /// </summary>
+    private record ViewerStudentRow(int Id, string Name, string? PhoneNumber, int GroupId);
+
+    // GET Lectures/{id}/viewers?p=..&q=..
+    [HttpGet("{id:int}/viewers")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
+    public async Task<IActionResult> GetLectureViewers(int id, [FromQuery] int p = 1, [FromQuery] string? q = null)
+    {
+        var lecture = await _db.Lectures.AsNoTracking().FirstOrDefaultAsync(l => l.Id == id);
+        if (lecture == null) return NotFound(new { message = "Lecture not found." });
+
+        // Reachable audience for THIS lecture. OnlineLesson lectures have no
+        // GroupIds/group-link at all (see Lecture.OnlineLessonId doc
+        // comment) -- reachability is solely "redeemed a Code for the
+        // parent OnlineLesson". Unit/ExternalBook/standalone lectures fall
+        // back to unlock + group-link, same shape as GetStudentViews above
+        // (External Book's exact subscription chain is intentionally not
+        // re-derived here; a direct StudentLectureUnlock or group link is
+        // enough for this screen's purposes).
+        List<int> reachableStudentIds;
+        if (lecture.OnlineLessonId != null)
+        {
+            reachableStudentIds = await _db.StudentOnlineLessonUnlocks.AsNoTracking()
+                .Where(u => u.OnlineLessonId == lecture.OnlineLessonId.Value)
+                .Select(u => u.StudentId)
+                .Distinct()
+                .ToListAsync();
+        }
+        else
+        {
+            var unlockedIds = await _db.StudentLectureUnlocks.AsNoTracking()
+                .Where(u => u.LectureId == id).Select(u => u.StudentId).ToListAsync();
+
+            var linkedGroupIds = await _db.LectureGroupLinks.AsNoTracking()
+                .Where(x => x.LectureId == id).Select(x => x.GroupId).ToListAsync();
+            var groupLinkedStudentIds = linkedGroupIds.Count == 0
+                ? new List<int>()
+                : await _db.StudentGroupMemberships.AsNoTracking()
+                    .Where(m => linkedGroupIds.Contains(m.GroupId)).Select(m => m.StudentId).ToListAsync();
+
+            var containerIds = new List<int>();
+            if (lecture.UnitId != null)
+            {
+                var subscribedIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+                    .Where(s => s.UnitId == lecture.UnitId.Value).Select(s => s.StudentId).ToListAsync();
+                containerIds = subscribedIds.Intersect(groupLinkedStudentIds).ToList();
+            }
+            else if (lecture.ExternalBookId != null)
+            {
+                containerIds = groupLinkedStudentIds;
+            }
+
+            reachableStudentIds = unlockedIds.Concat(containerIds).Distinct().ToList();
+        }
+
+        var trimmedQ = q?.Trim();
+        var isNumericQuery = !string.IsNullOrEmpty(trimmedQ) && trimmedQ.All(char.IsDigit);
+        // Same "short, non-zero-leading number = ID search" distinction as
+        // StudentsController.ListStudents -- see the comment there.
+        var isIdLikeQuery = isNumericQuery && trimmedQ!.Length <= 5 && !trimmedQ.StartsWith('0');
+
+        var candidates = await _db.Students.AsNoTracking()
+            .Where(s => reachableStudentIds.Contains(s.Id))
+            .Select(s => new ViewerStudentRow(s.Id, s.Name, s.PhoneNumber, s.GroupId))
+            .ToListAsync();
+
+        IEnumerable<ViewerStudentRow> filtered = candidates;
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+        {
+            var normalizedQ = NormalizeArabic(trimmedQ);
+            filtered = candidates.Where(s =>
+                isIdLikeQuery
+                    ? s.Id.ToString().Contains(trimmedQ)
+                    : NormalizeArabic(s.Name).Contains(normalizedQ, StringComparison.OrdinalIgnoreCase) ||
+                      (s.PhoneNumber != null && s.PhoneNumber.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)) ||
+                      (isNumericQuery && s.Id.ToString().Contains(trimmedQ)));
+        }
+
+        var paged = filtered.OrderBy(s => s.Name)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
+            .ToList();
+
+        var pagedIds = paged.Select(s => s.Id).ToList();
+        var groupNames = await _db.GetTenantGroupNamesAsync(pagedIds);
+
+        var usages = await _db.StudentLectureViewUsages.AsNoTracking()
+            .Where(u => u.LectureId == id && pagedIds.Contains(u.StudentId))
+            .ToDictionaryAsync(u => u.StudentId);
+
+        var result = paged.Select(s =>
+        {
+            usages.TryGetValue(s.Id, out var usage);
+            var used = usage?.ViewsUsed ?? 0;
+            var extra = usage?.ExtraViews ?? 0;
+            // Without a ViewLimit, nothing ever gets tracked at all (see
+            // ConsumeView -- it returns early before touching
+            // StudentLectureViewUsages when ViewLimit is null), so
+            // "remaining" is meaningless and status only distinguishes
+            // watched-at-all vs never-opened.
+            int? remaining = lecture.ViewLimit.HasValue
+                ? Math.Max(0, lecture.ViewLimit.Value + extra - used)
+                : null;
+            var status = !lecture.ViewLimit.HasValue
+                ? (used > 0 ? "Watched" : "NotViewed")
+                : used == 0 ? "NotViewed" : (remaining!.Value <= 0 ? "Full" : "Partial");
+            return new LectureViewerItem(
+                s.Id, s.Name, s.PhoneNumber, groupNames.GetValueOrDefault(s.Id) ?? "",
+                used, lecture.ViewLimit, lecture.ViewLimit.HasValue ? extra : null, remaining, status);
+        }).ToList();
+
+        return Ok(new LectureViewersResponse(lecture.Id, lecture.Name, lecture.ViewLimit, result));
+    }
+
+    // Same NormalizeArabic used by StudentsController.ListStudents (Arabic
+    // letter-shape-insensitive search) -- see there for details.
+    private static string NormalizeArabic(string? input) => Common.StudentIdentifierResolver.NormalizeArabic(input);
 
     /// <summary>
     /// A lecture has at most one actual video source: an uploaded file stored

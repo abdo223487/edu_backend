@@ -902,4 +902,250 @@ public class LectureExamsController : ControllerBase
         await _db.SaveChangesAsync();
         return Ok(new { message = "Lecture exam deleted." });
     }
+
+    /// <summary>
+    /// Teacher-facing "كارت الامتحانات" screen: every subscribed/unlocked
+    /// student for ONE container -- a Unit (course), an OnlineLesson, or an
+    /// ExternalBook (exactly one of unitId/onlineLessonId/externalBookId is
+    /// required) -- tagged with how many of that container's LectureExams
+    /// they've actually completed (have a LectureExamResult for): "Full"
+    /// (finished every one), "Partial" (finished some), "None" (finished
+    /// none), or "NoExams" (nothing to grade yet). Paged + searched by
+    /// name/phone/id, same shape as Attendance/summary and
+    /// Lectures/{id}/viewers.
+    ///
+    /// Group split: a Unit/ExternalBook lecture's visibility comes from
+    /// LectureGroupLinks, so "total" is computed per-Group there (mirrors
+    /// Attendance/summary exactly). An OnlineLesson lecture has no
+    /// group-targeting at all -- every student who unlocked the
+    /// OnlineLesson (StudentOnlineLessonUnlock) sees every one of its
+    /// lectures, so "total" is a single Unit-wide number there and groupId
+    /// is ignored (there's no Group-scoped subset to narrow it to).
+    /// </summary>
+    private record ExamStudentRow(int Id, string Name, string? PhoneNumber, int GroupId);
+
+    // GET LectureExams/summary?unitId=..           (Center course)
+    //     LectureExams/summary?onlineLessonId=..    (Online lesson)
+    //     LectureExams/summary?externalBookId=..    (External book)
+    //     ...&groupId=..&p=..&q=.. (groupId only applies to unitId/externalBookId)
+    [HttpGet("summary")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
+    public async Task<IActionResult> GetExamsSummary(
+        [FromQuery] int? unitId, [FromQuery] int? onlineLessonId, [FromQuery] int? externalBookId,
+        [FromQuery] int? groupId, [FromQuery] int p = 1, [FromQuery] string? q = null)
+    {
+        var sourcesGiven = new[] { unitId.HasValue, onlineLessonId.HasValue, externalBookId.HasValue }.Count(x => x);
+        if (sourcesGiven != 1)
+            return BadRequest(new { message = "Pass exactly one of unitId, onlineLessonId, or externalBookId." });
+
+        string containerName;
+        List<int> reachableStudentIds;
+        List<int> containerLectureIds;
+        // Whether "total" needs a per-Group split (Unit/ExternalBook) or is
+        // one flat number for everyone (OnlineLesson -- see class doc above).
+        bool isGroupScoped = unitId.HasValue || externalBookId.HasValue;
+
+        if (unitId.HasValue)
+        {
+            var unit = await _db.Units.AsNoTracking().FirstOrDefaultAsync(u => u.Id == unitId.Value);
+            if (unit == null) return NotFound(new { message = "Unit not found." });
+            containerName = unit.Name;
+
+            reachableStudentIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+                .Where(s => s.UnitId == unitId.Value).Select(s => s.StudentId).ToListAsync();
+            containerLectureIds = await _db.Lectures.AsNoTracking()
+                .Where(l => l.UnitId == unitId.Value).Select(l => l.Id).ToListAsync();
+        }
+        else if (onlineLessonId.HasValue)
+        {
+            var onlineLesson = await _db.OnlineLessons.AsNoTracking().FirstOrDefaultAsync(o => o.Id == onlineLessonId.Value);
+            if (onlineLesson == null) return NotFound(new { message = "Online lesson not found." });
+            containerName = onlineLesson.Name;
+
+            reachableStudentIds = await _db.StudentOnlineLessonUnlocks.AsNoTracking()
+                .Where(u => u.OnlineLessonId == onlineLessonId.Value).Select(u => u.StudentId).Distinct().ToListAsync();
+            containerLectureIds = await _db.Lectures.AsNoTracking()
+                .Where(l => l.OnlineLessonId == onlineLessonId.Value).Select(l => l.Id).ToListAsync();
+        }
+        else
+        {
+            var book = await _db.ExternalBooks.AsNoTracking().FirstOrDefaultAsync(b => b.Id == externalBookId!.Value);
+            if (book == null) return NotFound(new { message = "External book not found." });
+            containerName = book.Name;
+
+            reachableStudentIds = await _db.StudentExternalBookSubscriptions.AsNoTracking()
+                .Where(s => s.ExternalBookId == externalBookId!.Value).Select(s => s.StudentId).ToListAsync();
+            containerLectureIds = await _db.Lectures.AsNoTracking()
+                .Where(l => l.ExternalBookId == externalBookId!.Value).Select(l => l.Id).ToListAsync();
+        }
+
+        // MULTI-TENANT: for Unit/ExternalBook containers (the ones with a
+        // per-Group total, see isGroupScoped above), resolve students via
+        // StudentGroupMembership (this tenant's own relationship row via
+        // Group.TeacherId), never Student.GroupId directly -- that field is
+        // the student's original/legacy group and can belong to a
+        // different teacher entirely if the student is linked to more than
+        // one. See StudentsController.ListStudents, which this mirrors.
+        // OnlineLesson containers have no per-Group split at all (their
+        // reachability is unlock-only), so there's nothing to resolve a
+        // tenant Group for -- GroupId is just unused (0) there.
+        List<ExamStudentRow> candidates;
+        if (isGroupScoped)
+        {
+            var tenantId = _tenant.CurrentTenantId;
+            var membershipQuery = _db.StudentGroupMemberships.AsNoTracking()
+                .Where(m => reachableStudentIds.Contains(m.StudentId) && m.Group!.TeacherId == tenantId);
+            if (groupId.HasValue) membershipQuery = membershipQuery.Where(m => m.GroupId == groupId.Value);
+
+            candidates = await membershipQuery
+                .Select(m => new ExamStudentRow(m.StudentId, m.Student!.Name, m.Student!.PhoneNumber, m.GroupId))
+                .ToListAsync();
+        }
+        else
+        {
+            candidates = await _db.Students.AsNoTracking()
+                .Where(s => reachableStudentIds.Contains(s.Id))
+                .Select(s => new ExamStudentRow(s.Id, s.Name, s.PhoneNumber, 0))
+                .ToListAsync();
+        }
+
+        var trimmedQ = q?.Trim();
+        var isNumericQuery = !string.IsNullOrEmpty(trimmedQ) && trimmedQ.All(char.IsDigit);
+        var isIdLikeQuery = isNumericQuery && trimmedQ!.Length <= 5 && !trimmedQ.StartsWith('0');
+
+        IEnumerable<ExamStudentRow> filtered = candidates;
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+        {
+            var normalizedQ = StudentIdentifierResolver.NormalizeArabic(trimmedQ);
+            filtered = candidates.Where(s =>
+                isIdLikeQuery
+                    ? s.Id.ToString().Contains(trimmedQ)
+                    : StudentIdentifierResolver.NormalizeArabic(s.Name).Contains(normalizedQ, StringComparison.OrdinalIgnoreCase) ||
+                      (s.PhoneNumber != null && s.PhoneNumber.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)) ||
+                      (isNumericQuery && s.Id.ToString().Contains(trimmedQ)));
+        }
+
+        var paged = filtered.OrderBy(s => s.Name)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
+            .ToList();
+
+        var pagedIds = paged.Select(s => s.Id).ToList();
+        var groupNames = await _db.GetTenantGroupNamesAsync(pagedIds);
+
+        // Every LectureExam attached to a lecture of this container, with
+        // its LectureId -- needed (for Unit/ExternalBook) to know which
+        // Group(s) can see it.
+        var examsInContainer = await _db.LectureExams.AsNoTracking()
+            .Where(e => containerLectureIds.Contains(e.LectureId))
+            .Select(e => new { e.Id, e.LectureId })
+            .ToListAsync();
+        var examIdsInContainer = examsInContainer.Select(e => e.Id).ToList();
+
+        Dictionary<int, int> totalByGroup;
+        int flatTotal = 0;
+        if (isGroupScoped)
+        {
+            totalByGroup = new Dictionary<int, int>();
+            var pagedGroupIds = paged.Select(s => s.GroupId).Distinct().ToList();
+
+            // Quizzes are a completely separate table from LectureExam (see
+            // Quiz's doc comment) and only ever belong to a Unit directly --
+            // no OnlineLesson/ExternalBook quizzes exist -- so this only
+            // ever adds anything when unitId was the container passed in.
+            var quizzesInUnit = unitId.HasValue
+                ? await _db.Quizzes.AsNoTracking().Where(qz => qz.UnitId == unitId.Value)
+                    .Select(qz => qz.Id).ToListAsync()
+                : new List<int>();
+
+            foreach (var gid in pagedGroupIds)
+            {
+                var lectureIdsForGroup = await _db.LectureGroupLinks.AsNoTracking()
+                    .Where(x => x.GroupId == gid && containerLectureIds.Contains(x.LectureId))
+                    .Select(x => x.LectureId)
+                    .ToListAsync();
+                var examCount = examsInContainer.Count(e => lectureIdsForGroup.Contains(e.LectureId));
+
+                var quizCount = quizzesInUnit.Count == 0
+                    ? 0
+                    : await _db.QuizGroupLinks.AsNoTracking()
+                        .Where(x => x.GroupId == gid && quizzesInUnit.Contains(x.QuizId))
+                        .Select(x => x.QuizId).Distinct().CountAsync();
+
+                totalByGroup[gid] = examCount + quizCount;
+            }
+        }
+        else
+        {
+            // OnlineLesson: no Group-targeting -- every unlocked student
+            // sees every lecture, so it's the same total for everyone.
+            // (No Quizzes here either -- Quiz.UnitId is required, so an
+            // OnlineLesson container never has any.)
+            totalByGroup = new Dictionary<int, int>();
+            flatTotal = examIdsInContainer.Count;
+        }
+
+        // Distinct-exam completion count per student (one LectureExamResult
+        // row is already one completed attempt, but Distinct guards against
+        // any future re-grading rows for the same exam).
+        var completedCounts = await _db.LectureExamResults.AsNoTracking()
+            .Where(r => pagedIds.Contains(r.StudentId) && examIdsInContainer.Contains(r.LectureExamId))
+            .Select(r => new { r.StudentId, r.LectureExamId })
+            .Distinct()
+            .GroupBy(r => r.StudentId)
+            .Select(g => new { StudentId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.StudentId, x => x.Count);
+
+        // Same for Quiz completions -- a QuizResult row (including
+        // auto-submitted zero-score "missed" rows, matching how the rest of
+        // the app already treats those as takers, see QuizResult.IsAutoSubmitted)
+        // counts as one completed item, added on top of the LectureExam count.
+        if (unitId.HasValue)
+        {
+            var quizIdsInUnit = await _db.Quizzes.AsNoTracking()
+                .Where(qz => qz.UnitId == unitId.Value).Select(qz => qz.Id).ToListAsync();
+            if (quizIdsInUnit.Count > 0)
+            {
+                var quizCompletedCounts = await _db.QuizResults.AsNoTracking()
+                    .Where(r => pagedIds.Contains(r.StudentId) && quizIdsInUnit.Contains(r.QuizId))
+                    .Select(r => new { r.StudentId, r.QuizId })
+                    .Distinct()
+                    .GroupBy(r => r.StudentId)
+                    .Select(g => new { StudentId = g.Key, Count = g.Count() })
+                    .ToDictionaryAsync(x => x.StudentId, x => x.Count);
+
+                foreach (var (studentId, count) in quizCompletedCounts)
+                    completedCounts[studentId] = completedCounts.GetValueOrDefault(studentId, 0) + count;
+            }
+        }
+
+        var result = paged.Select(s =>
+        {
+            var total = isGroupScoped ? totalByGroup.GetValueOrDefault(s.GroupId, 0) : flatTotal;
+            var completed = completedCounts.GetValueOrDefault(s.Id, 0);
+            var status = total == 0 ? "NoExams" : completed == 0 ? "None" : completed >= total ? "Full" : "Partial";
+            return new ExamStudentItem(
+                s.Id, s.Name, s.PhoneNumber, groupNames.GetValueOrDefault(s.Id) ?? "", completed, total, status);
+        }).ToList();
+
+        return Ok(new ExamSummaryResponse(containerName, result));
+    }
 }
+
+// One row per student in the LectureExams/summary response. "Completed"/
+// "Total" cover BOTH kinds of exam a student can face: LectureExam (attached
+// directly to one lecture) and, for Unit containers only, Quiz (a Unit-wide
+// exam with its own shared Deadline -- see the Quiz entity's doc comment).
+// Status is one of "Full" (completed every one of them), "Partial"
+// (completed some), "None" (completed none), or "NoExams" (nothing to grade
+// yet).
+public record ExamStudentItem(
+    int StudentId,
+    string Name,
+    string? PhoneNumber,
+    string GroupName,
+    int CompletedCount,
+    int TotalExams,
+    string Status);
+
+public record ExamSummaryResponse(string ContainerName, List<ExamStudentItem> Students);
