@@ -337,4 +337,64 @@ public class UnitsController : ControllerBase
         await _db.SaveChangesAsync();
         return Ok(new { message = "Lesson deleted." });
     }
+
+    /// <summary>
+    /// Teacher-facing "كارت المشتركين" screen: for a given SchoolYear
+    /// (optionally narrowed to one Group), every Unit (course) in that year
+    /// with how many of the relevant population are subscribed to it vs
+    /// not. "Population" is either the whole year (groupId omitted -- came
+    /// from the "كل المجموعات" card) or just one Group's students (groupId
+    /// given -- came from a single-group card). Unlike the other numeric
+    /// cards this is a pure aggregate, not a per-student list -- the
+    /// Flutter side renders it as tabs (one per Unit) each showing just the
+    /// two counts.
+    ///
+    /// MULTI-TENANT: population is resolved through StudentGroupMembership
+    /// (this tenant's relationship row), never Student.GroupId/SchoolYear
+    /// directly -- those are the student's original/legacy values and can
+    /// belong to a different teacher entirely if the student is linked to
+    /// more than one (see StudentsController.ListStudents, which this
+    /// mirrors).
+    /// </summary>
+    // GET Units/subscribers-summary?schoolYear=..&groupId=..
+    [HttpGet("subscribers-summary")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
+    public async Task<IActionResult> GetSubscribersSummary([FromQuery] int schoolYear, [FromQuery] int? groupId)
+    {
+        var populationQuery = groupId.HasValue
+            ? _db.Students.AsNoTracking().Where(s => s.GroupMemberships.Any(m => m.GroupId == groupId.Value))
+            : _db.Students.AsNoTracking().Where(s => s.GroupMemberships.Any(m => m.Group!.SchoolYear == schoolYear));
+
+        var populationIds = await populationQuery.Select(s => s.Id).ToListAsync();
+        var totalPopulation = populationIds.Count;
+
+        var units = await _db.Units.AsNoTracking()
+            .Where(u => u.SchoolYear == schoolYear)
+            .OrderBy(u => u.Id)
+            .Select(u => new { u.Id, u.Name })
+            .ToListAsync();
+        var unitIds = units.Select(u => u.Id).ToList();
+
+        var subscribedCounts = await _db.StudentUnitSubscriptions.AsNoTracking()
+            .Where(s => unitIds.Contains(s.UnitId) && populationIds.Contains(s.StudentId))
+            .Select(s => new { s.UnitId, s.StudentId })
+            .Distinct()
+            .GroupBy(s => s.UnitId)
+            .Select(g => new { UnitId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.UnitId, x => x.Count);
+
+        var result = units.Select(u =>
+        {
+            var subscribed = subscribedCounts.GetValueOrDefault(u.Id, 0);
+            return new UnitSubscribersItem(u.Id, u.Name, subscribed, totalPopulation - subscribed);
+        }).ToList();
+
+        return Ok(new UnitSubscribersSummaryResponse(schoolYear, groupId, totalPopulation, result));
+    }
 }
+
+// One row per Unit in the Units/subscribers-summary response.
+public record UnitSubscribersItem(int UnitId, string UnitName, int SubscribedCount, int NotSubscribedCount);
+
+public record UnitSubscribersSummaryResponse(
+    int SchoolYear, int? GroupId, int TotalPopulation, List<UnitSubscribersItem> Units);
