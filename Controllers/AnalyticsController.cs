@@ -916,4 +916,295 @@ public class AnalyticsController : ControllerBase
             averageMarks = scores.Count == 0 ? 0 : scores.Average()
         });
     }
+
+    /// <summary>
+    /// Teacher-facing "كارت أوائل المنصة" screen: for one Unit (course,
+    /// platform-wide -- every Group, not narrowed to one), every subscribed
+    /// student who has done EVERYTHING there is to do in that course:
+    ///   - Every exam (LectureExam attached to the Unit's lectures + Quiz
+    ///     for the Unit -- same combined total as LectureExamsController.
+    ///     GetExamsSummary(unitId), status "Full")
+    ///   - Every homework (LectureAssignment + Assignment + AssignmentCenter
+    ///     -- same as LectureAssignmentsController.GetHomeworkSummary(unitId),
+    ///     status "Full")
+    ///   - Every Center lecture attendance (same as AttendanceController.
+    ///     GetAttendanceSummary(unitId), status "Full")
+    ///   - Watched at least SOME video (any ViewsUsed > 0 on any of the
+    ///     Unit's lectures) -- the one category that only needs partial
+    ///     credit, per the teacher's own phrasing ("حتى لو جزء")
+    /// A category with nothing in it at all for the student's Group (e.g.
+    /// no Center lecture yet) doesn't disqualify them -- same "NoX passes"
+    /// reasoning as the individual cards' "NoExams"/"NoHomework"/
+    /// "NoLectures" statuses.
+    ///
+    /// Ranked by TotalMarks = sum of every CenterQuizResult + HomeworkResult
+    /// this teacher has ever manually entered for the student (see
+    /// StudentsController's quiz-results/center and homework-results
+    /// endpoints, and student_details_.dart which displays the same manual
+    /// marks) -- these are NOT Unit-scoped in the schema, so "total" here is
+    /// the student's whole manual-marks history with this teacher, same
+    /// number the details page already shows.
+    /// </summary>
+    private record TopOfPlatformCandidate(
+        int StudentId, string Name, string? PhoneNumber, int GroupId,
+        int ExamCompleted, int ExamTotal,
+        int HomeworkCompleted, int HomeworkTotal,
+        int AttendanceCompleted, int AttendanceTotal,
+        bool WatchedVideos, decimal TotalMarks);
+
+    private async Task<(string UnitName, List<TopOfPlatformCandidate> Students)> ComputeTopOfPlatformAsync(int unitId)
+    {
+        var unit = await _db.Units.AsNoTracking().FirstOrDefaultAsync(u => u.Id == unitId);
+        if (unit == null) return (string.Empty, new List<TopOfPlatformCandidate>());
+
+        var subscribedIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+            .Where(s => s.UnitId == unitId).Select(s => s.StudentId).ToListAsync();
+        if (subscribedIds.Count == 0) return (unit.Name, new List<TopOfPlatformCandidate>());
+
+        // MULTI-TENANT: same StudentGroupMembership resolution used
+        // throughout (Attendance/Exams/Homework summaries) -- never
+        // Student.GroupId directly.
+        var tenantId = _tenant.CurrentTenantId;
+        var memberships = await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => subscribedIds.Contains(m.StudentId) && m.Group!.TeacherId == tenantId)
+            .Select(m => new { m.StudentId, m.GroupId, m.Student!.Name, m.Student!.PhoneNumber })
+            .ToListAsync();
+        if (memberships.Count == 0) return (unit.Name, new List<TopOfPlatformCandidate>());
+
+        var studentIds = memberships.Select(m => m.StudentId).ToList();
+        var groupIds = memberships.Select(m => m.GroupId).Distinct().ToList();
+
+        var unitLectureIds = await _db.Lectures.AsNoTracking()
+            .Where(l => l.UnitId == unitId).Select(l => l.Id).ToListAsync();
+        var centerLectureIds = await _db.Lectures.AsNoTracking()
+            .Where(l => l.UnitId == unitId && l.AttendanceMethod == AttendanceMethod.Center)
+            .Select(l => l.Id).ToListAsync();
+
+        // ── Exam items (LectureExam + Quiz), same shape as GetExamsSummary ──
+        var examsInUnit = await _db.LectureExams.AsNoTracking()
+            .Where(e => unitLectureIds.Contains(e.LectureId))
+            .Select(e => new { e.Id, e.LectureId }).ToListAsync();
+        var examIdsInUnit = examsInUnit.Select(e => e.Id).ToList();
+        var quizzesInUnit = await _db.Quizzes.AsNoTracking()
+            .Where(qz => qz.UnitId == unitId).Select(qz => qz.Id).ToListAsync();
+
+        // ── Homework items (LectureAssignment + Assignment + AssignmentCenter) ──
+        var lectureAssignmentsInUnit = await _db.LectureAssignments.AsNoTracking()
+            .Where(a => unitLectureIds.Contains(a.LectureId))
+            .Select(a => new { a.Id, a.LectureId }).ToListAsync();
+        var lectureAssignmentIdsInUnit = lectureAssignmentsInUnit.Select(a => a.Id).ToList();
+        var assignmentsInUnit = await _db.AssignmentUnitLinks.AsNoTracking()
+            .Where(x => x.UnitId == unitId).Select(x => x.AssignmentId).Distinct().ToListAsync();
+        var assignmentCentersInUnit = await _db.AssignmentCenterUnitLinks.AsNoTracking()
+            .Where(x => x.UnitId == unitId).Select(x => x.AssignmentCenterId).Distinct().ToListAsync();
+
+        // ── Per-Group totals (a student can only ever face what's visible to their own Group) ──
+        var examTotalByGroup = new Dictionary<int, int>();
+        var homeworkTotalByGroup = new Dictionary<int, int>();
+        var attendanceTotalByGroup = new Dictionary<int, int>();
+        foreach (var gid in groupIds)
+        {
+            var lectureIdsForGroup = await _db.LectureGroupLinks.AsNoTracking()
+                .Where(x => x.GroupId == gid && unitLectureIds.Contains(x.LectureId))
+                .Select(x => x.LectureId).ToListAsync();
+
+            var examCount = examsInUnit.Count(e => lectureIdsForGroup.Contains(e.LectureId));
+            var quizCount = quizzesInUnit.Count == 0 ? 0 : await _db.QuizGroupLinks.AsNoTracking()
+                .Where(x => x.GroupId == gid && quizzesInUnit.Contains(x.QuizId))
+                .Select(x => x.QuizId).Distinct().CountAsync();
+            examTotalByGroup[gid] = examCount + quizCount;
+
+            var lectureAssignmentCount = lectureAssignmentsInUnit.Count(a => lectureIdsForGroup.Contains(a.LectureId));
+            var assignmentCount = assignmentsInUnit.Count == 0 ? 0 : await _db.AssignmentGroupLinks.AsNoTracking()
+                .Where(x => x.GroupId == gid && assignmentsInUnit.Contains(x.AssignmentId))
+                .Select(x => x.AssignmentId).Distinct().CountAsync();
+            var assignmentCenterCount = assignmentCentersInUnit.Count == 0 ? 0 : await _db.AssignmentCenterGroupLinks.AsNoTracking()
+                .Where(x => x.GroupId == gid && assignmentCentersInUnit.Contains(x.AssignmentCenterId))
+                .Select(x => x.AssignmentCenterId).Distinct().CountAsync();
+            homeworkTotalByGroup[gid] = lectureAssignmentCount + assignmentCount + assignmentCenterCount;
+
+            attendanceTotalByGroup[gid] = lectureIdsForGroup.Count(id => centerLectureIds.Contains(id));
+        }
+
+        // ── Completion counts ──
+        var examCompleted = await _db.LectureExamResults.AsNoTracking()
+            .Where(r => studentIds.Contains(r.StudentId) && examIdsInUnit.Contains(r.LectureExamId))
+            .Select(r => new { r.StudentId, r.LectureExamId }).Distinct()
+            .GroupBy(r => r.StudentId).Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Key, x => x.Count);
+        if (quizzesInUnit.Count > 0)
+        {
+            var quizCompleted = await _db.QuizResults.AsNoTracking()
+                .Where(r => studentIds.Contains(r.StudentId) && quizzesInUnit.Contains(r.QuizId))
+                .Select(r => new { r.StudentId, r.QuizId }).Distinct()
+                .GroupBy(r => r.StudentId).Select(g => new { g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count);
+            foreach (var (sid, count) in quizCompleted)
+                examCompleted[sid] = examCompleted.GetValueOrDefault(sid, 0) + count;
+        }
+
+        var homeworkCompleted = await _db.LectureAssignmentResults.AsNoTracking()
+            .Where(r => studentIds.Contains(r.StudentId) && lectureAssignmentIdsInUnit.Contains(r.LectureAssignmentId))
+            .Select(r => new { r.StudentId, r.LectureAssignmentId }).Distinct()
+            .GroupBy(r => r.StudentId).Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Key, x => x.Count);
+        if (assignmentsInUnit.Count > 0)
+        {
+            var assignmentCompleted = await _db.AssignmentSubmissions.AsNoTracking()
+                .Where(r => studentIds.Contains(r.StudentId) && assignmentsInUnit.Contains(r.AssignmentId))
+                .Select(r => new { r.StudentId, r.AssignmentId }).Distinct()
+                .GroupBy(r => r.StudentId).Select(g => new { g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count);
+            foreach (var (sid, count) in assignmentCompleted)
+                homeworkCompleted[sid] = homeworkCompleted.GetValueOrDefault(sid, 0) + count;
+        }
+        if (assignmentCentersInUnit.Count > 0)
+        {
+            var centerCompleted = await _db.AssignmentCenterSubmissions.AsNoTracking()
+                .Where(r => studentIds.Contains(r.StudentId) && assignmentCentersInUnit.Contains(r.AssignmentCenterId))
+                .Select(r => new { r.StudentId, r.AssignmentCenterId }).Distinct()
+                .GroupBy(r => r.StudentId).Select(g => new { g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.Key, x => x.Count);
+            foreach (var (sid, count) in centerCompleted)
+                homeworkCompleted[sid] = homeworkCompleted.GetValueOrDefault(sid, 0) + count;
+        }
+
+        var attendanceCompleted = await _db.Attendances.AsNoTracking()
+            .Where(a => studentIds.Contains(a.StudentId) && centerLectureIds.Contains(a.LectureId))
+            .Select(a => new { a.StudentId, a.LectureId }).Distinct()
+            .GroupBy(a => a.StudentId).Select(g => new { g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.Key, x => x.Count);
+
+        // ── Watched (partial credit: ANY view counts, see doc comment) ──
+        // Only lectures with a ViewLimit are ever tracked at all (see
+        // ConsumeView), so if none of this Unit's lectures track views,
+        // there's nothing to require -- same "N/A passes" reasoning as the
+        // other categories' "NoX" statuses.
+        var anyTrackableVideo = await _db.Lectures.AsNoTracking()
+            .Where(l => unitLectureIds.Contains(l.Id) && l.ViewLimit != null)
+            .AnyAsync();
+        var watchedStudentIds = (await _db.StudentLectureViewUsages.AsNoTracking()
+                .Where(v => studentIds.Contains(v.StudentId) && unitLectureIds.Contains(v.LectureId) && v.ViewsUsed > 0)
+                .Select(v => v.StudentId).Distinct().ToListAsync())
+            .ToHashSet();
+
+        // ── Manual marks (platform-wide, not Unit-scoped -- see doc comment) ──
+        var centerQuizTotals = await _db.CenterQuizResults.AsNoTracking()
+            .Where(r => studentIds.Contains(r.StudentId))
+            .GroupBy(r => r.StudentId).Select(g => new { g.Key, Sum = g.Sum(x => x.Marks) })
+            .ToDictionaryAsync(x => x.Key, x => x.Sum);
+        var homeworkMarkTotals = await _db.HomeworkResults.AsNoTracking()
+            .Where(r => studentIds.Contains(r.StudentId))
+            .GroupBy(r => r.StudentId).Select(g => new { g.Key, Sum = g.Sum(x => x.Marks) })
+            .ToDictionaryAsync(x => x.Key, x => x.Sum);
+
+        var qualifying = new List<TopOfPlatformCandidate>();
+        foreach (var m in memberships)
+        {
+            var examTotal = examTotalByGroup.GetValueOrDefault(m.GroupId, 0);
+            var examDone = examCompleted.GetValueOrDefault(m.StudentId, 0);
+            var hwTotal = homeworkTotalByGroup.GetValueOrDefault(m.GroupId, 0);
+            var hwDone = homeworkCompleted.GetValueOrDefault(m.StudentId, 0);
+            var attTotal = attendanceTotalByGroup.GetValueOrDefault(m.GroupId, 0);
+            var attDone = attendanceCompleted.GetValueOrDefault(m.StudentId, 0);
+            var watched = watchedStudentIds.Contains(m.StudentId);
+
+            var examOk = examTotal == 0 || examDone >= examTotal;
+            var hwOk = hwTotal == 0 || hwDone >= hwTotal;
+            var attOk = attTotal == 0 || attDone >= attTotal;
+            var watchOk = !anyTrackableVideo || watched;
+
+            if (!examOk || !hwOk || !attOk || !watchOk) continue;
+
+            var totalMarks = centerQuizTotals.GetValueOrDefault(m.StudentId, 0) + homeworkMarkTotals.GetValueOrDefault(m.StudentId, 0);
+            qualifying.Add(new TopOfPlatformCandidate(
+                m.StudentId, m.Name, m.PhoneNumber, m.GroupId,
+                examDone, examTotal, hwDone, hwTotal, attDone, attTotal, watched, totalMarks));
+        }
+
+        return (unit.Name, qualifying.OrderByDescending(c => c.TotalMarks).ToList());
+    }
+
+    // GET Analytics/top-of-platform?unitId=..&p=..&q=..
+    [HttpGet("top-of-platform")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
+    public async Task<IActionResult> GetTopOfPlatform([FromQuery] int unitId, [FromQuery] int p = 1, [FromQuery] string? q = null)
+    {
+        var (unitName, qualifying) = await ComputeTopOfPlatformAsync(unitId);
+        if (unitName.Length == 0) return NotFound(new { message = "Unit not found." });
+
+        var trimmedQ = q?.Trim();
+        var isNumericQuery = !string.IsNullOrEmpty(trimmedQ) && trimmedQ.All(char.IsDigit);
+        var isIdLikeQuery = isNumericQuery && trimmedQ!.Length <= 5 && !trimmedQ.StartsWith('0');
+
+        IEnumerable<TopOfPlatformCandidate> filtered = qualifying;
+        if (!string.IsNullOrWhiteSpace(trimmedQ))
+        {
+            var normalizedQ = StudentIdentifierResolver.NormalizeArabic(trimmedQ);
+            filtered = qualifying.Where(s =>
+                isIdLikeQuery
+                    ? s.StudentId.ToString().Contains(trimmedQ)
+                    : StudentIdentifierResolver.NormalizeArabic(s.Name).Contains(normalizedQ, StringComparison.OrdinalIgnoreCase) ||
+                      (s.PhoneNumber != null && s.PhoneNumber.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)) ||
+                      (isNumericQuery && s.StudentId.ToString().Contains(trimmedQ)));
+        }
+
+        // Keep the ranking order (already sorted by TotalMarks) intact through search + paging.
+        var paged = filtered.Skip((p - 1) * PagingDefaults.PageSize).Take(PagingDefaults.PageSize).ToList();
+        var groupNames = await _db.GetTenantGroupNamesAsync(paged.Select(s => s.StudentId).ToList());
+
+        var result = paged.Select(s => new TopOfPlatformStudentItem(
+            s.StudentId, s.Name, s.PhoneNumber, groupNames.GetValueOrDefault(s.StudentId) ?? "",
+            s.ExamCompleted, s.ExamTotal, s.HomeworkCompleted, s.HomeworkTotal,
+            s.AttendanceCompleted, s.AttendanceTotal, s.WatchedVideos, s.TotalMarks)).ToList();
+
+        return Ok(new TopOfPlatformResponse(unitName, result));
+    }
+
+    // GET Analytics/top-of-platform/sheet?unitId=..
+    [HttpGet("top-of-platform/sheet")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> DownloadTopOfPlatformSheet([FromQuery] int unitId)
+    {
+        var (unitName, qualifying) = await ComputeTopOfPlatformAsync(unitId);
+        if (unitName.Length == 0) return NotFound(new { message = "Unit not found." });
+
+        var studentIds = qualifying.Select(s => s.StudentId).ToList();
+        var groupNames = await _db.GetTenantGroupNamesAsync(studentIds);
+        var parentPhones = await _db.Students.AsNoTracking()
+            .Where(s => studentIds.Contains(s.Id))
+            .Select(s => new { s.Id, s.ParentPhoneNumber })
+            .ToDictionaryAsync(x => x.Id, x => x.ParentPhoneNumber ?? "");
+
+        var headers = new[] { "Name", "StudentId", "ParentPhoneNumber", "Group" };
+        var rows = qualifying.Select(s => new[]
+        {
+            s.Name,
+            s.StudentId.ToString(),
+            parentPhones.GetValueOrDefault(s.StudentId, ""),
+            groupNames.GetValueOrDefault(s.StudentId) ?? "",
+        });
+
+        var sheets = new[] { (SheetName: SafeSheetName(unitName), Headers: headers, Rows: rows) };
+        var bytes = BuildMultiSheetXlsx(sheets);
+        return XlsxFile(bytes, $"top_of_platform_{SafeSheetName(unitName)}.xlsx");
+    }
 }
+
+// One row per qualifying student in the Analytics/top-of-platform response,
+// already ranked (the list comes back pre-sorted by TotalMarks descending).
+public record TopOfPlatformStudentItem(
+    int StudentId,
+    string Name,
+    string? PhoneNumber,
+    string GroupName,
+    int ExamCompleted,
+    int ExamTotal,
+    int HomeworkCompleted,
+    int HomeworkTotal,
+    int AttendanceCompleted,
+    int AttendanceTotal,
+    bool WatchedVideos,
+    decimal TotalMarks);
+
+public record TopOfPlatformResponse(string UnitName, List<TopOfPlatformStudentItem> Students);
