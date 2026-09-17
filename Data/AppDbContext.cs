@@ -33,6 +33,7 @@ public class AppDbContext : DbContext
     public DbSet<StudentRegistrationRequest> StudentRegistrationRequests => Set<StudentRegistrationRequest>();
     public DbSet<StudentLectureUnlock> StudentLectureUnlocks => Set<StudentLectureUnlock>();
     public DbSet<StudentLectureViewUsage> StudentLectureViewUsages => Set<StudentLectureViewUsage>();
+    public DbSet<LectureViewSession> LectureViewSessions => Set<LectureViewSession>();
     public DbSet<Lecture> Lectures => Set<Lecture>();
     public DbSet<Material> Materials => Set<Material>();
     public DbSet<Notebook> Notebooks => Set<Notebook>();
@@ -300,6 +301,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<BillingPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentLectureUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentLectureViewUsage>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<LectureViewSession>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentOnlineLessonUnlock>().HasQueryFilter(u => u.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<StudentUnitSubscription>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
 

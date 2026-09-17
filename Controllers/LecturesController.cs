@@ -885,9 +885,50 @@ public class LecturesController : ControllerBase
         }
         usage.ViewsUsed += 1;
         usage.LastViewedAt = DateTime.UtcNow;
+
+        // Every view of a ViewLimit'd lecture gets a session to report
+        // progress against, regardless of source -- both the File player
+        // (video_player/Chewie) and the Youtube player (youtube_player_
+        // flutter/iframe) can report a playhead position now (see
+        // LectureViewSession's doc comment and ReportViewProgress).
+        var session = new LectureViewSession
+        {
+            TeacherId = User.GetStaffTenantId() ?? lecture.TeacherId,
+            StudentId = studentId,
+            LectureId = id,
+        };
+        _db.LectureViewSessions.Add(session);
         await _db.SaveChangesAsync();
 
-        return Ok(new ConsumeViewResult(true, remaining - 1, null));
+        return Ok(new ConsumeViewResult(true, remaining - 1, null, session.Id));
+    }
+
+    /// <summary>
+    /// Called periodically by the in-app video player (and once more right
+    /// as it closes/pauses) while playing a File-sourced lecture, so the
+    /// teacher's "views" screen can show where each individual view
+    /// actually stopped. SessionId must be one this same student opened via
+    /// ConsumeView on this same lecture -- see LectureViewSession's doc
+    /// comment.
+    /// </summary>
+    // POST Lectures/{id}/view-progress  body: { sessionId, positionSeconds }
+    [HttpPost("{id:int}/view-progress")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> ReportViewProgress(int id, [FromBody] ReportViewProgressRequest request)
+    {
+        var studentId = User.GetUserId();
+        var session = await _db.LectureViewSessions
+            .FirstOrDefaultAsync(s => s.Id == request.SessionId && s.LectureId == id && s.StudentId == studentId);
+        if (session == null) return NotFound(new { message = "View session not found." });
+
+        // Only ever move forward: a stray late/out-of-order report (e.g. one
+        // last save firing right as the player closes, after the student
+        // rewound) should never erase further progress they already reached.
+        if (request.PositionSeconds > (session.StoppedAtSeconds ?? -1))
+            session.StoppedAtSeconds = request.PositionSeconds;
+
+        await _db.SaveChangesAsync();
+        return Ok(new { message = "Progress saved." });
     }
 
     /// <summary>
@@ -1100,6 +1141,19 @@ public class LecturesController : ControllerBase
             .Where(u => u.LectureId == id && pagedIds.Contains(u.StudentId))
             .ToDictionaryAsync(u => u.StudentId);
 
+        // Sessions now exist for ANY ViewLimit'd lecture regardless of
+        // source (see ConsumeView) -- both the File and Youtube players can
+        // report a playhead position.
+        var tracksProgress = lecture.ViewLimit.HasValue;
+        var sessionsByStudent = tracksProgress
+            ? (await _db.LectureViewSessions.AsNoTracking()
+                .Where(s => s.LectureId == id && pagedIds.Contains(s.StudentId))
+                .OrderBy(s => s.CreatedAt)
+                .ToListAsync())
+                .GroupBy(s => s.StudentId)
+                .ToDictionary(g => g.Key, g => g.Select(s => new LectureViewerSessionItem(s.StoppedAtSeconds, s.CreatedAt)).ToList())
+            : new Dictionary<int, List<LectureViewerSessionItem>>();
+
         var result = paged.Select(s =>
         {
             usages.TryGetValue(s.Id, out var usage);
@@ -1118,10 +1172,11 @@ public class LecturesController : ControllerBase
                 : used == 0 ? "NotViewed" : (remaining!.Value <= 0 ? "Full" : "Partial");
             return new LectureViewerItem(
                 s.Id, s.Name, s.PhoneNumber, groupNames.GetValueOrDefault(s.Id) ?? "",
-                used, lecture.ViewLimit, lecture.ViewLimit.HasValue ? extra : null, remaining, status);
+                used, lecture.ViewLimit, lecture.ViewLimit.HasValue ? extra : null, remaining, status,
+                tracksProgress ? sessionsByStudent.GetValueOrDefault(s.Id, new List<LectureViewerSessionItem>()) : null);
         }).ToList();
 
-        return Ok(new LectureViewersResponse(lecture.Id, lecture.Name, lecture.ViewLimit, result));
+        return Ok(new LectureViewersResponse(lecture.Id, lecture.Name, lecture.ViewLimit, tracksProgress, result));
     }
 
     // Same NormalizeArabic used by StudentsController.ListStudents (Arabic

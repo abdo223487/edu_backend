@@ -77,7 +77,21 @@ public record MaterialListItem(int Id, string Name, string Type, string Link);
 // GET Lectures/{id}/consume-view response.
 // "Allowed" is false when the student has no views left -- the client
 // should NOT open the player in that case, and should surface Message.
-public record ConsumeViewResult(bool Allowed, int? RemainingViews, string? Message);
+// Allowed/RemainingViews/Message as before. SessionId is set only when this
+// call just started a NEW view of a File-sourced lecture (see
+// LecturesController.ConsumeView) -- the client hangs onto it and passes it
+// back to ReportViewProgress as it plays, so the teacher's "views" screen
+// can show where this particular view stopped. Null for Youtube lectures
+// (no in-app player to report a position from) and for the read-only
+// view-status check.
+public record ConsumeViewResult(bool Allowed, int? RemainingViews, string? Message, int? SessionId = null);
+
+// POST Lectures/{id}/view-progress body -- SessionId from ConsumeViewResult,
+// PositionSeconds is the student's current playhead position. Call this
+// periodically (e.g. every 10-15s) and once more right when the player
+// closes/pauses/the app backgrounds, so a session that never reaches
+// natural "finished" still has its last known position saved.
+public record ReportViewProgressRequest(int SessionId, int PositionSeconds);
 
 // GET Lectures/student-views?studentId=.. (teacher) — one row per Online
 // lecture that has a ViewLimit AND is reachable by this student (subscribed
@@ -103,6 +117,18 @@ public record AdjustStudentViewsRequest(int StudentId, int LectureId, int Delta)
 // "NotViewed" (never opened), "Partial" (opened, views remain), "Full" (used
 // every allowed view), or "Watched" (opened at least once, lecture has no
 // ViewLimit so there's nothing to run out of).
+// GET Lectures/{id}/viewers?p=..&q=.. (teacher) — one row per student who can
+// reach this ONE lecture, paged/searched like Students. Status is one of
+// "NotViewed" (never opened), "Partial" (opened, views remain), "Full" (used
+// every allowed view), or "Watched" (opened at least once, lecture has no
+// ViewLimit so there's nothing to run out of). Sessions is only ever
+// populated when the lecture has a ViewLimit (see LectureViewersResponse.
+// TracksProgress) -- one entry per individual view, each with where in the
+// video that particular view stopped (null if the student closed the player
+// before ever reporting a position). Works for both File and Youtube
+// lectures now -- both players report a position (see ReportViewProgress).
+public record LectureViewerSessionItem(int? StoppedAtSeconds, DateTime CreatedAt);
+
 public record LectureViewerItem(
     int StudentId,
     string Name,
@@ -112,10 +138,12 @@ public record LectureViewerItem(
     int? ViewLimit,
     int? ExtraViews,
     int? RemainingViews,
-    string Status);
+    string Status,
+    List<LectureViewerSessionItem>? Sessions);
 
 public record LectureViewersResponse(
     int LectureId,
     string LectureName,
     int? ViewLimit,
+    bool TracksProgress,
     List<LectureViewerItem> Students);

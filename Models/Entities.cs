@@ -552,6 +552,32 @@ public class StudentLectureViewUsage
     public DateTime? LastViewedAt { get; set; }
 }
 
+/// <summary>
+/// One row per individual view of a ViewLimit'd lecture -- File or Youtube,
+/// both now report a playhead position (see LecturesController.
+/// ReportViewProgress and the File/Youtube player widgets in services.dart).
+/// Created once per ConsumeView call, then updated as the student watches,
+/// so the teacher's "مشاهدات" screen can show not just a view COUNT but
+/// where each individual view actually stopped -- e.g. "شاف مرتين: مرة لحد
+/// دقيقة 5، والتانية لحد دقيقة 12".
+/// </summary>
+public class LectureViewSession
+{
+    public int Id { get; set; }
+    // MULTI-TENANT SECURITY: same reasoning as StudentLectureViewUsage.TeacherId.
+    public int TeacherId { get; set; }
+    public int StudentId { get; set; }
+    public int LectureId { get; set; }
+    /// <summary>
+    /// How far into the video (in seconds) the student got during THIS one
+    /// view. Null until the client reports at least once -- e.g. they
+    /// opened the player and closed it again before the first progress
+    /// report went out.
+    /// </summary>
+    public int? StoppedAtSeconds { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
 public enum AttendanceMethod
 {
     Center,
