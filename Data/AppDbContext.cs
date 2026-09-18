@@ -33,6 +33,7 @@ public class AppDbContext : DbContext
     public DbSet<StudentRegistrationRequest> StudentRegistrationRequests => Set<StudentRegistrationRequest>();
     public DbSet<StudentLectureUnlock> StudentLectureUnlocks => Set<StudentLectureUnlock>();
     public DbSet<StudentLectureViewUsage> StudentLectureViewUsages => Set<StudentLectureViewUsage>();
+    public DbSet<StudentWallet> StudentWallets => Set<StudentWallet>();
     public DbSet<LectureViewSession> LectureViewSessions => Set<LectureViewSession>();
     public DbSet<Lecture> Lectures => Set<Lecture>();
     public DbSet<Material> Materials => Set<Material>();
@@ -129,6 +130,7 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<Billing>().HasQueryFilter(b => b.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Code>().HasQueryFilter(c => c.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<WalletTransaction>().HasQueryFilter(w => w.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<StudentWallet>().HasQueryFilter(w => w.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<ClassScheduleDay>().HasQueryFilter(d => d.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<ClassScheduleEntry>().HasQueryFilter(d => d.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Notification>().HasQueryFilter(n => n.TeacherId == _tenant.CurrentTenantId);
@@ -334,6 +336,13 @@ public class AppDbContext : DbContext
         modelBuilder.Entity<StudentLectureViewUsage>().HasIndex(u => u.TeacherId);
         modelBuilder.Entity<StudentUnitSubscription>().HasIndex(s => s.TeacherId);
         modelBuilder.Entity<StudentOnlineLessonUnlock>().HasIndex(u => u.TeacherId);
+
+        // One wallet row per (Student, Teacher) -- see StudentWallet doc comment.
+        // The unique index is the actual concurrency guarantee against two
+        // simultaneous "first ever purchase/adjustment for this student+teacher"
+        // requests both trying to INSERT a brand-new row at once.
+        modelBuilder.Entity<StudentWallet>().HasIndex(w => new { w.StudentId, w.TeacherId }).IsUnique();
+        modelBuilder.Entity<StudentWallet>().HasIndex(w => w.TeacherId);
 
         // MULTI-TENANT MEMBERSHIP: a Student can belong to Groups under MORE THAN
         // ONE teacher now (StudentGroupMembership). A Student row is visible under

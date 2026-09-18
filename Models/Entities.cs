@@ -209,11 +209,14 @@ public class Student
     public ICollection<StateHistoryEntry> StateHistory { get; set; } = new List<StateHistoryEntry>();
 
     /// <summary>
-    /// POINTS WALLET: cached running balance, kept in sync with every row
-    /// added to WalletTransactions (see WalletController) so reads don't
-    /// need to sum the whole history every time. The transactions table
-    /// remains the source of truth / audit trail; this is a denormalized
-    /// convenience field updated atomically alongside each transaction.
+    /// LEGACY / UNUSED: used to be the single points-wallet balance for this
+    /// student, shared across every teacher they're linked to -- which was a
+    /// bug (points added by one teacher were visible/spendable under any
+    /// other teacher). Superseded by StudentWallet (one row per StudentId +
+    /// TeacherId). WalletController no longer reads or writes this column;
+    /// kept only so old data isn't silently dropped (see the
+    /// AddStudentWalletPerTeacher migration, which backfills it once into
+    /// StudentWallet). Safe to remove entirely in a future migration.
     /// </summary>
     [Column(TypeName = "decimal(10,2)")]
     public decimal WalletBalance { get; set; } = 0;
@@ -972,8 +975,9 @@ public class Code
 /// One row per points-wallet movement for a student: a teacher/assistant
 /// manually crediting or debiting points (Type = "manual"), or a student
 /// spending points to unlock a Unit (Type = "purchase", see
-/// WalletController.PurchaseUnit). Append-only audit trail; Student.WalletBalance
-/// is the cached running total kept in sync with these rows.
+/// WalletController.PurchaseUnit). Append-only audit trail; StudentWallet.Balance
+/// (one row per StudentId + TeacherId) is the cached running total kept in
+/// sync with these rows.
 /// </summary>
 public class WalletTransaction
 {
@@ -1005,6 +1009,32 @@ public class WalletTransaction
 
     /// <summary>TENANT LAYER: which teacher (tenant) this transaction belongs to.</summary>
     public int TeacherId { get; set; }
+}
+
+/// <summary>
+/// BUGFIX (cross-tenant wallet leak): Student.WalletBalance used to be a
+/// single cached number on the Student row itself, shared across EVERY
+/// teacher that student is linked to. That meant points a teacher added for
+/// a student were visible -- and spendable -- under any OTHER teacher too
+/// (and a deduction by teacher B could eat into points teacher A gave).
+/// The wallet is now split one row per (StudentId, TeacherId) pair, exactly
+/// like every other per-teacher table in this schema (StudentUnitSubscription,
+/// WalletTransaction, etc.). WalletController reads/writes the row matching
+/// the CURRENT tenant only -- never Student.WalletBalance, which is kept
+/// only as a harmless legacy column (see the migration for the one-time
+/// backfill of pre-existing balances into here).
+/// </summary>
+public class StudentWallet
+{
+    public int Id { get; set; }
+    public int StudentId { get; set; }
+    [ForeignKey(nameof(StudentId))] public Student? Student { get; set; }
+
+    /// <summary>TENANT LAYER: which teacher this balance belongs to.</summary>
+    public int TeacherId { get; set; }
+
+    [Column(TypeName = "decimal(10,2)")]
+    public decimal Balance { get; set; } = 0;
 }
 
 public class Notification

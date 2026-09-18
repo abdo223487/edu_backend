@@ -9,20 +9,33 @@ using Microsoft.EntityFrameworkCore;
 namespace EduApi.Controllers;
 
 /// <summary>
-/// Points wallet, one per student. Route: api/Wallet. Mirrors the Flutter calls:
+/// Points wallet, one per (student, teacher) pair. Route: api/Wallet. Mirrors
+/// the Flutter calls:
 ///  GET  Wallet/students/{studentId}         (teacher/assistant -- view a
-///                                             specific student's balance + history)
+///                                             specific student's balance + history,
+///                                             scoped to THIS teacher only)
 ///  POST Wallet/students/{studentId}/adjust  (teacher/assistant -- add or
 ///                                             deduct points, from the "student
 ///                                             details" quick-action button)
-///  GET  Wallet/me                           (student -- own balance + history,
+///  GET  Wallet/me                           (student -- own balance + history
+///                                             under the CURRENT teacher (X-TenantId),
 ///                                             from the profile page's wallet button)
 ///  POST Wallet/purchase-unit                (student -- spend wallet points to
 ///                                             unlock a Unit, alternative to a Code)
 ///
-/// Student.WalletBalance is a cached running total; WalletTransactions is the
-/// append-only audit trail both endpoints read/write together, always inside
-/// a DB transaction so the cached balance and the ledger can never drift apart.
+/// BUGFIX (cross-tenant wallet leak): balances used to live on a single
+/// Student.WalletBalance column, shared by every teacher that student is
+/// linked to -- points added by teacher A were visible and spendable under
+/// teacher B too. Balances now live in StudentWallet, one row per
+/// (StudentId, TeacherId), exactly like WalletTransactions already did (see
+/// its TeacherId column / global query filter). Every read/write below is
+/// scoped to the CURRENT teacher's row only, and StudentWallet carries the
+/// same TeacherId global query filter as WalletTransaction, so a stray query
+/// that forgets to filter still can't cross tenants.
+/// Student.WalletBalance itself is no longer read or written anywhere in
+/// this controller; it is left in place only as a harmless legacy column
+/// (its pre-existing values were migrated into StudentWallet rows once --
+/// see the AddStudentWalletPerTeacher migration).
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
@@ -45,17 +58,29 @@ public class WalletController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
     public async Task<IActionResult> GetStudentWallet(int studentId)
     {
+        var teacherId = User.GetStaffTenantId();
+        if (teacherId == null) return Forbid();
+
+        // Student query filter already ensures this student actually belongs
+        // to the current teacher (legacy Group or a StudentGroupMembership).
         var student = await _db.Students.AsNoTracking()
             .Where(s => s.Id == studentId)
-            .Select(s => new { s.Id, s.Name, s.WalletBalance })
+            .Select(s => new { s.Id, s.Name })
             .FirstOrDefaultAsync();
         if (student == null) return NotFound(new { message = "Student not found." });
+
+        // No row yet == this student has never had a wallet transaction with
+        // THIS teacher, i.e. a balance of 0 -- not an error.
+        var balance = await _db.StudentWallets.AsNoTracking()
+            .Where(w => w.StudentId == studentId && w.TeacherId == teacherId.Value)
+            .Select(w => (decimal?)w.Balance)
+            .FirstOrDefaultAsync() ?? 0m;
 
         var transactions = await BuildTransactionsAsync(studentId);
 
         return Ok(new
         {
-            wallet = new WalletBalanceDto(student.Id, student.Name, student.WalletBalance),
+            wallet = new WalletBalanceDto(student.Id, student.Name, balance),
             transactions
         });
     }
@@ -74,25 +99,37 @@ public class WalletController : ControllerBase
         var teacherId = User.GetStaffTenantId();
         if (teacherId == null) return Forbid();
 
-        var student = await _db.Students.FirstOrDefaultAsync(s => s.Id == studentId);
-        if (student == null) return NotFound(new { message = "Student not found." });
-
-        // A deduction can never take the cached balance below zero -- the
-        // teacher sees the current balance in the UI before typing an amount,
-        // so this only ever fires on a race (two adjustments at once) or a
-        // stale screen, and it's better to reject than to let points go negative.
-        if (request.Amount < 0 && student.WalletBalance + request.Amount < 0)
-            return Conflict(new { message = "Insufficient wallet balance for this deduction." });
+        var studentExists = await _db.Students.AsNoTracking().AnyAsync(s => s.Id == studentId);
+        if (!studentExists) return NotFound(new { message = "Student not found." });
 
         await using var tx = await _db.Database.BeginTransactionAsync();
 
-        student.WalletBalance += request.Amount;
+        // Get-or-create THIS teacher's wallet row for THIS student.
+        var wallet = await _db.StudentWallets
+            .FirstOrDefaultAsync(w => w.StudentId == studentId && w.TeacherId == teacherId.Value);
+        if (wallet == null)
+        {
+            wallet = new StudentWallet { StudentId = studentId, TeacherId = teacherId.Value, Balance = 0 };
+            _db.StudentWallets.Add(wallet);
+        }
+
+        // A deduction can never take the balance below zero -- the teacher
+        // sees the current balance in the UI before typing an amount, so this
+        // only ever fires on a race (two adjustments at once) or a stale
+        // screen, and it's better to reject than to let points go negative.
+        if (request.Amount < 0 && wallet.Balance + request.Amount < 0)
+        {
+            await tx.RollbackAsync();
+            return Conflict(new { message = "Insufficient wallet balance for this deduction." });
+        }
+
+        wallet.Balance += request.Amount;
         _db.WalletTransactions.Add(new WalletTransaction
         {
             StudentId = studentId,
             TeacherId = teacherId.Value,
             Amount = request.Amount,
-            BalanceAfter = student.WalletBalance,
+            BalanceAfter = wallet.Balance,
             Type = "manual",
             Note = request.Note,
             CreatedByStaffId = User.GetUserId(),
@@ -101,7 +138,10 @@ public class WalletController : ControllerBase
         await _db.SaveChangesAsync();
         await tx.CommitAsync();
 
-        return Ok(new WalletBalanceDto(student.Id, student.Name, student.WalletBalance));
+        var studentName = await _db.Students.AsNoTracking()
+            .Where(s => s.Id == studentId).Select(s => s.Name).FirstOrDefaultAsync();
+
+        return Ok(new WalletBalanceDto(studentId, studentName ?? "", wallet.Balance));
     }
 
     // ───────────────────────────── STUDENT SIDE ─────────────────────────────
@@ -112,17 +152,25 @@ public class WalletController : ControllerBase
     public async Task<IActionResult> GetMyWallet()
     {
         var studentId = User.GetUserId();
+        var teacherId = _tenant.CurrentTenantId;
+        if (teacherId == null) return Forbid();
+
         var student = await _db.Students.AsNoTracking()
             .Where(s => s.Id == studentId)
-            .Select(s => new { s.Id, s.Name, s.WalletBalance })
+            .Select(s => new { s.Id, s.Name })
             .FirstOrDefaultAsync();
         if (student == null) return NotFound(new { message = "Student not found." });
+
+        var balance = await _db.StudentWallets.AsNoTracking()
+            .Where(w => w.StudentId == studentId && w.TeacherId == teacherId.Value)
+            .Select(w => (decimal?)w.Balance)
+            .FirstOrDefaultAsync() ?? 0m;
 
         var transactions = await BuildTransactionsAsync(studentId);
 
         return Ok(new
         {
-            wallet = new WalletBalanceDto(student.Id, student.Name, student.WalletBalance),
+            wallet = new WalletBalanceDto(student.Id, student.Name, balance),
             transactions
         });
     }
@@ -148,22 +196,22 @@ public class WalletController : ControllerBase
         if (await _db.StudentUnitSubscriptions.AnyAsync(s => s.StudentId == studentId && s.UnitId == unit.Id))
             return Conflict(new { message = "Already subscribed to this course." });
 
-        var student = await _db.Students.FirstOrDefaultAsync(s => s.Id == studentId);
-        if (student == null) return NotFound(new { message = "Student not found." });
-
-        if (student.WalletBalance < unit.Price.Value)
-            return Conflict(new { message = "Insufficient wallet balance." });
+        var studentExists = await _db.Students.AsNoTracking().AnyAsync(s => s.Id == studentId);
+        if (!studentExists) return NotFound(new { message = "Student not found." });
 
         await using var tx = await _db.Database.BeginTransactionAsync();
 
         // RACE-CONDITION GUARD: same idea as Codes.RedeemCode -- an atomic,
-        // conditional UPDATE (only succeeds while the cached balance still
-        // covers the price) so two near-simultaneous purchase taps (or a
-        // double-tap) from the same student can't both go through and double
-        // spend a balance that only actually covers one of them.
-        var debited = await _db.Students
-            .Where(s => s.Id == studentId && s.WalletBalance >= unit.Price.Value)
-            .ExecuteUpdateAsync(s => s.SetProperty(x => x.WalletBalance, x => x.WalletBalance - unit.Price!.Value));
+        // conditional UPDATE (only succeeds while the balance still covers the
+        // price) so two near-simultaneous purchase taps (or a double-tap) from
+        // the same student can't both go through and double spend a balance
+        // that only actually covers one of them. If no StudentWallet row
+        // exists yet for this (student, teacher) pair, the balance is
+        // implicitly 0 and this simply matches zero rows below, which is
+        // exactly what we want (can't afford it).
+        var debited = await _db.StudentWallets
+            .Where(w => w.StudentId == studentId && w.TeacherId == teacherId.Value && w.Balance >= unit.Price.Value)
+            .ExecuteUpdateAsync(w => w.SetProperty(x => x.Balance, x => x.Balance - unit.Price!.Value));
 
         if (debited == 0)
         {
@@ -171,7 +219,10 @@ public class WalletController : ControllerBase
             return Conflict(new { message = "Insufficient wallet balance." });
         }
 
-        var newBalance = student.WalletBalance - unit.Price.Value;
+        var newBalance = await _db.StudentWallets.AsNoTracking()
+            .Where(w => w.StudentId == studentId && w.TeacherId == teacherId.Value)
+            .Select(w => w.Balance)
+            .FirstAsync();
 
         _db.WalletTransactions.Add(new WalletTransaction
         {
@@ -206,6 +257,9 @@ public class WalletController : ControllerBase
 
     private async Task<List<WalletTransactionDto>> BuildTransactionsAsync(int studentId)
     {
+        // WalletTransaction already carries the TeacherId global query filter,
+        // so this is automatically scoped to the current tenant -- no change
+        // needed here, only the balance itself was ever unscoped.
         var rows = await _db.WalletTransactions.AsNoTracking()
             .Where(w => w.StudentId == studentId)
             .OrderByDescending(w => w.CreatedAt)
