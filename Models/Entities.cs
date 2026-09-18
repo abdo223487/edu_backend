@@ -572,9 +572,26 @@ public class LectureViewSession
     /// How far into the video (in seconds) the student got during THIS one
     /// view. Null until the client reports at least once -- e.g. they
     /// opened the player and closed it again before the first progress
-    /// report went out.
+    /// report went out. NOTE: this is just the FURTHEST POINT REACHED, not
+    /// how much they actually watched -- a student can drag the seek bar
+    /// straight to the end, or play at 2x/scrub through, and this number
+    /// alone would make that look like they watched it all. See
+    /// WatchedSeconds for the actual-duration-watched figure.
     /// </summary>
     public int? StoppedAtSeconds { get; set; }
+    /// <summary>
+    /// Actual accumulated seconds of content the student watched during
+    /// THIS one view -- as opposed to StoppedAtSeconds, which is just
+    /// wherever they last were. The client (see the players in
+    /// services.dart) samples position roughly every 12s and only credits
+    /// a delta here when the position advanced about as much as real time
+    /// (times playback speed) would predict; a big forward jump (scrub/
+    /// seek ahead) or any backward jump credits nothing, just resets the
+    /// reference point. LecturesController.ReportViewProgress additionally
+    /// clamps each individual delta server-side so a buggy or malicious
+    /// client can't inflate this arbitrarily in one call.
+    /// </summary>
+    public int WatchedSeconds { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 

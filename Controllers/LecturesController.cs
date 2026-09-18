@@ -927,6 +927,16 @@ public class LecturesController : ControllerBase
         if (request.PositionSeconds > (session.StoppedAtSeconds ?? -1))
             session.StoppedAtSeconds = request.PositionSeconds;
 
+        if (request.WatchedDeltaSeconds.HasValue)
+        {
+            // Sanity-cap: never trust a single report to add more than 60
+            // real seconds of watch time, regardless of what the client
+            // claims -- protects WatchedSeconds from a buggy or malicious
+            // client inflating it in one call (see the entity's doc comment).
+            var delta = Math.Clamp(request.WatchedDeltaSeconds.Value, 0, 60);
+            session.WatchedSeconds += delta;
+        }
+
         await _db.SaveChangesAsync();
         return Ok(new { message = "Progress saved." });
     }
@@ -1057,7 +1067,7 @@ public class LecturesController : ControllerBase
     // GET Lectures/{id}/viewers?p=..&q=..
     [HttpGet("{id:int}/viewers")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
-    public async Task<IActionResult> GetLectureViewers(int id, [FromQuery] int p = 1, [FromQuery] string? q = null)
+    public async Task<IActionResult> GetLectureViewers(int id, [FromQuery] int p = 1, [FromQuery] string? q = null, [FromQuery] string? status = null)
     {
         var lecture = await _db.Lectures.AsNoTracking().FirstOrDefaultAsync(l => l.Id == id);
         if (lecture == null) return NotFound(new { message = "Lecture not found." });
@@ -1117,29 +1127,58 @@ public class LecturesController : ControllerBase
             .Select(s => new ViewerStudentRow(s.Id, s.Name, s.PhoneNumber, s.GroupId))
             .ToListAsync();
 
-        IEnumerable<ViewerStudentRow> filtered = candidates;
+        IEnumerable<ViewerStudentRow> searchFiltered = candidates;
         if (!string.IsNullOrWhiteSpace(trimmedQ))
         {
             var normalizedQ = NormalizeArabic(trimmedQ);
-            filtered = candidates.Where(s =>
+            searchFiltered = candidates.Where(s =>
                 isIdLikeQuery
                     ? s.Id.ToString().Contains(trimmedQ)
                     : NormalizeArabic(s.Name).Contains(normalizedQ, StringComparison.OrdinalIgnoreCase) ||
                       (s.PhoneNumber != null && s.PhoneNumber.Contains(trimmedQ, StringComparison.OrdinalIgnoreCase)) ||
                       (isNumericQuery && s.Id.ToString().Contains(trimmedQ)));
         }
+        var searchFilteredList = searchFiltered.OrderBy(s => s.Name).ToList();
 
-        var paged = filtered.OrderBy(s => s.Name)
+        // BUGFIX: status (the "الكل / خلّص المشاهدات / شاف جزء / مشافش" tabs
+        // on the Flutter side) used to be applied client-side on top of
+        // whatever page happened to already be loaded, so a student whose
+        // status only became visible on page 3 never showed up under a tab
+        // unless the person searched first (which forces a fresh fetch).
+        // Fixed by computing every candidate's status HERE, filtering by it
+        // BEFORE paginating, so each tab always gets its own complete,
+        // correctly-paged result.
+        var allCandidateIds = searchFilteredList.Select(s => s.Id).ToList();
+        var allUsages = await _db.StudentLectureViewUsages.AsNoTracking()
+            .Where(u => u.LectureId == id && allCandidateIds.Contains(u.StudentId))
+            .ToDictionaryAsync(u => u.StudentId);
+
+        string ComputeStatus(ViewerStudentRow s)
+        {
+            allUsages.TryGetValue(s.Id, out var usage);
+            var used = usage?.ViewsUsed ?? 0;
+            var extra = usage?.ExtraViews ?? 0;
+            if (!lecture.ViewLimit.HasValue) return used > 0 ? "Watched" : "NotViewed";
+            if (used == 0) return "NotViewed";
+            var remaining = Math.Max(0, lecture.ViewLimit.Value + extra - used);
+            return remaining <= 0 ? "Full" : "Partial";
+        }
+
+        IEnumerable<ViewerStudentRow> statusFiltered = searchFilteredList;
+        if (!string.IsNullOrWhiteSpace(status))
+        {
+            statusFiltered = searchFilteredList.Where(s => ComputeStatus(s) == status);
+        }
+        var statusFilteredList = statusFiltered.ToList();
+
+        var paged = statusFilteredList
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
             .ToList();
 
         var pagedIds = paged.Select(s => s.Id).ToList();
         var groupNames = await _db.GetTenantGroupNamesAsync(pagedIds);
-
-        var usages = await _db.StudentLectureViewUsages.AsNoTracking()
-            .Where(u => u.LectureId == id && pagedIds.Contains(u.StudentId))
-            .ToDictionaryAsync(u => u.StudentId);
+        var usages = allUsages; // already covers every paged id (paged is a subset of allCandidateIds)
 
         // Sessions now exist for ANY ViewLimit'd lecture regardless of
         // source (see ConsumeView) -- both the File and Youtube players can
@@ -1151,7 +1190,7 @@ public class LecturesController : ControllerBase
                 .OrderBy(s => s.CreatedAt)
                 .ToListAsync())
                 .GroupBy(s => s.StudentId)
-                .ToDictionary(g => g.Key, g => g.Select(s => new LectureViewerSessionItem(s.StoppedAtSeconds, s.CreatedAt)).ToList())
+                .ToDictionary(g => g.Key, g => g.Select(s => new LectureViewerSessionItem(s.StoppedAtSeconds, s.WatchedSeconds, s.CreatedAt)).ToList())
             : new Dictionary<int, List<LectureViewerSessionItem>>();
 
         var result = paged.Select(s =>
@@ -1167,12 +1206,12 @@ public class LecturesController : ControllerBase
             int? remaining = lecture.ViewLimit.HasValue
                 ? Math.Max(0, lecture.ViewLimit.Value + extra - used)
                 : null;
-            var status = !lecture.ViewLimit.HasValue
+            var itemStatus = !lecture.ViewLimit.HasValue
                 ? (used > 0 ? "Watched" : "NotViewed")
                 : used == 0 ? "NotViewed" : (remaining!.Value <= 0 ? "Full" : "Partial");
             return new LectureViewerItem(
                 s.Id, s.Name, s.PhoneNumber, groupNames.GetValueOrDefault(s.Id) ?? "",
-                used, lecture.ViewLimit, lecture.ViewLimit.HasValue ? extra : null, remaining, status,
+                used, lecture.ViewLimit, lecture.ViewLimit.HasValue ? extra : null, remaining, itemStatus,
                 tracksProgress ? sessionsByStudent.GetValueOrDefault(s.Id, new List<LectureViewerSessionItem>()) : null);
         }).ToList();
 

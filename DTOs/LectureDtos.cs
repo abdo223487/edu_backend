@@ -87,11 +87,17 @@ public record MaterialListItem(int Id, string Name, string Type, string Link);
 public record ConsumeViewResult(bool Allowed, int? RemainingViews, string? Message, int? SessionId = null);
 
 // POST Lectures/{id}/view-progress body -- SessionId from ConsumeViewResult,
-// PositionSeconds is the student's current playhead position. Call this
-// periodically (e.g. every 10-15s) and once more right when the player
-// closes/pauses/the app backgrounds, so a session that never reaches
-// natural "finished" still has its last known position saved.
-public record ReportViewProgressRequest(int SessionId, int PositionSeconds);
+// PositionSeconds is the student's current playhead position (furthest
+// point reached). WatchedDeltaSeconds is optional: how many additional
+// seconds of ACTUAL playback the client believes happened since its last
+// report (it already excludes seeks/scrubs/rewinds on its end -- see
+// LectureViewSession.WatchedSeconds's doc comment); omit it if the client
+// can't tell (e.g. its very first report) and only StoppedAtSeconds moves.
+// Call this periodically (e.g. every 10-15s) and once more right when the
+// player closes/pauses/the app backgrounds, so a session that never reaches
+// natural "finished" still has its last known position (and watched time)
+// saved.
+public record ReportViewProgressRequest(int SessionId, int PositionSeconds, int? WatchedDeltaSeconds = null);
 
 // GET Lectures/student-views?studentId=.. (teacher) — one row per Online
 // lecture that has a ViewLimit AND is reachable by this student (subscribed
@@ -127,7 +133,7 @@ public record AdjustStudentViewsRequest(int StudentId, int LectureId, int Delta)
 // video that particular view stopped (null if the student closed the player
 // before ever reporting a position). Works for both File and Youtube
 // lectures now -- both players report a position (see ReportViewProgress).
-public record LectureViewerSessionItem(int? StoppedAtSeconds, DateTime CreatedAt);
+public record LectureViewerSessionItem(int? StoppedAtSeconds, int WatchedSeconds, DateTime CreatedAt);
 
 public record LectureViewerItem(
     int StudentId,
