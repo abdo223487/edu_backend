@@ -871,6 +871,17 @@ public class LecturesController : ControllerBase
                 "لقد استنفذت عدد مرات المشاهدة المسموح بها لهذه المحاضرة."));
         }
 
+        // Resume-from-last-position: before starting a brand new session,
+        // grab wherever THIS student's most recent session on THIS lecture
+        // left off (StoppedAtSeconds), so the player can seek there instead
+        // of always restarting from 0 -- e.g. they watched to 5:00 last
+        // time, closed the app, come back today: they land back at 5:00.
+        var previousSession = await _db.LectureViewSessions.AsNoTracking()
+            .Where(s => s.StudentId == studentId && s.LectureId == id)
+            .OrderByDescending(s => s.CreatedAt)
+            .FirstOrDefaultAsync();
+        var resumeAtSeconds = previousSession?.StoppedAtSeconds;
+
         if (usage == null)
         {
             usage = new StudentLectureViewUsage
@@ -900,7 +911,7 @@ public class LecturesController : ControllerBase
         _db.LectureViewSessions.Add(session);
         await _db.SaveChangesAsync();
 
-        return Ok(new ConsumeViewResult(true, remaining - 1, null, session.Id));
+        return Ok(new ConsumeViewResult(true, remaining - 1, null, session.Id, resumeAtSeconds));
     }
 
     /// <summary>

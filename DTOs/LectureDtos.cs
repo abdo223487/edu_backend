@@ -78,13 +78,15 @@ public record MaterialListItem(int Id, string Name, string Type, string Link);
 // "Allowed" is false when the student has no views left -- the client
 // should NOT open the player in that case, and should surface Message.
 // Allowed/RemainingViews/Message as before. SessionId is set only when this
-// call just started a NEW view of a File-sourced lecture (see
+// call just started a NEW view of a ViewLimit'd lecture (see
 // LecturesController.ConsumeView) -- the client hangs onto it and passes it
 // back to ReportViewProgress as it plays, so the teacher's "views" screen
-// can show where this particular view stopped. Null for Youtube lectures
-// (no in-app player to report a position from) and for the read-only
-// view-status check.
-public record ConsumeViewResult(bool Allowed, int? RemainingViews, string? Message, int? SessionId = null);
+// can show where this particular view stopped. ResumeAtSeconds is where the
+// SAME student's most recent PREVIOUS view of this lecture last stopped, if
+// any -- the player seeks there on open instead of always starting at 0.
+// Both null for a lecture with no ViewLimit (nothing is ever tracked there,
+// see ConsumeView's early return).
+public record ConsumeViewResult(bool Allowed, int? RemainingViews, string? Message, int? SessionId = null, int? ResumeAtSeconds = null);
 
 // POST Lectures/{id}/view-progress body -- SessionId from ConsumeViewResult,
 // PositionSeconds is the student's current playhead position (furthest
