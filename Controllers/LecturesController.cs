@@ -642,11 +642,18 @@ public class LecturesController : ControllerBase
     public async Task<IActionResult> UploadMaterials(
         int lectureId,
         List<IFormFile> files,
-        [FromQuery] int? Months,
+        // Months بيتستقبل كـ string مش int? عشان لو الكلاينت بعت "null"
+        // أو قيمة فاضية (زي لما يكون متغير في الفرونت إند مش متحدد
+        // وبيتحط جوه الـ query string بالغلط)، الـ [FromQuery] int?
+        // model binder كان بيرفضها بـ 400 قبل حتى ما يوصل هنا. هنا بقى
+        // أي قيمة مش رقم صحيح بتتجاهل بهدوء بدل ما ترجع error.
+        [FromQuery] string? Months,
         [FromQuery] int? SchoolYear)
     {
         var lecture = await _db.Lectures.FirstOrDefaultAsync(e => e.Id == (lectureId));
         if (lecture == null) return NotFound(new { message = "Lecture not found." });
+
+        int? months = int.TryParse(Months, out var m) ? m : null;
 
         var created = new List<MaterialListItem>();
         foreach (var file in files)
@@ -659,7 +666,7 @@ public class LecturesController : ControllerBase
                 Link = url,
                 LectureId = lectureId,
                 UnitId = lecture.UnitId,
-                Months = Months,
+                Months = months,
                 SchoolYear = SchoolYear ?? lecture.SchoolYear,
                 TeacherId = User.GetStaffTenantId()!.Value // TENANT LAYER
             };
