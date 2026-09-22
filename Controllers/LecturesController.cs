@@ -946,13 +946,6 @@ public class LecturesController : ControllerBase
         // from the furthest point they ever reached in a past viewing.
         session.StoppedAtSeconds = request.PositionSeconds;
 
-        // FurthestReachedSeconds, unlike StoppedAtSeconds, only ever moves
-        // forward -- it's the teacher-facing "وصل لحد" figure, which should
-        // stay at the deepest point reached even if the student rewinds
-        // afterwards and the session ends there.
-        if (request.PositionSeconds > (session.FurthestReachedSeconds ?? -1))
-            session.FurthestReachedSeconds = request.PositionSeconds;
-
         if (request.WatchedDeltaSeconds.HasValue)
         {
             // Sanity-cap: never trust a single report to add more than 60
@@ -1216,7 +1209,7 @@ public class LecturesController : ControllerBase
                 .OrderBy(s => s.CreatedAt)
                 .ToListAsync())
                 .GroupBy(s => s.StudentId)
-                .ToDictionary(g => g.Key, g => g.Select(s => new LectureViewerSessionItem(s.StoppedAtSeconds, s.FurthestReachedSeconds, s.WatchedSeconds, s.CreatedAt)).ToList())
+                .ToDictionary(g => g.Key, g => g.Select(s => new LectureViewerSessionItem(s.StoppedAtSeconds, s.WatchedSeconds, s.CreatedAt)).ToList())
             : new Dictionary<int, List<LectureViewerSessionItem>>();
 
         var result = paged.Select(s =>
