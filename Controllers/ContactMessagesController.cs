@@ -22,6 +22,9 @@ namespace EduApi.Controllers;
 /// X-TenantId header (plus every student endpoint also filters by the caller's
 /// own StudentId).
 ///
+/// The opening question can optionally point at a SolutionSource ("مصدر حل" the
+/// teacher registered for the student's school year) + a page + a question number.
+///
 /// All mutating endpoints are POST (same convention as Students/delete etc.)
 /// and multipart/form-data where an image may be attached, because the
 /// Flutter client's multipart helper only supports POST.
@@ -34,6 +37,7 @@ public class ContactMessagesController : ControllerBase
     private const string StaffRoles = $"{Roles.Teacher},{Roles.AssistantAdmin}";
     private const string AllRoles = $"{Roles.Student},{Roles.Teacher},{Roles.AssistantAdmin}";
     private const int MaxTextLength = 5000;
+    private const int MaxRefLength = 30; // page / question number
     private const long MaxImageBytes = 8 * 1024 * 1024;
     private const string ImageSubFolder = "contact";
 
@@ -79,38 +83,86 @@ public class ContactMessagesController : ControllerBase
 
     private static bool HasImage(IFormFile? image) => image != null && image.Length > 0;
 
-    private static object ToDto(ContactMessage m, string? studentName, string? groupName) => new
+    /// <summary>
+    /// Validates the optional source/page/question of an opening question (student
+    /// only). The source must exist for THIS teacher (tenant filter) and be for the
+    /// caller's own school year. Page/question are only kept when a source is chosen.
+    /// </summary>
+    private async Task<(string? Error, int? SourceId, string? Page, string? Question)> ResolveSourceAsync(ContactMessageForm form)
     {
-        id = m.Id,
-        studentId = m.StudentId,
-        studentName,
-        groupName,
-        text = m.Text,
-        imageUrl = m.ImageUrl,
-        createdAt = m.CreatedAt,
-        editedAt = m.EditedAt,
-        lastActivityAt = m.LastActivityAt,
-        isRead = m.IsReadByTeacher,
-        isAnswered = m.Replies.Any(r => r.IsFromTeacher),
-        replies = m.Replies
-            .OrderBy(r => r.CreatedAt).ThenBy(r => r.Id)
-            .Select(r => new
-            {
-                id = r.Id,
-                fromTeacher = r.IsFromTeacher,
-                text = r.Text,
-                imageUrl = r.ImageUrl,
-                createdAt = r.CreatedAt,
-                editedAt = r.EditedAt
-            })
-            .ToList()
-    };
+        if (form.SolutionSourceId == null || form.SolutionSourceId <= 0)
+            return (null, null, null, null);
+
+        var source = await _db.SolutionSources.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.Id == form.SolutionSourceId.Value);
+        if (source == null) return ("Solution source not found.", null, null, null);
+        if (source.SchoolYear != User.GetSchoolYear())
+            return ("This solution source is not for your school year.", null, null, null);
+
+        var page = (form.PageNumber ?? string.Empty).Trim();
+        var question = (form.QuestionNumber ?? string.Empty).Trim();
+        if (page.Length > MaxRefLength || question.Length > MaxRefLength)
+            return ($"Page / question number is too long (max {MaxRefLength} characters).", null, null, null);
+
+        return (null, source.Id,
+            page.Length == 0 ? null : page,
+            question.Length == 0 ? null : question);
+    }
+
+    private static object ToDto(ContactMessage m, string? studentName, string? groupName)
+    {
+        var replies = m.Replies.OrderBy(r => r.CreatedAt).ThenBy(r => r.Id).ToList();
+        var lastReply = replies.LastOrDefault();
+
+        return new
+        {
+            id = m.Id,
+            studentId = m.StudentId,
+            studentName,
+            groupName,
+            text = m.Text,
+            imageUrl = m.ImageUrl,
+            createdAt = m.CreatedAt,
+            editedAt = m.EditedAt,
+            lastActivityAt = m.LastActivityAt,
+            isRead = m.IsReadByTeacher,
+            isAnswered = replies.Any(r => r.IsFromTeacher),
+
+            // optional solution source + page + question number
+            solutionSourceId = m.SolutionSourceId,
+            solutionSourceName = m.SolutionSource?.Name,
+            pageNumber = m.PageNumber,
+            questionNumber = m.QuestionNumber,
+
+            // The NEWEST message of the thread (last reply, or the opening question
+            // when nobody replied yet) -- list cards show this instead of always
+            // showing the very first question.
+            lastText = lastReply?.Text ?? m.Text,
+            lastImageUrl = lastReply != null ? lastReply.ImageUrl : m.ImageUrl,
+            lastFromTeacher = lastReply?.IsFromTeacher ?? false,
+            lastIsReply = lastReply != null,
+            lastMessageAt = lastReply?.CreatedAt ?? m.CreatedAt,
+
+            replies = replies
+                .Select(r => new
+                {
+                    id = r.Id,
+                    fromTeacher = r.IsFromTeacher,
+                    text = r.Text,
+                    imageUrl = r.ImageUrl,
+                    createdAt = r.CreatedAt,
+                    editedAt = r.EditedAt
+                })
+                .ToList()
+        };
+    }
 
     /// <summary>Fresh, untracked copy of a thread (with replies) shaped for the caller's role.</summary>
     private async Task<object?> BuildDtoAsync(int messageId, bool forStudent)
     {
         var m = await _db.ContactMessages.AsNoTracking()
             .Include(x => x.Replies)
+            .Include(x => x.SolutionSource)
             .FirstOrDefaultAsync(x => x.Id == messageId);
         if (m == null) return null;
         if (forStudent) return ToDto(m, null, null);
@@ -136,6 +188,7 @@ public class ContactMessagesController : ControllerBase
         var studentId = User.GetUserId();
         var query = _db.ContactMessages.AsNoTracking()
             .Include(m => m.Replies)
+            .Include(m => m.SolutionSource)
             .Where(m => m.StudentId == studentId);
 
         query = (status ?? "all").Trim().ToLowerInvariant() switch
@@ -155,7 +208,7 @@ public class ContactMessagesController : ControllerBase
         return Ok(page.Select(m => ToDto(m, null, null)).ToList());
     }
 
-    // POST ContactMessages   (multipart: Text, Image?)
+    // POST ContactMessages   (multipart: Text, Image?, SolutionSourceId?, PageNumber?, QuestionNumber?)
     [HttpPost]
     [Authorize(Roles = Roles.Student)]
     [Consumes("multipart/form-data")]
@@ -168,6 +221,9 @@ public class ContactMessagesController : ControllerBase
         if (textError != null) return BadRequest(new { message = textError });
         var imageError = ValidateImage(form.Image);
         if (imageError != null) return BadRequest(new { message = imageError });
+
+        var src = await ResolveSourceAsync(form);
+        if (src.Error != null) return BadRequest(new { message = src.Error });
 
         var studentId = User.GetUserId();
 
@@ -188,6 +244,9 @@ public class ContactMessagesController : ControllerBase
             StudentId = studentId,
             Text = text,
             ImageUrl = imageUrl,
+            SolutionSourceId = src.SourceId,
+            PageNumber = src.Page,
+            QuestionNumber = src.Question,
             CreatedAt = DateTime.UtcNow,
             LastActivityAt = DateTime.UtcNow,
             IsReadByTeacher = false
@@ -207,7 +266,8 @@ public class ContactMessagesController : ControllerBase
         return Ok(await BuildDtoAsync(msg.Id, forStudent: true));
     }
 
-    // POST ContactMessages/{id}/edit   (multipart: Text, Image?, RemoveImage?)  -- student edits own question
+    // POST ContactMessages/{id}/edit   (multipart: Text, Image?, RemoveImage?, SolutionSourceId?, PageNumber?, QuestionNumber?)
+    //   -- student edits own question. Source/page/question REPLACE the stored values (omitted = cleared).
     [HttpPost("{id:int}/edit")]
     [Authorize(Roles = Roles.Student)]
     [Consumes("multipart/form-data")]
@@ -217,6 +277,9 @@ public class ContactMessagesController : ControllerBase
         if (textError != null) return BadRequest(new { message = textError });
         var imageError = ValidateImage(form.Image);
         if (imageError != null) return BadRequest(new { message = imageError });
+
+        var src = await ResolveSourceAsync(form);
+        if (src.Error != null) return BadRequest(new { message = src.Error });
 
         var studentId = User.GetUserId();
         var msg = await _db.ContactMessages.FirstOrDefaultAsync(m => m.Id == id && m.StudentId == studentId);
@@ -236,6 +299,9 @@ public class ContactMessagesController : ControllerBase
         }
 
         msg.Text = text;
+        msg.SolutionSourceId = src.SourceId;
+        msg.PageNumber = src.Page;
+        msg.QuestionNumber = src.Question;
         msg.EditedAt = DateTime.UtcNow;
         msg.LastActivityAt = DateTime.UtcNow;
         // The teacher should notice that the question changed after they read it.
@@ -286,7 +352,10 @@ public class ContactMessagesController : ControllerBase
     {
         if (p < 1) p = 1;
 
-        var query = _db.ContactMessages.AsNoTracking().Include(m => m.Replies).AsQueryable();
+        var query = _db.ContactMessages.AsNoTracking()
+            .Include(m => m.Replies)
+            .Include(m => m.SolutionSource)
+            .AsQueryable();
         query = (filter ?? "all").Trim().ToLowerInvariant() switch
         {
             "unread" => query.Where(m => !m.IsReadByTeacher),

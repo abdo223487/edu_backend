@@ -1067,7 +1067,38 @@ public class ContactMessage
 
     public bool IsReadByTeacher { get; set; }
 
+    /// <summary>
+    /// OPTIONAL: the solution source (e.g. a book/worksheet the teacher uploaded)
+    /// this question is about. SetNull when the source is deleted -- the question
+    /// itself is never lost, it just stops being attached to a source.
+    /// </summary>
+    public int? SolutionSourceId { get; set; }
+    [ForeignKey(nameof(SolutionSourceId))] public SolutionSource? SolutionSource { get; set; }
+
+    /// <summary>OPTIONAL: page / question number inside the source (free text, max 30; only kept when a source is chosen).</summary>
+    public string? PageNumber { get; set; }
+    public string? QuestionNumber { get; set; }
+
     public List<ContactReply> Replies { get; set; } = new();
+}
+
+/// <summary>
+/// "مصدر حل": a source (book, worksheet, ...) the teacher registers for ONE school
+/// year. Students of that year can pick it when they ask a question
+/// (ContactMessage.SolutionSourceId), and classmates can browse the
+/// (anonymous) questions asked about it. Tenant-scoped like every other
+/// per-teacher table.
+/// </summary>
+public class SolutionSource
+{
+    public int Id { get; set; }
+
+    /// <summary>TENANT LAYER: which teacher (tenant) this source belongs to.</summary>
+    public int TeacherId { get; set; }
+
+    public int SchoolYear { get; set; }
+    public string Name { get; set; } = default!;
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
 /// <summary>

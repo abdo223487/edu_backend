@@ -541,6 +541,7 @@ public class TeachersController : ControllerBase
             //    of whether the student themselves survived (their marks/attendance
             //    from a now-deleted teacher are meaningless either way).
             await _db.ContactMessages.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
+            await _db.SolutionSources.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
             await _db.QuizResults.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
             await _db.CenterQuizResults.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
             await _db.HomeworkResults.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();

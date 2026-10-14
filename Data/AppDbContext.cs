@@ -50,6 +50,7 @@ public class AppDbContext : DbContext
     public DbSet<Dismissal> Dismissals => Set<Dismissal>();
     public DbSet<ContactMessage> ContactMessages => Set<ContactMessage>();
     public DbSet<ContactReply> ContactReplies => Set<ContactReply>();
+    public DbSet<SolutionSource> SolutionSources => Set<SolutionSource>();
     public DbSet<Quiz> Quizzes => Set<Quiz>();
     public DbSet<Question> Questions => Set<Question>();
     public DbSet<QuizResult> QuizResults => Set<QuizResult>();
@@ -308,6 +309,16 @@ public class AppDbContext : DbContext
             .WithMany()
             .HasForeignKey(c => c.StudentId)
             .OnDelete(DeleteBehavior.Cascade);
+        // SOLUTION SOURCES ("مصادر الحل"): per-teacher + per-school-year. Deleting a
+        // source keeps the questions that used it (FK is SetNull).
+        modelBuilder.Entity<SolutionSource>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<SolutionSource>().HasIndex(x => new { x.TeacherId, x.SchoolYear });
+        modelBuilder.Entity<ContactMessage>().HasIndex(c => c.SolutionSourceId);
+        modelBuilder.Entity<ContactMessage>()
+            .HasOne(c => c.SolutionSource)
+            .WithMany()
+            .HasForeignKey(c => c.SolutionSourceId)
+            .OnDelete(DeleteBehavior.SetNull);
         modelBuilder.Entity<ContactReply>().HasQueryFilter(r => r.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<ContactReply>().HasIndex(r => new { r.ContactMessageId, r.CreatedAt });
         modelBuilder.Entity<ContactReply>().HasIndex(r => r.TeacherId);
