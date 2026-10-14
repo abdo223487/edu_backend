@@ -48,6 +48,8 @@ public class AppDbContext : DbContext
     public DbSet<Notification> Notifications => Set<Notification>();
     public DbSet<Attendance> Attendances => Set<Attendance>();
     public DbSet<Dismissal> Dismissals => Set<Dismissal>();
+    public DbSet<ContactMessage> ContactMessages => Set<ContactMessage>();
+    public DbSet<ContactReply> ContactReplies => Set<ContactReply>();
     public DbSet<Quiz> Quizzes => Set<Quiz>();
     public DbSet<Question> Questions => Set<Question>();
     public DbSet<QuizResult> QuizResults => Set<QuizResult>();
@@ -297,6 +299,23 @@ public class AppDbContext : DbContext
         // site remembering to join correctly.
         modelBuilder.Entity<Attendance>().HasQueryFilter(a => a.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<Dismissal>().HasQueryFilter(d => d.TeacherId == _tenant.CurrentTenantId);
+        // STUDENT <-> TEACHER CONTACT: tenant-scoped like every other per-teacher table.
+        modelBuilder.Entity<ContactMessage>().HasQueryFilter(c => c.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<ContactMessage>().HasIndex(c => new { c.TeacherId, c.StudentId });
+        modelBuilder.Entity<ContactMessage>().HasIndex(c => new { c.TeacherId, c.IsReadByTeacher, c.LastActivityAt });
+        modelBuilder.Entity<ContactMessage>()
+            .HasOne(c => c.Student)
+            .WithMany()
+            .HasForeignKey(c => c.StudentId)
+            .OnDelete(DeleteBehavior.Cascade);
+        modelBuilder.Entity<ContactReply>().HasQueryFilter(r => r.TeacherId == _tenant.CurrentTenantId);
+        modelBuilder.Entity<ContactReply>().HasIndex(r => new { r.ContactMessageId, r.CreatedAt });
+        modelBuilder.Entity<ContactReply>().HasIndex(r => r.TeacherId);
+        modelBuilder.Entity<ContactMessage>()
+            .HasMany(c => c.Replies)
+            .WithOne(r => r.ContactMessage)
+            .HasForeignKey(r => r.ContactMessageId)
+            .OnDelete(DeleteBehavior.Cascade);
         modelBuilder.Entity<AssignmentSubmission>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<AssignmentCenterSubmission>().HasQueryFilter(s => s.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<NotebookPayment>().HasQueryFilter(p => p.TeacherId == _tenant.CurrentTenantId);

@@ -28,7 +28,8 @@ public class StudentsController : ControllerBase
     private readonly IWhatsAppService _whatsApp;
     private readonly ICacheService _cache;
     private readonly ILogger<StudentsController> _logger;
-    public StudentsController(AppDbContext db, Common.ITenantContext tenant, IHttpClientFactory httpClientFactory, IWhatsAppService whatsApp, ICacheService cache, ILogger<StudentsController> logger)
+    private readonly IFileStorageService _files;
+    public StudentsController(AppDbContext db, Common.ITenantContext tenant, IHttpClientFactory httpClientFactory, IWhatsAppService whatsApp, ICacheService cache, ILogger<StudentsController> logger, IFileStorageService files)
     {
         _db = db;
         _tenant = tenant;
@@ -36,6 +37,7 @@ public class StudentsController : ControllerBase
         _whatsApp = whatsApp;
         _cache = cache;
         _logger = logger;
+        _files = files;
     }
 
     // POST Students/recover-credentials  (public — no auth required, used from
@@ -1310,6 +1312,148 @@ public class StudentsController : ControllerBase
         await _db.SaveChangesAsync();
         await InvalidateStudentsCacheAsync();
         return Ok(new { message = "Student deleted." });
+    }
+
+    // POST Students/purge?studentId=..
+    // PERMANENT DELETE (hard delete) of a student from THIS teacher only.
+    // Only allowed for students already in the "Cancelled" state (the cancelled
+    // tab) -- the normal Students/delete above stays a soft delete.
+    // What it removes (always scoped to the CURRENT tenant, never another
+    // teacher's data): the membership row + every per-student activity row this
+    // teacher owns (results, attendance, payments, wallet, subscriptions,
+    // unlocks, overrides...). Because the membership is gone, the student
+    // disappears from this teacher's lists and counts automatically.
+    // The global Student account is only deleted if NO other teacher is linked
+    // to it; otherwise it stays untouched for the other teachers.
+    [HttpPost("purge")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> Purge([FromQuery] int studentId)
+    {
+        var tenantId = _tenant.CurrentTenantId;
+        if (tenantId == null) return BadRequest(new { message = "Tenant could not be resolved." });
+        var tid = tenantId.Value;
+
+        var student = await _db.Students.FirstOrDefaultAsync(e => e.Id == studentId);
+        if (student == null) return NotFound(new { message = "Student not found." });
+
+        var membership = await _db.StudentGroupMemberships.FirstOrDefaultAsync(m => m.StudentId == studentId);
+        if (membership == null) return NotFound(new { message = "This student isn't linked to one of your groups." });
+
+        if (!membership.IsCancelled)
+            return BadRequest(new { message = "Only cancelled students can be permanently deleted." });
+
+        await using var tx = await _db.Database.BeginTransactionAsync();
+        try
+        {
+            // Groups owned by THIS teacher (Groups is tenant-filtered).
+            var tenantGroupIds = await _db.Groups.Select(g => g.Id).ToListAsync();
+
+            // Contact (student <-> teacher) messages: remember their image files so
+            // they can be removed from storage once the transaction has committed.
+            var contactImageUrls = await _db.ContactMessages.IgnoreQueryFilters()
+                .Where(x => x.TeacherId == tid && x.StudentId == studentId)
+                .Select(x => x.ImageUrl)
+                .ToListAsync();
+            contactImageUrls.AddRange(await _db.ContactReplies.IgnoreQueryFilters()
+                .Where(r => r.TeacherId == tid && r.ContactMessage!.StudentId == studentId)
+                .Select(r => r.ImageUrl)
+                .ToListAsync());
+
+            // 1) Per-student activity rows owned by this teacher. Answer /
+            //    question child rows go with them through the DB cascade rules.
+            await _db.QuizResults.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.QuizStudentOverrides.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.CenterQuizResults.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.HomeworkResults.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.Attendances.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.AssignmentSubmissions.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.AssignmentStudentOverrides.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.AssignmentCenterSubmissions.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.AssignmentCenterStudentOverrides.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.LectureExamResults.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.LectureExamStudentStarts.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.LectureExamStudentOverrides.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.LectureAssignmentResults.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.LectureAssignmentStudentOverrides.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.BankAttempts.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+
+            // 2) Money / wallet / access rows owned by this teacher.
+            await _db.NotebookPayments.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.BillingPayments.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.WalletTransactions.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.StudentWallets.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.StudentUnitSubscriptions.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.StudentLectureUnlocks.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.StudentLectureViewUsages.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.LectureViewSessions.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.StudentOnlineLessonUnlocks.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.StudentExternalBookSubscriptions.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+            await _db.ContactMessages.IgnoreQueryFilters().Where(x => x.TeacherId == tid && x.StudentId == studentId).ExecuteDeleteAsync();
+
+            // 3) Registration request (if the student came from self-registration
+            //    to THIS teacher) -- the record points at a student that's going away.
+            await _db.StudentRegistrationRequests.IgnoreQueryFilters()
+                .Where(r => r.TeacherId == tid && r.CreatedStudentId == studentId)
+                .ExecuteDeleteAsync();
+
+            // 4) The membership row(s) tying the student to this teacher's groups.
+            await _db.StudentGroupMemberships.IgnoreQueryFilters()
+                .Where(m => m.StudentId == studentId && tenantGroupIds.Contains(m.GroupId))
+                .ExecuteDeleteAsync();
+
+            // 5) Is the student still linked to ANY other teacher?
+            var otherMembershipGroupIds = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+                .Where(m => m.StudentId == studentId && !tenantGroupIds.Contains(m.GroupId))
+                .Select(m => m.GroupId)
+                .ToListAsync();
+
+            var linkedToOtherTeacher =
+                otherMembershipGroupIds.Count > 0 ||
+                await _db.StudentUnitSubscriptions.IgnoreQueryFilters().AnyAsync(x => x.StudentId == studentId && x.TeacherId != tid) ||
+                await _db.StudentLectureUnlocks.IgnoreQueryFilters().AnyAsync(x => x.StudentId == studentId && x.TeacherId != tid) ||
+                await _db.StudentOnlineLessonUnlocks.IgnoreQueryFilters().AnyAsync(x => x.StudentId == studentId && x.TeacherId != tid) ||
+                await _db.StudentExternalBookSubscriptions.IgnoreQueryFilters().AnyAsync(x => x.StudentId == studentId && x.TeacherId != tid);
+
+            var accountFullyDeleted = false;
+
+            if (!linkedToOtherTeacher)
+            {
+                // Nobody else has this student -- remove the account itself.
+                // (StateHistoryEntry has no TeacherId, so clear it explicitly.)
+                await _db.StateHistoryEntries.Where(h => h.StudentId == studentId).ExecuteDeleteAsync();
+                await _db.Students.IgnoreQueryFilters().Where(s => s.Id == studentId).ExecuteDeleteAsync();
+                accountFullyDeleted = true;
+            }
+            else if (tenantGroupIds.Contains(student.GroupId) && otherMembershipGroupIds.Count > 0)
+            {
+                // Legacy Student.GroupId pointed at one of THIS teacher's groups;
+                // re-point it at a group of another teacher the student still has,
+                // so the student never keeps a leftover link to this tenant.
+                var newLegacyGroupId = otherMembershipGroupIds[0];
+                await _db.Students.IgnoreQueryFilters()
+                    .Where(s => s.Id == studentId)
+                    .ExecuteUpdateAsync(s => s.SetProperty(x => x.GroupId, newLegacyGroupId));
+            }
+
+            await tx.CommitAsync();
+            await InvalidateStudentsCacheAsync();
+
+            // Best-effort cleanup of the contact-message images (never fails the request).
+            foreach (var url in contactImageUrls)
+                await _files.DeleteAsync(url);
+
+            return Ok(new
+            {
+                message = "Student permanently deleted.",
+                accountFullyDeleted
+            });
+        }
+        catch (Exception ex)
+        {
+            await tx.RollbackAsync();
+            _logger.LogError(ex, "Failed to permanently delete student {StudentId} for tenant {TenantId}", studentId, tid);
+            return StatusCode(500, new { message = "Failed to permanently delete the student." });
+        }
     }
 
     // GET Students/me  (student — returns the calling student's own Id in

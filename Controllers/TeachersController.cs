@@ -540,6 +540,7 @@ public class TeachersController : ControllerBase
             // 5) Every per-student activity row scoped to this teacher, regardless
             //    of whether the student themselves survived (their marks/attendance
             //    from a now-deleted teacher are meaningless either way).
+            await _db.ContactMessages.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
             await _db.QuizResults.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
             await _db.CenterQuizResults.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();
             await _db.HomeworkResults.IgnoreQueryFilters().Where(x => x.TeacherId == id).ExecuteDeleteAsync();

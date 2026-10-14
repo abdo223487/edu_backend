@@ -1037,6 +1037,61 @@ public class StudentWallet
     public decimal Balance { get; set; } = 0;
 }
 
+/// <summary>
+/// STUDENT <-> TEACHER CONTACT (conversation): the thread's opening question a
+/// student sends to ONE teacher (tenant), plus any number of follow-up messages
+/// from either side (ContactReply). Both sides can edit/delete only what they
+/// wrote themselves; deleting the opening question (student only) removes the
+/// whole thread. Tenant-scoped like every other per-teacher table.
+/// Status is derived, not stored: "answered" == at least one teacher reply.
+/// IsReadByTeacher drives the teacher's read/unread tabs -- true when the
+/// teacher opens/replies, false again whenever the student posts or edits.
+/// </summary>
+public class ContactMessage
+{
+    public int Id { get; set; }
+
+    /// <summary>TENANT LAYER: the teacher this conversation is with.</summary>
+    public int TeacherId { get; set; }
+
+    public int StudentId { get; set; }
+    [ForeignKey(nameof(StudentId))] public Student? Student { get; set; }
+
+    public string Text { get; set; } = default!;
+    public string? ImageUrl { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? EditedAt { get; set; }
+
+    /// <summary>Bumped by every new message in the thread; lists sort by it.</summary>
+    public DateTime LastActivityAt { get; set; } = DateTime.UtcNow;
+
+    public bool IsReadByTeacher { get; set; }
+
+    public List<ContactReply> Replies { get; set; } = new();
+}
+
+/// <summary>
+/// One follow-up message inside a ContactMessage thread, from the teacher
+/// (IsFromTeacher) or from the student. Optional image, editable/deletable by
+/// its own author only.
+/// </summary>
+public class ContactReply
+{
+    public int Id { get; set; }
+
+    public int ContactMessageId { get; set; }
+    [ForeignKey(nameof(ContactMessageId))] public ContactMessage? ContactMessage { get; set; }
+
+    /// <summary>TENANT LAYER: same teacher as the parent thread.</summary>
+    public int TeacherId { get; set; }
+
+    public bool IsFromTeacher { get; set; }
+    public string Text { get; set; } = default!;
+    public string? ImageUrl { get; set; }
+    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? EditedAt { get; set; }
+}
+
 public class Notification
 {
     public int Id { get; set; }
