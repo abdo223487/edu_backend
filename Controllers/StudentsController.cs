@@ -1257,10 +1257,10 @@ public class StudentsController : ControllerBase
         // tenant-scoped via StudentGroupMembership's query filter (Group.TeacherId
         // == current tenant), so this can never touch another teacher's relationship
         // with the same student.
-        var membership = await _db.StudentGroupMemberships.FirstOrDefaultAsync(m => m.StudentId == request.StudentId);
-        if (membership == null) return NotFound(new { message = "This student isn't linked to one of your groups." });
+        var memberships = await _db.StudentGroupMemberships.Where(m => m.StudentId == request.StudentId).ToListAsync();
+        if (memberships.Count == 0) return NotFound(new { message = "This student isn't linked to one of your groups." });
 
-        membership.IsSuspended = true;
+        foreach (var mem in memberships) mem.IsSuspended = true;
         _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Suspended", Reason = request.Comment });
         await _db.SaveChangesAsync();
         await InvalidateStudentsCacheAsync();
@@ -1275,11 +1275,14 @@ public class StudentsController : ControllerBase
         var student = await _db.Students.FirstOrDefaultAsync(e => e.Id == (request.StudentId));
         if (student == null) return NotFound(new { message = "Student not found." });
 
-        var membership = await _db.StudentGroupMemberships.FirstOrDefaultAsync(m => m.StudentId == request.StudentId);
-        if (membership == null) return NotFound(new { message = "This student isn't linked to one of your groups." });
+        var memberships = await _db.StudentGroupMemberships.Where(m => m.StudentId == request.StudentId).ToListAsync();
+        if (memberships.Count == 0) return NotFound(new { message = "This student isn't linked to one of your groups." });
 
-        membership.IsSuspended = false;
-        membership.IsCancelled = false;
+        foreach (var mem in memberships)
+        {
+            mem.IsSuspended = false;
+            mem.IsCancelled = false;
+        }
         _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Reactivated", Reason = request.Comment });
         await _db.SaveChangesAsync();
         await InvalidateStudentsCacheAsync();
@@ -1304,10 +1307,10 @@ public class StudentsController : ControllerBase
         var student = await _db.Students.FirstOrDefaultAsync(e => e.Id == (studentId));
         if (student == null) return NotFound(new { message = "Student not found." });
 
-        var membership = await _db.StudentGroupMemberships.FirstOrDefaultAsync(m => m.StudentId == studentId);
-        if (membership == null) return NotFound(new { message = "This student isn't linked to one of your groups." });
+        var memberships = await _db.StudentGroupMemberships.Where(m => m.StudentId == studentId).ToListAsync();
+        if (memberships.Count == 0) return NotFound(new { message = "This student isn't linked to one of your groups." });
 
-        membership.IsCancelled = true;
+        foreach (var mem in memberships) mem.IsCancelled = true;
         _db.StateHistoryEntries.Add(new StateHistoryEntry { StudentId = student.Id, Action = "Cancelled", Reason = null });
         await _db.SaveChangesAsync();
         await InvalidateStudentsCacheAsync();

@@ -55,7 +55,7 @@ public class TeachersController : ControllerBase
             var studentId = User.GetUserId();
             mySubscribedTeacherIds = await _db.Students.AsNoTracking().IgnoreQueryFilters()
                 .Where(s => s.Id == studentId)
-                .SelectMany(s => s.GroupMemberships.Select(m => m.Group!.TeacherId))
+                .SelectMany(s => s.GroupMemberships.Where(m => !m.IsSuspended && !m.IsCancelled).Select(m => m.Group!.TeacherId))
                 .Distinct()
                 .ToListAsync();
         }

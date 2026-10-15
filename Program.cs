@@ -348,6 +348,12 @@ app.UseMiddleware<TokenVersionMiddleware>();
 // it ever reaches a controller action -- see TenantSuspensionMiddleware.
 app.UseMiddleware<TenantSuspensionMiddleware>();
 
+// PER-TENANT STUDENT ACCESS: a student whose membership with the teacher in
+// X-TenantId was cancelled ("deleted") or suspended by THAT teacher is rejected
+// with 403 on every request, even with a still-valid token -- see
+// StudentMembershipMiddleware. Must run after UseAuthentication.
+app.UseMiddleware<StudentMembershipMiddleware>();
+
 // SUPERADMIN LOGS FEATURE: must run after UseAuthentication (needs context.User)
 // and BEFORE UseAuthorization, so 401/403 responses (which short-circuit inside
 // the built-in authorization middleware) still pass back out through this one
