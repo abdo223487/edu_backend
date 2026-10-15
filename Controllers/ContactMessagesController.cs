@@ -96,7 +96,8 @@ public class ContactMessagesController : ControllerBase
         var source = await _db.SolutionSources.AsNoTracking()
             .FirstOrDefaultAsync(x => x.Id == form.SolutionSourceId.Value);
         if (source == null) return ("Solution source not found.", null, null, null);
-        if (source.SchoolYear != User.GetSchoolYear())
+        var years = await _db.GetStudentSchoolYearsAsync(User);
+        if (!years.Contains(source.SchoolYear))
             return ("This solution source is not for your school year.", null, null, null);
 
         var page = (form.PageNumber ?? string.Empty).Trim();

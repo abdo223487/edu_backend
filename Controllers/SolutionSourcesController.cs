@@ -25,7 +25,7 @@ namespace EduApi.Controllers;
 /// source+student, so the real id can't be derived or enumerated), and the
 /// caller's own questions are excluded.
 ///
-///  GET  SolutionSources?schoolYear=      -- staff: all (optionally one year); student: own year
+///  GET  SolutionSources?schoolYear=&p=   -- staff: all (optionally one year); student: own year (paged; all=true = no paging)
 ///  POST SolutionSources                  -- staff: { schoolYear, name }
 ///  POST SolutionSources/{id}/edit        -- staff: { name }
 ///  POST SolutionSources/{id}/delete      -- staff (questions stay, just lose the source)
@@ -83,37 +83,43 @@ public class SolutionSourcesController : ControllerBase
         return Convert.ToHexString(hash, 0, 8).ToLowerInvariant();
     }
 
-    /// <summary>The source, only if it's in the caller's own school year (students). Null = "not found".</summary>
+    /// <summary>The source, only if it's in the caller's own school year for this teacher (students). Null = "not found".</summary>
     private async Task<SolutionSource?> FindStudentSourceAsync(int id)
     {
-        var year = User.GetSchoolYear();
-        if (year == null) return null;
+        var years = await _db.GetStudentSchoolYearsAsync(User);
+        if (years.Count == 0) return null;
         return await _db.SolutionSources.AsNoTracking()
-            .FirstOrDefaultAsync(s => s.Id == id && s.SchoolYear == year.Value);
+            .FirstOrDefaultAsync(s => s.Id == id && years.Contains(s.SchoolYear));
     }
 
     // ───────────────────────── list (both roles) ─────────────────────────
 
     [HttpGet]
     [Authorize(Roles = AllRoles)]
-    public async Task<IActionResult> List([FromQuery] int? schoolYear)
+    public async Task<IActionResult> List([FromQuery] int? schoolYear, [FromQuery] int p = 1, [FromQuery] bool all = false)
     {
+        if (p < 1) p = 1;
         var isStudent = User.IsInRole(Roles.Student);
         var studentId = isStudent ? User.GetUserId() : 0;
 
         var query = _db.SolutionSources.AsNoTracking().AsQueryable();
         if (isStudent)
         {
-            var year = User.GetSchoolYear();
-            if (year == null) return Ok(new List<object>());
-            query = query.Where(s => s.SchoolYear == year.Value);
+            var years = await _db.GetStudentSchoolYearsAsync(User);
+            if (years.Count == 0) return Ok(new List<object>());
+            query = query.Where(s => years.Contains(s.SchoolYear));
         }
         else if (schoolYear.HasValue)
         {
             query = query.Where(s => s.SchoolYear == schoolYear.Value);
         }
 
-        var sources = await query.OrderBy(s => s.SchoolYear).ThenBy(s => s.Name).ToListAsync();
+        var ordered = query.OrderBy(s => s.SchoolYear).ThenBy(s => s.Name).ThenBy(s => s.Id);
+        // Paged (PageSize per page) by default; all=true returns everything -- only for the
+        // student's "pick a source" dropdown, which needs the complete list.
+        var sources = all
+            ? await ordered.ToListAsync()
+            : await ordered.Skip((p - 1) * PagingDefaults.PageSize).Take(PagingDefaults.PageSize).ToListAsync();
         var ids = sources.Select(s => s.Id).ToList();
 
         // (source, student) -> number of questions. Students don't count their own.
@@ -136,6 +142,18 @@ public class SolutionSourcesController : ControllerBase
     }
 
     // ───────────────────────── staff: manage ─────────────────────────
+
+    // GET SolutionSources/school-years  -> [3, 2, ...]  the years this teacher actually has
+    // (groups / courses / existing sources), so the "new source" dropdown offers real values.
+    [HttpGet("school-years")]
+    [Authorize(Roles = StaffRoles)]
+    public async Task<IActionResult> SchoolYears()
+    {
+        var fromGroups = await _db.Groups.AsNoTracking().Select(g => g.SchoolYear).Distinct().ToListAsync();
+        var fromUnits = await _db.Units.AsNoTracking().Select(u => u.SchoolYear).Distinct().ToListAsync();
+        var fromSources = await _db.SolutionSources.AsNoTracking().Select(x => x.SchoolYear).Distinct().ToListAsync();
+        return Ok(fromGroups.Union(fromUnits).Union(fromSources).OrderBy(y => y).ToList());
+    }
 
     // POST SolutionSources   { schoolYear, name }
     [HttpPost]
@@ -211,10 +229,13 @@ public class SolutionSourcesController : ControllerBase
     /// the ones with NO source from students of the caller's own school year.
     /// The caller's own questions are always excluded.
     /// </summary>
-    private IQueryable<ContactMessage> PeerMessages(int? sourceId, int me, int year)
+    private IQueryable<ContactMessage> PeerMessages(int? sourceId, int me, List<int> years)
         => sourceId == null
+            // "same school year" = the asker has a group of that year under THIS teacher
+            // (deliberately no m.Student navigation: it would INNER JOIN the filtered Students).
             ? _db.ContactMessages.AsNoTracking()
-                .Where(m => m.SolutionSourceId == null && m.StudentId != me && m.Student!.SchoolYear == year)
+                .Where(m => m.SolutionSourceId == null && m.StudentId != me
+                    && _db.StudentGroupMemberships.Any(gm => gm.StudentId == m.StudentId && years.Contains(gm.Group!.SchoolYear)))
             : _db.ContactMessages.AsNoTracking()
                 .Where(m => m.SolutionSourceId == sourceId && m.StudentId != me);
 
@@ -236,11 +257,11 @@ public class SolutionSourcesController : ControllerBase
     private async Task<IActionResult> PeersCore(int? sourceId, int p)
     {
         if (p < 1) p = 1;
-        var year = User.GetSchoolYear();
-        if (year == null) return Ok(new List<object>());
+        var years = await _db.GetStudentSchoolYearsAsync(User);
+        if (years.Count == 0) return Ok(new List<object>());
 
         var me = User.GetUserId();
-        var rows = await PeerMessages(sourceId, me, year.Value)
+        var rows = await PeerMessages(sourceId, me, years)
             .GroupBy(m => m.StudentId)
             .Select(g => new
             {
@@ -288,11 +309,11 @@ public class SolutionSourcesController : ControllerBase
     private async Task<IActionResult> PeerQuestionsCore(int? sourceId, string key, int p)
     {
         if (p < 1) p = 1;
-        var year = User.GetSchoolYear();
-        if (year == null) return NotFound(new { message = "Student not found." });
+        var years = await _db.GetStudentSchoolYearsAsync(User);
+        if (years.Count == 0) return NotFound(new { message = "Student not found." });
 
         var me = User.GetUserId();
-        var candidateIds = await PeerMessages(sourceId, me, year.Value)
+        var candidateIds = await PeerMessages(sourceId, me, years)
             .Select(m => m.StudentId)
             .Distinct()
             .ToListAsync();
@@ -309,7 +330,7 @@ public class SolutionSourcesController : ControllerBase
         }
         if (peerId == null) return NotFound(new { message = "Student not found." });
 
-        var page = await PeerMessages(sourceId, me, year.Value)
+        var page = await PeerMessages(sourceId, me, years)
             .Include(m => m.Replies)
             .Where(m => m.StudentId == peerId.Value)
             .OrderByDescending(m => m.LastActivityAt)
