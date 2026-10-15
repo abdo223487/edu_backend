@@ -110,7 +110,13 @@ public class ContactMessagesController : ControllerBase
             question.Length == 0 ? null : question);
     }
 
-    private static object ToDto(ContactMessage m, string? studentName, string? groupName)
+    /// <summary>
+    /// threadsCount / unreadCount are only set for the teacher's per-STUDENT inbox card
+    /// (the card represents the student's newest thread + these totals); for a plain
+    /// thread they stay null and isRead is the thread's own flag.
+    /// </summary>
+    private static object ToDto(ContactMessage m, string? studentName, string? groupName,
+        int? threadsCount = null, int? unreadCount = null)
     {
         var replies = m.Replies.OrderBy(r => r.CreatedAt).ThenBy(r => r.Id).ToList();
         var lastReply = replies.LastOrDefault();
@@ -126,7 +132,9 @@ public class ContactMessagesController : ControllerBase
             createdAt = m.CreatedAt,
             editedAt = m.EditedAt,
             lastActivityAt = m.LastActivityAt,
-            isRead = m.IsReadByTeacher,
+            isRead = unreadCount.HasValue ? unreadCount.Value == 0 : m.IsReadByTeacher,
+            threadsCount,
+            unreadCount,
             isAnswered = replies.Any(r => r.IsFromTeacher),
 
             // optional solution source + page + question number
@@ -347,38 +355,111 @@ public class ContactMessagesController : ControllerBase
     // ───────────────────────── teacher side ─────────────────────────
 
     // GET ContactMessages/inbox?filter=all|unread|read&p=1
+    //  ONE card per STUDENT (however many questions he sent): the card is his latest question
+    //  still waiting for a teacher reply (else his latest thread) + threadsCount / unreadCount. "unread" = students with
+    //  at least one unread question, "read" = students with none. Newest activity first.
     [HttpGet("inbox")]
     [Authorize(Roles = StaffRoles)]
     public async Task<IActionResult> Inbox([FromQuery] string? filter, [FromQuery] int p = 1)
     {
         if (p < 1) p = 1;
 
-        var query = _db.ContactMessages.AsNoTracking()
-            .Include(m => m.Replies)
-            .Include(m => m.SolutionSource)
-            .AsQueryable();
-        query = (filter ?? "all").Trim().ToLowerInvariant() switch
+        var perStudent = _db.ContactMessages.AsNoTracking()
+            .GroupBy(m => m.StudentId)
+            .Select(g => new
+            {
+                StudentId = g.Key,
+                Total = g.Count(),
+                Unread = g.Count(m => !m.IsReadByTeacher),
+                Last = g.Max(m => m.LastActivityAt)
+            });
+        perStudent = (filter ?? "all").Trim().ToLowerInvariant() switch
         {
-            "unread" => query.Where(m => !m.IsReadByTeacher),
-            "read" => query.Where(m => m.IsReadByTeacher),
-            _ => query
+            "unread" => perStudent.Where(x => x.Unread > 0),
+            "read" => perStudent.Where(x => x.Unread == 0),
+            _ => perStudent
         };
 
-        var page = await query
-            .OrderByDescending(m => m.LastActivityAt)
-            .ThenByDescending(m => m.Id)
+        var rows = await perStudent
+            .OrderByDescending(x => x.Last)
+            .ThenByDescending(x => x.StudentId)
             .Skip((p - 1) * PagingDefaults.PageSize)
             .Take(PagingDefaults.PageSize)
             .ToListAsync();
 
-        var studentIds = page.Select(m => m.StudentId).Distinct().ToList();
+        var studentIds = rows.Select(r => r.StudentId).ToList();
+
+        // The thread each student's card shows: his most recent question the teacher has NOT
+        // answered yet (= the thread's newest message isn't the teacher's: no reply at all, or
+        // the student wrote again after the last teacher reply). If everything is answered, his
+        // most recently active thread. Light query first, then load only the chosen threads.
+        var light = await _db.ContactMessages.AsNoTracking()
+            .Where(m => studentIds.Contains(m.StudentId))
+            .Select(m => new
+            {
+                m.Id,
+                m.StudentId,
+                m.LastActivityAt,
+                LastReplyFromTeacher = m.Replies
+                    .OrderByDescending(r => r.CreatedAt).ThenByDescending(r => r.Id)
+                    .Select(r => (bool?)r.IsFromTeacher)
+                    .FirstOrDefault()
+            })
+            .ToListAsync();
+        var latestIds = light
+            .GroupBy(x => x.StudentId)
+            .Select(g =>
+            {
+                var ordered = g.OrderByDescending(x => x.LastActivityAt).ThenByDescending(x => x.Id);
+                var awaiting = ordered.FirstOrDefault(x => x.LastReplyFromTeacher != true);
+                return (awaiting ?? ordered.First()).Id;
+            })
+            .ToList();
+        var latest = (await _db.ContactMessages.AsNoTracking()
+                .Include(m => m.Replies)
+                .Include(m => m.SolutionSource)
+                .Where(m => latestIds.Contains(m.Id))
+                .ToListAsync())
+            .ToDictionary(m => m.StudentId);
+
         var names = await _db.Students.AsNoTracking()
             .Where(s => studentIds.Contains(s.Id))
             .Select(s => new { s.Id, s.Name })
             .ToDictionaryAsync(s => s.Id, s => s.Name);
         var groups = await _db.GetTenantGroupNamesAsync(studentIds);
 
-        return Ok(page.Select(m => ToDto(m, names.GetValueOrDefault(m.StudentId), groups.GetValueOrDefault(m.StudentId))).ToList());
+        return Ok(rows
+            .Where(r => latest.ContainsKey(r.StudentId))
+            .Select(r => ToDto(latest[r.StudentId],
+                names.GetValueOrDefault(r.StudentId),
+                groups.GetValueOrDefault(r.StudentId),
+                r.Total, r.Unread))
+            .ToList());
+    }
+
+    // GET ContactMessages/student/{studentId}?p=1  -- every question one student sent, newest activity first
+    [HttpGet("student/{studentId:int}")]
+    [Authorize(Roles = StaffRoles)]
+    public async Task<IActionResult> StudentThreads(int studentId, [FromQuery] int p = 1)
+    {
+        if (p < 1) p = 1;
+
+        var page = await _db.ContactMessages.AsNoTracking()
+            .Include(m => m.Replies)
+            .Include(m => m.SolutionSource)
+            .Where(m => m.StudentId == studentId)
+            .OrderByDescending(m => m.LastActivityAt)
+            .ThenByDescending(m => m.Id)
+            .Skip((p - 1) * PagingDefaults.PageSize)
+            .Take(PagingDefaults.PageSize)
+            .ToListAsync();
+
+        var ids = new List<int> { studentId };
+        var name = await _db.Students.AsNoTracking()
+            .Where(s => s.Id == studentId).Select(s => s.Name).FirstOrDefaultAsync();
+        var groups = await _db.GetTenantGroupNamesAsync(ids);
+
+        return Ok(page.Select(m => ToDto(m, name, groups.GetValueOrDefault(studentId))).ToList());
     }
 
     // GET ContactMessages/unread-count  -> plain int (same shape as Students/count)
