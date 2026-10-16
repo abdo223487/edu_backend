@@ -16,6 +16,15 @@ public static class Roles
     public const string Student = "Student";
 
     /// <summary>
+    /// PREVIEW (trial) account created by the SuperAdmin for a prospective teacher.
+    /// It can ONLY see the plans, pick one and create the real Teacher account
+    /// (+ assistants) via PreviewController. It owns no tenant and no data.
+    /// Stored in the Teachers table (Role = "Preview") so login / refresh /
+    /// token-version / suspension all keep working unchanged.
+    /// </summary>
+    public const string Preview = "Preview";
+
+    /// <summary>
     /// Global, app-wide super-administrator. NOT a tenant (TenantOwnerId is
     /// always null for a SuperAdmin account, and unlike a tenant-root Teacher
     /// it never owns Groups/Units/etc. of its own). A SuperAdmin acts ON
@@ -113,6 +122,35 @@ public class Teacher
     /// matches a fresh account's version.
     /// </summary>
     public int TokenVersion { get; set; } = 1;
+
+    /// <summary>
+    /// SUPERADMIN CONTROL (dashboard buttons): comma-separated feature keys
+    /// (see Common/TeacherFeatures.cs) that the SuperAdmin has switched OFF for
+    /// this teacher's dashboard, e.g. "exams,bank_questions,drive". Null/empty
+    /// = everything visible (the default, so existing teachers are unaffected).
+    /// Only meaningful on a tenant-root account (TenantOwnerId == null): staff
+    /// (Assistant/AssistantAdmin) always follow their tenant owner's value.
+    /// </summary>
+    public string? DisabledFeatures { get; set; }
+
+    /// <summary>
+    /// FEATURE PLAN (باقة) this teacher is on. When set, the plan's feature keys
+    /// decide the dashboard buttons and <see cref="DisabledFeatures"/> is ignored.
+    /// Null = no plan: DisabledFeatures (manual / "custom") applies instead.
+    /// Only meaningful on a tenant-root account; staff follow their owner's plan.
+    /// No FK on purpose (see PlansController.Delete which moves teachers to custom).
+    /// </summary>
+    public int? PlanId { get; set; }
+
+    /// <summary>
+    /// PREVIEW accounts only: set when the SuperAdmin CLOSES the account, or
+    /// automatically once the prospect has created his real account.
+    /// A closed preview account can't log in.
+    /// </summary>
+    public DateTime? ClosedAt { get; set; }
+
+    /// <summary>PREVIEW accounts only: the real Teacher this preview account was converted into.</summary>
+    public int? ConvertedTeacherId { get; set; }
 }
 
 /// <summary>

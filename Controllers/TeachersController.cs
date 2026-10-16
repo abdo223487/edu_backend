@@ -25,6 +25,12 @@ public record CreateAssistantForTeacherRequest(int TeacherId, string UserName, s
 /// <summary>Body for POST Teachers/superadmin/teachers/{id}/suspend — SuperAdmin only.</summary>
 public record SuspendTeacherRequest(string? Reason);
 
+/// <summary>Body for POST Teachers/superadmin/teachers/{id}/features — SuperAdmin only.</summary>
+public record SetTeacherFeaturesRequest(List<string>? DisabledFeatures);
+
+/// <summary>Body for POST Teachers/superadmin/teachers/{id}/plan and POST Teachers/me/plan.</summary>
+public record SetTeacherPlanRequest(int PlanId);
+
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
@@ -370,9 +376,11 @@ public class TeachersController : ControllerBase
     public async Task<IActionResult> SuperAdminStudentCounts()
     {
         var teachers = await _db.Teachers.AsNoTracking()
-            .Where(t => t.TenantOwnerId == null)
-            .Select(t => new { t.Id, t.Name, t.UserName, t.IsSuspended })
+            .Where(t => t.TenantOwnerId == null && t.Role != Roles.Preview)
+            .Select(t => new { t.Id, t.Name, t.UserName, t.IsSuspended, t.PlanId, t.DisabledFeatures })
             .ToListAsync();
+
+        var planNames = await _db.FeaturePlans.AsNoTracking().ToDictionaryAsync(p => p.Id, p => p.Name);
 
         // IgnoreQueryFilters(): a SuperAdmin has no single active tenant — this
         // report spans every tenant at once by design.
@@ -387,6 +395,9 @@ public class TeachersController : ControllerBase
             teacherName = t.Name,
             userName = t.UserName,
             isSuspended = t.IsSuspended,
+            planId = t.PlanId,
+            planName = t.PlanId != null && planNames.TryGetValue(t.PlanId.Value, out var pn) ? pn : null,
+            isCustomFeatures = t.PlanId == null && !string.IsNullOrEmpty(t.DisabledFeatures),
             studentCount = membershipCounts.TryGetValue(t.Id, out var c) ? c : 0
         })
         .OrderByDescending(t => t.studentCount)
@@ -440,6 +451,152 @@ public class TeachersController : ControllerBase
         await _db.SaveChangesAsync();
 
         return Ok(new { id = teacher.Id, name = teacher.Name, isSuspended = teacher.IsSuspended });
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // DASHBOARD BUTTONS (feature switches) + PLANS (باقات)
+    //
+    // Effective hidden list for a tenant-root teacher:
+    //   PlanId != null  -> everything the plan does NOT include (plan wins)
+    //   PlanId == null  -> the manual DisabledFeatures list ("custom")
+    // Staff (Assistant / AssistantAdmin) always use their tenant owner's value.
+    // ─────────────────────────────────────────────────────────────────────
+
+    // GET api/Teachers/me/features
+    // Called by the teacher dashboard on open.
+    //   { disabled: [keys to HIDE], plan: {id,name}|null, canChangePlan: bool }
+    // canChangePlan is true only for the tenant-root teacher himself (the
+    // sidebar "تغيير خطتي" button) — never for his assistants.
+    // SuperAdmin always sees everything.
+    [HttpGet("me/features")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant},{Roles.SuperAdmin}")]
+    public async Task<IActionResult> GetMyFeatures()
+    {
+        if (User.IsInRole(Roles.SuperAdmin))
+            return Ok(new { disabled = Array.Empty<string>(), plan = (object?)null, canChangePlan = false });
+
+        var myId = User.GetUserId();
+        var me = await _db.Teachers.AsNoTracking()
+            .Where(t => t.Id == myId)
+            .Select(t => new { t.Id, t.TenantOwnerId })
+            .FirstOrDefaultAsync();
+        if (me == null) return Unauthorized();
+
+        var rootId = me.TenantOwnerId ?? me.Id;
+        var root = await _db.Teachers.AsNoTracking()
+            .Where(t => t.Id == rootId)
+            .Select(t => new { t.DisabledFeatures, t.PlanId })
+            .FirstOrDefaultAsync();
+
+        FeaturePlan? plan = null;
+        if (root?.PlanId != null)
+            plan = await _db.FeaturePlans.AsNoTracking().FirstOrDefaultAsync(p => p.Id == root.PlanId);
+
+        return Ok(new
+        {
+            disabled = TeacherFeatures.EffectiveDisabled(root?.DisabledFeatures, plan),
+            plan = plan == null ? (object?)null : new { id = plan.Id, name = plan.Name },
+            canChangePlan = me.TenantOwnerId == null && User.IsInRole(Roles.Teacher),
+        });
+    }
+
+    // POST api/Teachers/me/plan  body: { planId }
+    // The "تغيير خطتي" button. Only the tenant-root teacher himself (not his
+    // assistants). The app logs the teacher out afterwards so he re-enters
+    // with the new plan's buttons.
+    [HttpPost("me/plan")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> ChangeMyPlan([FromBody] SetTeacherPlanRequest request)
+    {
+        var myId = User.GetUserId();
+        var me = await _db.Teachers.FirstOrDefaultAsync(t => t.Id == myId);
+        if (me == null) return Unauthorized();
+        if (me.TenantOwnerId != null || me.Role != Roles.Teacher)
+            return StatusCode(403, new { message = "تغيير الخطة متاح للمدرس نفسه بس." });
+
+        var plan = await _db.FeaturePlans.AsNoTracking().FirstOrDefaultAsync(p => p.Id == request.PlanId);
+        if (plan == null) return BadRequest(new { message = "الباقة غير موجودة." });
+
+        me.PlanId = plan.Id;
+        me.DisabledFeatures = null;
+        await _db.SaveChangesAsync();
+        return Ok(new { planId = plan.Id, planName = plan.Name });
+    }
+
+    // GET api/Teachers/superadmin/teachers/{id}/features
+    // Full catalog (key / Arabic label / group) + whether each one is currently
+    // enabled for this teacher, + the plan he is on (null = custom / none).
+    [HttpGet("superadmin/teachers/{id:int}/features")]
+    [Authorize(Roles = Roles.SuperAdmin)]
+    public async Task<IActionResult> SuperAdminGetTeacherFeatures(int id)
+    {
+        var teacher = await _db.Teachers.AsNoTracking()
+            .FirstOrDefaultAsync(t => t.Id == id && t.TenantOwnerId == null && t.Role != Roles.SuperAdmin && t.Role != Roles.Preview);
+        if (teacher == null) return NotFound(new { message = "Tenant-root teacher not found." });
+
+        FeaturePlan? plan = null;
+        if (teacher.PlanId != null)
+            plan = await _db.FeaturePlans.AsNoTracking().FirstOrDefaultAsync(p => p.Id == teacher.PlanId);
+
+        var disabled = TeacherFeatures.EffectiveDisabled(teacher.DisabledFeatures, plan).ToHashSet();
+        return Ok(new
+        {
+            teacherId = teacher.Id,
+            teacherName = teacher.Name,
+            plan = plan == null ? (object?)null : new { id = plan.Id, name = plan.Name },
+            features = TeacherFeatures.Catalog.Select(f => new
+            {
+                key = f.Key,
+                label = f.Label,
+                group = f.Group,
+                enabled = !disabled.Contains(f.Key),
+            }),
+        });
+    }
+
+    // POST api/Teachers/superadmin/teachers/{id}/features  body: { disabledFeatures: ["exams", ...] }
+    // MANUAL / custom list: replaces the whole list AND detaches the teacher
+    // from his plan (PlanId = null). Send [] to show everything.
+    [HttpPost("superadmin/teachers/{id:int}/features")]
+    [Authorize(Roles = Roles.SuperAdmin)]
+    public async Task<IActionResult> SuperAdminSetTeacherFeatures(int id, [FromBody] SetTeacherFeaturesRequest? request)
+    {
+        var teacher = await _db.Teachers.FirstOrDefaultAsync(t => t.Id == id && t.TenantOwnerId == null && t.Role != Roles.SuperAdmin && t.Role != Roles.Preview);
+        if (teacher == null) return NotFound(new { message = "Tenant-root teacher not found." });
+
+        var requested = (request?.DisabledFeatures ?? new List<string>())
+            .Select(k => (k ?? "").Trim())
+            .Where(k => k.Length > 0)
+            .Distinct()
+            .ToList();
+
+        var unknown = requested.Where(k => !TeacherFeatures.IsValid(k)).ToList();
+        if (unknown.Count > 0)
+            return BadRequest(new { message = "Unknown feature key(s): " + string.Join(", ", unknown) });
+
+        teacher.PlanId = null;
+        teacher.DisabledFeatures = TeacherFeatures.Serialize(requested);
+        await _db.SaveChangesAsync();
+
+        return Ok(new { teacherId = teacher.Id, disabled = TeacherFeatures.Parse(teacher.DisabledFeatures) });
+    }
+
+    // POST api/Teachers/superadmin/teachers/{id}/plan  body: { planId }
+    // SuperAdmin moves a teacher onto a plan (clears any manual list).
+    [HttpPost("superadmin/teachers/{id:int}/plan")]
+    [Authorize(Roles = Roles.SuperAdmin)]
+    public async Task<IActionResult> SuperAdminSetTeacherPlan(int id, [FromBody] SetTeacherPlanRequest request)
+    {
+        var teacher = await _db.Teachers.FirstOrDefaultAsync(t => t.Id == id && t.TenantOwnerId == null && t.Role != Roles.SuperAdmin && t.Role != Roles.Preview);
+        if (teacher == null) return NotFound(new { message = "Tenant-root teacher not found." });
+
+        var plan = await _db.FeaturePlans.AsNoTracking().FirstOrDefaultAsync(p => p.Id == request.PlanId);
+        if (plan == null) return BadRequest(new { message = "الباقة غير موجودة." });
+
+        teacher.PlanId = plan.Id;
+        teacher.DisabledFeatures = null;
+        await _db.SaveChangesAsync();
+        return Ok(new { teacherId = teacher.Id, planId = plan.Id, planName = plan.Name });
     }
 
     // DELETE api/Teachers/superadmin/teachers/{id}

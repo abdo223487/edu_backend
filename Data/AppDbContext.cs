@@ -51,6 +51,7 @@ public class AppDbContext : DbContext
     public DbSet<ContactMessage> ContactMessages => Set<ContactMessage>();
     public DbSet<ContactReply> ContactReplies => Set<ContactReply>();
     public DbSet<SolutionSource> SolutionSources => Set<SolutionSource>();
+    public DbSet<FeaturePlan> FeaturePlans => Set<FeaturePlan>();
     public DbSet<Quiz> Quizzes => Set<Quiz>();
     public DbSet<Question> Questions => Set<Question>();
     public DbSet<QuizResult> QuizResults => Set<QuizResult>();
@@ -313,6 +314,9 @@ public class AppDbContext : DbContext
         // source keeps the questions that used it (FK is SetNull).
         modelBuilder.Entity<SolutionSource>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
         modelBuilder.Entity<SolutionSource>().HasIndex(x => new { x.TeacherId, x.SchoolYear });
+        // FeaturePlan is GLOBAL (no tenant filter). Price in EGP with 2 decimals.
+        modelBuilder.Entity<FeaturePlan>().Property(p => p.Price).HasPrecision(18, 2);
+        modelBuilder.Entity<Teacher>().HasIndex(t => t.PlanId);
         modelBuilder.Entity<ContactMessage>().HasIndex(c => c.SolutionSourceId);
         modelBuilder.Entity<ContactMessage>()
             .HasOne(c => c.SolutionSource)

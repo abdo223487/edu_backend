@@ -49,6 +49,11 @@ public class AuthController : ControllerBase
 
                 if (rootSuspended)
                     return Unauthorized(new { message = "This account has been suspended by the administrator." });
+
+                // PREVIEW accounts: closed by the SuperAdmin, or already converted
+                // into a real teacher account (one-shot).
+                if (teacher.Role == Roles.Preview && teacher.ClosedAt != null)
+                    return Unauthorized(new { message = "This preview account has been closed." });
             }
 
             var roles = teacher.Role == Roles.AssistantAdmin
@@ -60,7 +65,7 @@ public class AuthController : ControllerBase
             // SuperAdmin is the one exception: it owns no tenant at all — it picks
             // whichever teacher to act on behalf of per-request via the "X-TenantId"
             // header instead (see HttpTenantContext), so no tenantId claim is embedded.
-            int? tenantId = teacher.Role == Roles.SuperAdmin
+            int? tenantId = (teacher.Role == Roles.SuperAdmin || teacher.Role == Roles.Preview)
                 ? null
                 : teacher.TenantOwnerId ?? teacher.Id;
 
@@ -142,7 +147,7 @@ public class AuthController : ControllerBase
                 var roleClaimsReplay = teacher.Role == Roles.AssistantAdmin
                     ? new[] { Roles.AssistantAdmin, Roles.Teacher }
                     : new[] { teacher.Role };
-                int? tenantIdReplay = teacher.Role == Roles.SuperAdmin
+                int? tenantIdReplay = (teacher.Role == Roles.SuperAdmin || teacher.Role == Roles.Preview)
                     ? null
                     : teacher.TenantOwnerId ?? teacher.Id;
                 var accessReplay = _tokens.CreateAccessToken(teacher.Id.ToString(), teacher.UserName, roleClaimsReplay, tenantId: tenantIdReplay, tokenVersion: teacher.TokenVersion);
@@ -157,7 +162,7 @@ public class AuthController : ControllerBase
                 : new[] { teacher.Role };
 
             // See Login above: SuperAdmin never gets a tenantId claim.
-            int? tenantId = teacher.Role == Roles.SuperAdmin
+            int? tenantId = (teacher.Role == Roles.SuperAdmin || teacher.Role == Roles.Preview)
                 ? null
                 : teacher.TenantOwnerId ?? teacher.Id;
 

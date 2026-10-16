@@ -41,6 +41,28 @@ public class TenantSuspensionMiddleware
     {
         var user = context.User;
 
+        // PREVIEW accounts own no tenant: block them when the SuperAdmin
+        // suspended / closed the account (or it was already converted).
+        if (user?.Identity?.IsAuthenticated == true && user.IsInRole(Roles.Preview))
+        {
+            var previewId = user.GetUserId();
+            var state = await db.Teachers.AsNoTracking()
+                .Where(t => t.Id == previewId)
+                .Select(t => new { t.IsSuspended, t.ClosedAt })
+                .FirstOrDefaultAsync();
+
+            if (state == null || state.IsSuspended || state.ClosedAt != null)
+            {
+                context.Response.ContentType = "application/json";
+                context.Response.StatusCode = (int)HttpStatusCode.Forbidden;
+                await context.Response.WriteAsync(JsonSerializer.Serialize(new
+                {
+                    message = "This preview account is not active."
+                }));
+                return;
+            }
+        }
+
         if (user?.Identity?.IsAuthenticated == true && !user.IsInRole(Roles.SuperAdmin))
         {
             int? tenantIdToCheck = null;
