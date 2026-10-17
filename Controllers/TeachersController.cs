@@ -31,6 +31,9 @@ public record SetTeacherFeaturesRequest(List<string>? DisabledFeatures);
 /// <summary>Body for POST Teachers/superadmin/teachers/{id}/plan and POST Teachers/me/plan.</summary>
 public record SetTeacherPlanRequest(int PlanId);
 
+/// <summary>Body for POST Teachers/me/swaps: the COMPLETE desired swap set (replaces the old one).</summary>
+public record SetMySwapsRequest(List<string>? SwapIn, List<string>? SwapOut);
+
 [ApiController]
 [Route("api/[controller]")]
 [Authorize]
@@ -454,17 +457,19 @@ public class TeachersController : ControllerBase
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // DASHBOARD BUTTONS (feature switches) + PLANS (باقات)
+    // DASHBOARD BUTTONS (feature switches) + PLANS (باقات) + SWAPS
     //
     // Effective hidden list for a tenant-root teacher:
-    //   PlanId != null  -> everything the plan does NOT include (plan wins)
+    //   PlanId != null  -> everything NOT in (plan - SwapOut + SwapIn)
     //   PlanId == null  -> the manual DisabledFeatures list ("custom")
     // Staff (Assistant / AssistantAdmin) always use their tenant owner's value.
     // ─────────────────────────────────────────────────────────────────────
 
     // GET api/Teachers/me/features
     // Called by the teacher dashboard on open.
-    //   { disabled: [keys to HIDE], plan: {id,name}|null, canChangePlan: bool }
+    //   { disabled: [keys to HIDE],
+    //     plan: {id,name,swapLimit}|null, swapIn: [...], swapOut: [...],
+    //     canChangePlan: bool }
     // canChangePlan is true only for the tenant-root teacher himself (the
     // sidebar "تغيير خطتي" button) — never for his assistants.
     // SuperAdmin always sees everything.
@@ -473,7 +478,14 @@ public class TeachersController : ControllerBase
     public async Task<IActionResult> GetMyFeatures()
     {
         if (User.IsInRole(Roles.SuperAdmin))
-            return Ok(new { disabled = Array.Empty<string>(), plan = (object?)null, canChangePlan = false });
+            return Ok(new
+            {
+                disabled = Array.Empty<string>(),
+                plan = (object?)null,
+                swapIn = Array.Empty<string>(),
+                swapOut = Array.Empty<string>(),
+                canChangePlan = false,
+            });
 
         var myId = User.GetUserId();
         var me = await _db.Teachers.AsNoTracking()
@@ -485,25 +497,31 @@ public class TeachersController : ControllerBase
         var rootId = me.TenantOwnerId ?? me.Id;
         var root = await _db.Teachers.AsNoTracking()
             .Where(t => t.Id == rootId)
-            .Select(t => new { t.DisabledFeatures, t.PlanId })
+            .Select(t => new { t.DisabledFeatures, t.PlanId, t.SwapIn, t.SwapOut })
             .FirstOrDefaultAsync();
 
         FeaturePlan? plan = null;
         if (root?.PlanId != null)
             plan = await _db.FeaturePlans.AsNoTracking().FirstOrDefaultAsync(p => p.Id == root.PlanId);
 
+        var swaps = plan == null
+            ? (SwapIn: Array.Empty<string>(), SwapOut: Array.Empty<string>())
+            : TeacherFeatures.SanitizeSwaps(plan, root!.SwapIn, root.SwapOut);
+
         return Ok(new
         {
-            disabled = TeacherFeatures.EffectiveDisabled(root?.DisabledFeatures, plan),
-            plan = plan == null ? (object?)null : new { id = plan.Id, name = plan.Name },
+            disabled = TeacherFeatures.EffectiveDisabled(root?.DisabledFeatures, plan, root?.SwapIn, root?.SwapOut),
+            plan = plan == null ? (object?)null : new { id = plan.Id, name = plan.Name, swapLimit = plan.SwapLimit },
+            swapIn = swaps.SwapIn,
+            swapOut = swaps.SwapOut,
             canChangePlan = me.TenantOwnerId == null && User.IsInRole(Roles.Teacher),
         });
     }
 
     // POST api/Teachers/me/plan  body: { planId }
     // The "تغيير خطتي" button. Only the tenant-root teacher himself (not his
-    // assistants). The app logs the teacher out afterwards so he re-enters
-    // with the new plan's buttons.
+    // assistants). Clears his swaps. The app logs the teacher out afterwards so
+    // he re-enters with the new plan's buttons.
     [HttpPost("me/plan")]
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
     public async Task<IActionResult> ChangeMyPlan([FromBody] SetTeacherPlanRequest request)
@@ -519,13 +537,59 @@ public class TeachersController : ControllerBase
 
         me.PlanId = plan.Id;
         me.DisabledFeatures = null;
+        me.SwapIn = null;
+        me.SwapOut = null;
         await _db.SaveChangesAsync();
         return Ok(new { planId = plan.Id, planName = plan.Name });
     }
 
+    // POST api/Teachers/me/swaps  body: { swapIn: [...], swapOut: [...] }
+    // 1-for-1 feature swaps inside the teacher's CURRENT plan: every key in
+    // swapIn is a feature the plan does NOT include, paired with one key in
+    // swapOut that the plan DOES include. At most plan.SwapLimit pairs.
+    // The body is the COMPLETE desired set (send two empty lists to undo all).
+    [HttpPost("me/swaps")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> ChangeMySwaps([FromBody] SetMySwapsRequest request)
+    {
+        var myId = User.GetUserId();
+        var me = await _db.Teachers.FirstOrDefaultAsync(t => t.Id == myId);
+        if (me == null) return Unauthorized();
+        if (me.TenantOwnerId != null || me.Role != Roles.Teacher)
+            return StatusCode(403, new { message = "التبديل متاح للمدرس نفسه بس." });
+
+        var plan = me.PlanId == null
+            ? null
+            : await _db.FeaturePlans.AsNoTracking().FirstOrDefaultAsync(p => p.Id == me.PlanId);
+        if (plan == null) return BadRequest(new { message = "لازم تكون على باقة عشان تبدّل ميزات." });
+
+        var ins = (request.SwapIn ?? new()).Select(k => (k ?? "").Trim()).Where(k => k.Length > 0).Distinct().ToList();
+        var outs = (request.SwapOut ?? new()).Select(k => (k ?? "").Trim()).Where(k => k.Length > 0).Distinct().ToList();
+
+        var unknown = ins.Concat(outs).Where(k => !TeacherFeatures.IsValid(k)).ToList();
+        if (unknown.Count > 0)
+            return BadRequest(new { message = "Unknown feature key(s): " + string.Join(", ", unknown) });
+
+        var planKeys = TeacherFeatures.Parse(plan.FeatureKeys).ToHashSet();
+        if (ins.Any(planKeys.Contains))
+            return BadRequest(new { message = "الميزة اللي بتضيفها لازم تكون من المحجوبة." });
+        if (outs.Any(k => !planKeys.Contains(k)))
+            return BadRequest(new { message = "الميزة اللي بتشيلها لازم تكون من المتاحة." });
+        if (ins.Count != outs.Count)
+            return BadRequest(new { message = "التبديل واحدة بواحدة: عدد المضاف لازم يساوي عدد المشال." });
+        if (ins.Count > plan.SwapLimit)
+            return BadRequest(new { message = $"أقصى عدد تبديلات في باقتك {plan.SwapLimit}." });
+
+        me.SwapIn = TeacherFeatures.Serialize(ins);
+        me.SwapOut = TeacherFeatures.Serialize(outs);
+        await _db.SaveChangesAsync();
+        return Ok(new { swapIn = ins, swapOut = outs, swapLimit = plan.SwapLimit });
+    }
+
     // GET api/Teachers/superadmin/teachers/{id}/features
     // Full catalog (key / Arabic label / group) + whether each one is currently
-    // enabled for this teacher, + the plan he is on (null = custom / none).
+    // enabled for this teacher, + the plan he is on (null = custom / none)
+    // and the swaps he made.
     [HttpGet("superadmin/teachers/{id:int}/features")]
     [Authorize(Roles = Roles.SuperAdmin)]
     public async Task<IActionResult> SuperAdminGetTeacherFeatures(int id)
@@ -538,12 +602,19 @@ public class TeachersController : ControllerBase
         if (teacher.PlanId != null)
             plan = await _db.FeaturePlans.AsNoTracking().FirstOrDefaultAsync(p => p.Id == teacher.PlanId);
 
-        var disabled = TeacherFeatures.EffectiveDisabled(teacher.DisabledFeatures, plan).ToHashSet();
+        var swaps = plan == null
+            ? (SwapIn: Array.Empty<string>(), SwapOut: Array.Empty<string>())
+            : TeacherFeatures.SanitizeSwaps(plan, teacher.SwapIn, teacher.SwapOut);
+
+        var disabled = TeacherFeatures.EffectiveDisabled(teacher.DisabledFeatures, plan, teacher.SwapIn, teacher.SwapOut).ToHashSet();
         return Ok(new
         {
             teacherId = teacher.Id,
             teacherName = teacher.Name,
-            plan = plan == null ? (object?)null : new { id = plan.Id, name = plan.Name },
+            plan = plan == null ? (object?)null : new { id = plan.Id, name = plan.Name, swapLimit = plan.SwapLimit },
+            swapsUsed = swaps.SwapIn.Length,
+            swapIn = swaps.SwapIn,
+            swapOut = swaps.SwapOut,
             features = TeacherFeatures.Catalog.Select(f => new
             {
                 key = f.Key,
@@ -556,7 +627,7 @@ public class TeachersController : ControllerBase
 
     // POST api/Teachers/superadmin/teachers/{id}/features  body: { disabledFeatures: ["exams", ...] }
     // MANUAL / custom list: replaces the whole list AND detaches the teacher
-    // from his plan (PlanId = null). Send [] to show everything.
+    // from his plan (PlanId = null, swaps cleared). Send [] to show everything.
     [HttpPost("superadmin/teachers/{id:int}/features")]
     [Authorize(Roles = Roles.SuperAdmin)]
     public async Task<IActionResult> SuperAdminSetTeacherFeatures(int id, [FromBody] SetTeacherFeaturesRequest? request)
@@ -575,6 +646,8 @@ public class TeachersController : ControllerBase
             return BadRequest(new { message = "Unknown feature key(s): " + string.Join(", ", unknown) });
 
         teacher.PlanId = null;
+        teacher.SwapIn = null;
+        teacher.SwapOut = null;
         teacher.DisabledFeatures = TeacherFeatures.Serialize(requested);
         await _db.SaveChangesAsync();
 
@@ -582,7 +655,7 @@ public class TeachersController : ControllerBase
     }
 
     // POST api/Teachers/superadmin/teachers/{id}/plan  body: { planId }
-    // SuperAdmin moves a teacher onto a plan (clears any manual list).
+    // SuperAdmin moves a teacher onto a plan (clears any manual list and swaps).
     [HttpPost("superadmin/teachers/{id:int}/plan")]
     [Authorize(Roles = Roles.SuperAdmin)]
     public async Task<IActionResult> SuperAdminSetTeacherPlan(int id, [FromBody] SetTeacherPlanRequest request)
@@ -595,8 +668,25 @@ public class TeachersController : ControllerBase
 
         teacher.PlanId = plan.Id;
         teacher.DisabledFeatures = null;
+        teacher.SwapIn = null;
+        teacher.SwapOut = null;
         await _db.SaveChangesAsync();
         return Ok(new { teacherId = teacher.Id, planId = plan.Id, planName = plan.Name });
+    }
+
+    // POST api/Teachers/superadmin/teachers/{id}/swaps/reset
+    // SuperAdmin undoes every swap this teacher made (back to the plain plan).
+    [HttpPost("superadmin/teachers/{id:int}/swaps/reset")]
+    [Authorize(Roles = Roles.SuperAdmin)]
+    public async Task<IActionResult> SuperAdminResetTeacherSwaps(int id)
+    {
+        var teacher = await _db.Teachers.FirstOrDefaultAsync(t => t.Id == id && t.TenantOwnerId == null && t.Role != Roles.SuperAdmin && t.Role != Roles.Preview);
+        if (teacher == null) return NotFound(new { message = "Tenant-root teacher not found." });
+
+        teacher.SwapIn = null;
+        teacher.SwapOut = null;
+        await _db.SaveChangesAsync();
+        return Ok(new { teacherId = teacher.Id, reset = true });
     }
 
     // DELETE api/Teachers/superadmin/teachers/{id}

@@ -151,6 +151,17 @@ public class Teacher
 
     /// <summary>PREVIEW accounts only: the real Teacher this preview account was converted into.</summary>
     public int? ConvertedTeacherId { get; set; }
+
+    /// <summary>
+    /// PLAN SWAPS (tenant-root only): feature keys (comma-separated) the teacher
+    /// pulled INTO his plan, each in exchange for one key in <see cref="SwapOut"/>.
+    /// Effective features = (plan - SwapOut) + SwapIn. Cleared whenever the plan
+    /// changes. Always re-validated against the plan (see TeacherFeatures.SanitizeSwaps).
+    /// </summary>
+    public string? SwapIn { get; set; }
+
+    /// <summary>PLAN SWAPS: plan features the teacher gave up (pairs with <see cref="SwapIn"/>).</summary>
+    public string? SwapOut { get; set; }
 }
 
 /// <summary>

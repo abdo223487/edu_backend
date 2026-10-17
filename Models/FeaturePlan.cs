@@ -19,5 +19,11 @@ public class FeaturePlan
     public string? FeatureKeys { get; set; }
     public string? ExtraIncluded { get; set; }
     public string? ExtraExcluded { get; set; }
+
+    /// <summary>
+    /// How many 1-for-1 feature swaps a teacher on this plan may make
+    /// (drag an available feature out, drag a blocked one in). 0 = none.
+    /// </summary>
+    public int SwapLimit { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

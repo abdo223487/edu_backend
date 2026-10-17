@@ -13,7 +13,8 @@ public record SavePlanRequest(
     decimal Price,
     List<string>? FeatureKeys,
     List<string>? ExtraIncluded,
-    List<string>? ExtraExcluded);
+    List<string>? ExtraExcluded,
+    int SwapLimit = 0);
 
 /// <summary>
 /// باقات الفيتشرز (feature plans).
@@ -44,6 +45,7 @@ public class PlansController : ControllerBase
             id = p.Id,
             name = p.Name,
             price = p.Price,
+            swapLimit = p.SwapLimit,
             featureKeys = included,
             // catalog features, labelled by the server so the app never hard-codes text
             available = TeacherFeatures.Catalog.Where(f => includedSet.Contains(f.Key))
@@ -85,6 +87,7 @@ public class PlansController : ControllerBase
         {
             Name = name,
             Price = request.Price,
+            SwapLimit = request.SwapLimit,
             FeatureKeys = TeacherFeatures.Serialize(keys),
             ExtraIncluded = TeacherFeatures.JoinLines(inc),
             ExtraExcluded = TeacherFeatures.JoinLines(exc),
@@ -109,6 +112,7 @@ public class PlansController : ControllerBase
 
         plan.Name = name;
         plan.Price = request.Price;
+        plan.SwapLimit = request.SwapLimit;
         plan.FeatureKeys = TeacherFeatures.Serialize(keys);
         plan.ExtraIncluded = TeacherFeatures.JoinLines(inc);
         plan.ExtraExcluded = TeacherFeatures.JoinLines(exc);
@@ -125,12 +129,15 @@ public class PlansController : ControllerBase
 
         // Teachers on this plan must NOT suddenly lose/gain buttons: freeze what
         // they have right now as their manual ("custom") list, then detach.
-        var frozen = TeacherFeatures.Serialize(TeacherFeatures.EffectiveDisabled(null, plan));
         var teachers = await _db.Teachers.Where(t => t.PlanId == id).ToListAsync();
         foreach (var t in teachers)
         {
+            // per teacher: his own swaps are part of what he has right now
+            t.DisabledFeatures = TeacherFeatures.Serialize(
+                TeacherFeatures.EffectiveDisabled(null, plan, t.SwapIn, t.SwapOut));
             t.PlanId = null;
-            t.DisabledFeatures = frozen;
+            t.SwapIn = null;
+            t.SwapOut = null;
         }
 
         _db.FeaturePlans.Remove(plan);
@@ -147,6 +154,7 @@ public class PlansController : ControllerBase
         if (name.Length == 0) return "اسم الباقة مطلوب.";
         if (name.Length > 80) return "اسم الباقة طويل (80 حرف كحد أقصى).";
         if (r.Price < 0 || r.Price > 100_000_000m) return "السعر غير صحيح.";
+        if (r.SwapLimit < 0 || r.SwapLimit > TeacherFeatures.Catalog.Count) return "عدد التبديلات غير صحيح.";
 
         keys = (r.FeatureKeys ?? new()).Select(k => (k ?? "").Trim()).Where(k => k.Length > 0).Distinct().ToList();
         var unknown = keys.Where(k => !TeacherFeatures.IsValid(k)).ToList();

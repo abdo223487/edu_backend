@@ -63,11 +63,33 @@ public static class TeacherFeatures
     /// The keys that must be HIDDEN for a tenant: if the tenant is on a plan,
     /// everything the plan does NOT include; otherwise the manual list.
     /// </summary>
-    public static string[] EffectiveDisabled(string? manualRaw, Models.FeaturePlan? plan)
+    public static string[] EffectiveDisabled(string? manualRaw, Models.FeaturePlan? plan,
+        string? swapInRaw = null, string? swapOutRaw = null)
     {
         if (plan == null) return Parse(manualRaw);
+
+        // effective = (plan - swapped out) + swapped in
         var included = Parse(plan.FeatureKeys).ToHashSet();
+        var (ins, outs) = SanitizeSwaps(plan, swapInRaw, swapOutRaw);
+        foreach (var o in outs) included.Remove(o);
+        foreach (var i in ins) included.Add(i);
+
         return Catalog.Where(f => !included.Contains(f.Key)).Select(f => f.Key).ToArray();
+    }
+
+    /// <summary>
+    /// A teacher's stored swaps can go stale (SuperAdmin edits the plan or lowers
+    /// its SwapLimit). Keep only valid pairs: swapIn must be OUTSIDE the plan,
+    /// swapOut must be INSIDE it, counts match, and never more than SwapLimit.
+    /// </summary>
+    public static (string[] SwapIn, string[] SwapOut) SanitizeSwaps(
+        Models.FeaturePlan plan, string? swapInRaw, string? swapOutRaw)
+    {
+        var planKeys = Parse(plan.FeatureKeys).ToHashSet();
+        var ins = Parse(swapInRaw).Where(k => !planKeys.Contains(k)).ToList();
+        var outs = Parse(swapOutRaw).Where(k => planKeys.Contains(k)).ToList();
+        var n = Math.Min(Math.Min(ins.Count, outs.Count), Math.Max(0, plan.SwapLimit));
+        return (ins.Take(n).ToArray(), outs.Take(n).ToArray());
     }
 
     /// <summary>"a\nb\n" -> ["a","b"] (blank lines dropped).</summary>
