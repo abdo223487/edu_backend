@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace EduApi.Common;
 
 /// <summary>
@@ -90,6 +92,31 @@ public static class TeacherFeatures
         var outs = Parse(swapOutRaw).Where(k => planKeys.Contains(k)).ToList();
         var n = Math.Min(Math.Min(ins.Count, outs.Count), Math.Max(0, plan.SwapLimit));
         return (ins.Take(n).ToArray(), outs.Take(n).ToArray());
+    }
+
+    /// <summary>{"students":"up to 500"} JSON -> dictionary (bad JSON / unknown keys / blanks dropped).</summary>
+    public static Dictionary<string, string> ParseNotes(string? json)
+    {
+        var result = new Dictionary<string, string>();
+        if (string.IsNullOrWhiteSpace(json)) return result;
+        try
+        {
+            var raw = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+            if (raw == null) return result;
+            foreach (var (k, v) in raw)
+                if (Keys.Contains(k) && !string.IsNullOrWhiteSpace(v)) result[k] = v.Trim();
+        }
+        catch (JsonException) { }
+        return result;
+    }
+
+    /// <summary>dictionary -> JSON; empty -> null.</summary>
+    public static string? SerializeNotes(IDictionary<string, string> notes)
+    {
+        var clean = notes
+            .Where(kv => Keys.Contains(kv.Key) && !string.IsNullOrWhiteSpace(kv.Value))
+            .ToDictionary(kv => kv.Key, kv => kv.Value.Trim());
+        return clean.Count == 0 ? null : JsonSerializer.Serialize(clean);
     }
 
     /// <summary>"a\nb\n" -> ["a","b"] (blank lines dropped).</summary>

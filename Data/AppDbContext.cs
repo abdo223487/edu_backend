@@ -52,6 +52,7 @@ public class AppDbContext : DbContext
     public DbSet<ContactReply> ContactReplies => Set<ContactReply>();
     public DbSet<SolutionSource> SolutionSources => Set<SolutionSource>();
     public DbSet<FeaturePlan> FeaturePlans => Set<FeaturePlan>();
+    public DbSet<FeatureNote> FeatureNotes => Set<FeatureNote>();
     public DbSet<Quiz> Quizzes => Set<Quiz>();
     public DbSet<Question> Questions => Set<Question>();
     public DbSet<QuizResult> QuizResults => Set<QuizResult>();
@@ -317,6 +318,7 @@ public class AppDbContext : DbContext
         // FeaturePlan is GLOBAL (no tenant filter). Price in EGP with 2 decimals.
         modelBuilder.Entity<FeaturePlan>().Property(p => p.Price).HasPrecision(18, 2);
         modelBuilder.Entity<Teacher>().HasIndex(t => t.PlanId);
+        modelBuilder.Entity<FeatureNote>().HasKey(n => n.Key);
         modelBuilder.Entity<ContactMessage>().HasIndex(c => c.SolutionSourceId);
         modelBuilder.Entity<ContactMessage>()
             .HasOne(c => c.SolutionSource)

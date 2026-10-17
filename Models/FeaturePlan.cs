@@ -25,5 +25,23 @@ public class FeaturePlan
     /// (drag an available feature out, drag a blocked one in). 0 = none.
     /// </summary>
     public int SwapLimit { get; set; }
+
+    /// <summary>
+    /// Notes the SuperAdmin wrote NEXT TO a feature, for THIS plan only
+    /// (e.g. students -> "up to 500 students"). JSON object { featureKey: text }.
+    /// A plan note wins over the global <see cref="FeatureNote"/> of the same key.
+    /// </summary>
+    public string? FeatureNotesJson { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+}
+
+/// <summary>
+/// GLOBAL note for a feature (shown in every plan that has no note of its own
+/// for it). Key = catalog key (Common/TeacherFeatures.cs).
+/// </summary>
+public class FeatureNote
+{
+    public string Key { get; set; } = default!;
+    public string Note { get; set; } = default!;
 }
