@@ -24,6 +24,7 @@ public record SaveFeatureNotesRequest(Dictionary<string, string>? Notes);
 /// باقات الفيتشرز (feature plans).
 ///
 ///  GET    api/Plans                 Preview / Teacher / SuperAdmin -> every plan with its available + blocked features
+///  GET    api/Plans/public          PUBLIC (no login) -> same plans, for the marketing website
 ///  GET    api/Plans/catalog         SuperAdmin -> the 21 switchable features (for the plan editor)
 ///  POST   api/Plans                 SuperAdmin -> create
 ///  PUT    api/Plans/{id}            SuperAdmin -> edit (name / price / features / extra lines)
@@ -79,6 +80,26 @@ public class PlansController : ControllerBase
             .OrderBy(p => p.Price).ThenBy(p => p.Id)
             .ToListAsync();
         var global = await LoadGlobalNotes();
+        return Ok(plans.Select(p => ToDto(p, global)));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // GET api/Plans/public — PUBLIC, no login.
+    // Feeds the marketing website. Returns exactly what the app shows for every
+    // plan: name, price, swapLimit, available/blocked features (+ notes: the plan's
+    // own note, else the global one) and the extra free-text lines.
+    // Read-only, global data (plans are not tenant-scoped) and never cached, so a
+    // plan you create/edit/delete shows up on the website on its next load.
+    // ═══════════════════════════════════════════════════════════════════
+    [HttpGet("public")]
+    [AllowAnonymous]
+    public async Task<IActionResult> GetPublic()
+    {
+        var plans = await _db.FeaturePlans.AsNoTracking()
+            .OrderBy(p => p.Price).ThenBy(p => p.Id)
+            .ToListAsync();
+        var global = await LoadGlobalNotes();
+        Response.Headers["Cache-Control"] = "no-store";
         return Ok(plans.Select(p => ToDto(p, global)));
     }
 
