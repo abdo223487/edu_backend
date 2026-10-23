@@ -762,7 +762,8 @@ public class LectureAssignmentsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
     public async Task<IActionResult> GetHomeworkSummary(
         [FromQuery] int? unitId, [FromQuery] int? onlineLessonId, [FromQuery] int? externalBookId,
-        [FromQuery] int? groupId, [FromQuery] int p = 1, [FromQuery] string? q = null)
+        [FromQuery] int? groupId, [FromQuery] int p = 1, [FromQuery] string? q = null,
+        [FromQuery] int? lectureId = null)
     {
         var sourcesGiven = new[] { unitId.HasValue, onlineLessonId.HasValue, externalBookId.HasValue }.Count(x => x);
         if (sourcesGiven != 1)
@@ -806,6 +807,18 @@ public class LectureAssignmentsController : ControllerBase
             containerLectureIds = await _db.Lectures.AsNoTracking()
                 .Where(l => l.ExternalBookId == externalBookId!.Value).Select(l => l.Id).ToListAsync();
         }
+
+        // OPTIONAL lecture-level mode: when lectureId is given, the summary is
+        // scoped to that ONE lecture (must belong to the container above).
+        // Unit-wide items (Quiz / Assignment / AssignmentCenter) aren't
+        // attached to a lecture, so they're excluded in this mode.
+        if (lectureId.HasValue)
+        {
+            if (!containerLectureIds.Contains(lectureId.Value))
+                return NotFound(new { message = "Lecture not found in this container." });
+            containerLectureIds = new List<int> { lectureId.Value };
+        }
+        var includeUnitWideItems = !lectureId.HasValue;
 
         // MULTI-TENANT: see the identical note on LectureExamsController.GetExamsSummary.
         List<HomeworkStudentRow> candidates;
@@ -861,11 +874,11 @@ public class LectureAssignmentsController : ControllerBase
 
         // Unit-wide Assignment / AssignmentCenter items -- only exist for a
         // Unit container (see class doc comment above).
-        var assignmentsInUnit = unitId.HasValue
+        var assignmentsInUnit = (unitId.HasValue && includeUnitWideItems)
             ? await _db.AssignmentUnitLinks.AsNoTracking()
                 .Where(x => x.UnitId == unitId.Value).Select(x => x.AssignmentId).Distinct().ToListAsync()
             : new List<int>();
-        var assignmentCentersInUnit = unitId.HasValue
+        var assignmentCentersInUnit = (unitId.HasValue && includeUnitWideItems)
             ? await _db.AssignmentCenterUnitLinks.AsNoTracking()
                 .Where(x => x.UnitId == unitId.Value).Select(x => x.AssignmentCenterId).Distinct().ToListAsync()
             : new List<int>();

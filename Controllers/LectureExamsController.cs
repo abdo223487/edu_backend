@@ -932,7 +932,8 @@ public class LectureExamsController : ControllerBase
     [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin},{Roles.Assistant}")]
     public async Task<IActionResult> GetExamsSummary(
         [FromQuery] int? unitId, [FromQuery] int? onlineLessonId, [FromQuery] int? externalBookId,
-        [FromQuery] int? groupId, [FromQuery] int p = 1, [FromQuery] string? q = null)
+        [FromQuery] int? groupId, [FromQuery] int p = 1, [FromQuery] string? q = null,
+        [FromQuery] int? lectureId = null)
     {
         var sourcesGiven = new[] { unitId.HasValue, onlineLessonId.HasValue, externalBookId.HasValue }.Count(x => x);
         if (sourcesGiven != 1)
@@ -978,6 +979,18 @@ public class LectureExamsController : ControllerBase
             containerLectureIds = await _db.Lectures.AsNoTracking()
                 .Where(l => l.ExternalBookId == externalBookId!.Value).Select(l => l.Id).ToListAsync();
         }
+
+        // OPTIONAL lecture-level mode: when lectureId is given, the summary is
+        // scoped to that ONE lecture (must belong to the container above).
+        // Unit-wide items (Quiz / Assignment / AssignmentCenter) aren't
+        // attached to a lecture, so they're excluded in this mode.
+        if (lectureId.HasValue)
+        {
+            if (!containerLectureIds.Contains(lectureId.Value))
+                return NotFound(new { message = "Lecture not found in this container." });
+            containerLectureIds = new List<int> { lectureId.Value };
+        }
+        var includeUnitWideItems = !lectureId.HasValue;
 
         // MULTI-TENANT: for Unit/ExternalBook containers (the ones with a
         // per-Group total, see isGroupScoped above), resolve students via
@@ -1053,7 +1066,7 @@ public class LectureExamsController : ControllerBase
             // Quiz's doc comment) and only ever belong to a Unit directly --
             // no OnlineLesson/ExternalBook quizzes exist -- so this only
             // ever adds anything when unitId was the container passed in.
-            var quizzesInUnit = unitId.HasValue
+            var quizzesInUnit = (unitId.HasValue && includeUnitWideItems)
                 ? await _db.Quizzes.AsNoTracking().Where(qz => qz.UnitId == unitId.Value)
                     .Select(qz => qz.Id).ToListAsync()
                 : new List<int>();
@@ -1100,7 +1113,7 @@ public class LectureExamsController : ControllerBase
         // auto-submitted zero-score "missed" rows, matching how the rest of
         // the app already treats those as takers, see QuizResult.IsAutoSubmitted)
         // counts as one completed item, added on top of the LectureExam count.
-        if (unitId.HasValue)
+        if (unitId.HasValue && includeUnitWideItems)
         {
             var quizIdsInUnit = await _db.Quizzes.AsNoTracking()
                 .Where(qz => qz.UnitId == unitId.Value).Select(qz => qz.Id).ToListAsync();
