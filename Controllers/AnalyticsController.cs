@@ -22,6 +22,7 @@ namespace EduApi.Controllers;
 ///  GET Analytics/attendance?groupId=..|&schoolYear=..
 ///  GET Analytics/sheet                                  (file download)
 ///  GET Analytics/sheet/lectures/{id}                     (file download)
+///  GET Analytics/sheet/year-students?schoolYear=..        (file download: active students of the year's LAST course)
 ///  GET Analytics/notebooks/{notebookId}/paid|unpaid?groupId=..|&schoolYear=..&p=..
 ///  GET Analytics/sheets/notebooks/{notebookId}/paid|unpaid?groupId=..|&schoolYear=..  (file download)
 ///  GET Analytics/student                                (student's own summary)
@@ -425,6 +426,72 @@ public class AnalyticsController : ControllerBase
 
         var bytes = BuildMultiSheetXlsx(sheets);
         return XlsxFile(bytes, $"lecture_{id}_attendance.xlsx");
+    }
+
+    // GET Analytics/sheet/year-students?schoolYear=..
+    // "السنة كاملة" students sheet: Name / PhoneNumber / ParentPhoneNumber / GroupName for the
+    // students of ONE school year who are
+    //   (1) ACTIVE   -- their membership under THIS tenant is neither suspended nor cancelled, and
+    //   (2) subscribed to the LAST course (Unit) released for that year, i.e. the newest Unit of
+    //       the year (highest Id = most recently created).
+    // A student in several groups of the year gets ONE row with the group names joined.
+    [HttpGet("sheet/year-students")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> DownloadYearStudentsSheet([FromQuery] int schoolYear)
+    {
+        // `_db.Units` is tenant-filtered, so this is the caller's own newest course of that year.
+        var lastUnit = await _db.Units.AsNoTracking()
+            .Where(u => u.SchoolYear == schoolYear)
+            .OrderByDescending(u => u.Id)
+            .Select(u => new { u.Id, u.Name })
+            .FirstOrDefaultAsync();
+        if (lastUnit == null)
+            return NotFound(new { message = "مفيش كورسات للسنة دي، فمفيش آخر كورس نجيب منه الطلاب." });
+
+        var subscribedIds = await _db.StudentUnitSubscriptions.AsNoTracking()
+            .Where(s => s.UnitId == lastUnit.Id)
+            .Select(s => s.StudentId)
+            .ToListAsync();
+
+        // ACTIVE memberships only (suspend / cancel live on the membership row, per tenant).
+        var memberships = await _db.StudentGroupMemberships.AsNoTracking()
+            .Where(m => m.Group!.SchoolYear == schoolYear
+                        && m.Group.TeacherId == _tenant.CurrentTenantId
+                        && !m.IsSuspended
+                        && !m.IsCancelled
+                        && subscribedIds.Contains(m.StudentId))
+            .Select(m => new { m.StudentId, GroupName = m.Group!.Name })
+            .ToListAsync();
+
+        var ids = memberships.Select(m => m.StudentId).Distinct().ToList();
+        var students = await _db.Students.AsNoTracking()
+            .Where(s => ids.Contains(s.Id))
+            .Select(s => new { s.Id, s.Name, s.PhoneNumber, s.ParentPhoneNumber })
+            .ToListAsync();
+
+        var groupsByStudent = memberships
+            .GroupBy(m => m.StudentId)
+            .ToDictionary(g => g.Key,
+                g => string.Join("، ", g.Select(x => x.GroupName).Distinct().OrderBy(n => n)));
+
+        var rows = students
+            .Select(s => new { Student = s, Group = groupsByStudent.GetValueOrDefault(s.Id, "") })
+            .OrderBy(x => x.Group)
+            .ThenBy(x => x.Student.Name)
+            .Select(x => new[]
+            {
+                x.Student.Name ?? "",
+                x.Student.PhoneNumber ?? "",
+                x.Student.ParentPhoneNumber ?? "",
+                x.Group
+            })
+            .ToList();
+
+        var bytes = BuildXlsx(
+            SafeSheetName("الطلاب"),
+            new[] { "اسم الطالب", "رقم الهاتف", "رقم ولي الأمر", "المجموعة" },
+            rows);
+        return XlsxFile(bytes, $"year_{schoolYear}_active_students.xlsx");
     }
 
     // GET Analytics/sheet?schoolYear=..&groupId=..
