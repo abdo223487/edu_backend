@@ -1105,6 +1105,11 @@ public class StudentsController : ControllerBase
 
         var subs = await _db.StudentUnitSubscriptions.AsNoTracking().Where(u => u.StudentId == id).Select(u => u.UnitId).ToListAsync();
 
+        // External books the student is DIRECTLY subscribed to (teacher toggle or a redeemed
+        // code). Books linked to a Unit are reached through the unit subscription instead.
+        var bookSubs = await _db.StudentExternalBookSubscriptions.AsNoTracking()
+            .Where(s => s.StudentId == id).Select(s => s.ExternalBookId).ToListAsync();
+
         // MULTI-TENANT: this student's Group/GroupId under the CALLER's own
         // tenant specifically, not necessarily their legacy single Group.
         // isSuspended/isCancelled also come from THIS membership row -- see
@@ -1135,7 +1140,9 @@ public class StudentsController : ControllerBase
             isCancelled = tenantMembership?.IsCancelled ?? false,
             createdAt = student.CreatedAt,
             // Client reads this as `data['subscribedUnits'] as List` then `unit['id']` per item.
-            subscribedUnits = subs.Select(unitId => new { id = unitId })
+            subscribedUnits = subs.Select(unitId => new { id = unitId }),
+            // Same shape for external books: `data['subscribedExternalBooks']` -> [{ id }].
+            subscribedExternalBooks = bookSubs.Select(bookId => new { id = bookId })
         });
     }
 
@@ -1780,6 +1787,55 @@ public class StudentsController : ControllerBase
         if (sub != null)
         {
             _db.StudentUnitSubscriptions.Remove(sub);
+            await _db.SaveChangesAsync();
+        }
+        return Ok(new { message = "Unsubscribed." });
+    }
+
+    // POST Students/subscribe/external-book  body: { studentId, externalBookId }
+    // Same behaviour as subscribe/unit, for "الكتب الخارجية": gives the student access to every
+    // lecture inside the book (StudentExternalBookSubscription), exactly like redeeming its code.
+    [HttpPost("subscribe/external-book")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> SubscribeExternalBook([FromBody] ExternalBookSubscriptionRequest request)
+    {
+        // `_db.ExternalBooks` is tenant-filtered, so a book from another teacher simply isn't found.
+        var book = await _db.ExternalBooks.FirstOrDefaultAsync(b => b.Id == request.ExternalBookId);
+        if (book == null) return NotFound(new { message = "External book not found." });
+
+        // The student must already be linked to THIS teacher (same rule as subscribe/unit).
+        var isLinked = await _db.StudentGroupMemberships.IgnoreQueryFilters()
+            .AnyAsync(m => m.StudentId == request.StudentId && m.Group!.TeacherId == book.TeacherId);
+        if (!isLinked)
+            return BadRequest(new
+            {
+                message = "This student isn't linked to your account yet. Use POST Students/link first."
+            });
+
+        if (!await _db.StudentExternalBookSubscriptions
+                .AnyAsync(s => s.StudentId == request.StudentId && s.ExternalBookId == request.ExternalBookId))
+        {
+            _db.StudentExternalBookSubscriptions.Add(new StudentExternalBookSubscription
+            {
+                TeacherId = book.TeacherId,
+                StudentId = request.StudentId,
+                ExternalBookId = request.ExternalBookId
+            });
+            await _db.SaveChangesAsync();
+        }
+        return Ok(new { message = "Subscribed." });
+    }
+
+    // POST Students/unsubscribe/external-book  body: { studentId, externalBookId }
+    [HttpPost("unsubscribe/external-book")]
+    [Authorize(Roles = $"{Roles.Teacher},{Roles.AssistantAdmin}")]
+    public async Task<IActionResult> UnsubscribeExternalBook([FromBody] ExternalBookSubscriptionRequest request)
+    {
+        var sub = await _db.StudentExternalBookSubscriptions
+            .FirstOrDefaultAsync(s => s.StudentId == request.StudentId && s.ExternalBookId == request.ExternalBookId);
+        if (sub != null)
+        {
+            _db.StudentExternalBookSubscriptions.Remove(sub);
             await _db.SaveChangesAsync();
         }
         return Ok(new { message = "Unsubscribed." });

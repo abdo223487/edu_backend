@@ -29,6 +29,9 @@ public record ReactivateRequest(int StudentId, string Comment);
 // POST Students/subscribe|unsubscribe/unit  body: { studentId, unitId }
 public record UnitSubscriptionRequest(int StudentId, int UnitId);
 
+// POST Students/subscribe|unsubscribe/external-book  body: { studentId, externalBookId }
+public record ExternalBookSubscriptionRequest(int StudentId, int ExternalBookId);
+
 // MULTI-TENANT: link an existing student (from another teacher) to the caller's
 // own tenant via phone number, optionally granting Unit access at the same time.
 public record LinkStudentRequest(string PhoneNumber, int GroupId, List<int>? UnitIds);
