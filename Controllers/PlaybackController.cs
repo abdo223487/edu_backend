@@ -159,12 +159,30 @@ public class PlaybackController : ControllerBase
             .Select(l => new { l.Id, l.Name, l.ThumbnailUrl, l.UnitId, l.LessonIndex })
             .ToDictionaryAsync(l => l.Id);
 
+        // Lesson + unit cover images so the app can open the lesson page with its real header
+        // (before this the "continue watching" card opened it with no image => grey header).
+        var unitIds = lectures.Values.Where(l => l.UnitId != null).Select(l => l.UnitId!.Value).Distinct().ToList();
+        var unitImages = await _db.Units.AsNoTracking()
+            .Where(u => unitIds.Contains(u.Id))
+            .Select(u => new { u.Id, u.ImageUrl })
+            .ToDictionaryAsync(u => u.Id, u => u.ImageUrl);
+        var lessonRows = await _db.Lessons.AsNoTracking()
+            .Where(x => unitIds.Contains(x.UnitId))
+            .Select(x => new { x.UnitId, x.LessonIndex, x.Name, x.ImageUrl })
+            .ToListAsync();
+
         var items = new List<object>();
         foreach (var r in rows)
         {
             if (!lectures.TryGetValue(r.LectureId, out var l)) continue;
             // Re-check access so a revoked subscription doesn't leak a lecture name.
             if (await LectureAccess.GetAsync(_db, User, _tenant, r.LectureId) == null) continue;
+
+            var lesson = (l.UnitId != null && l.LessonIndex != null)
+                ? lessonRows.FirstOrDefault(x => x.UnitId == l.UnitId && x.LessonIndex == l.LessonIndex)
+                : null;
+            string? unitImage = null;
+            if (l.UnitId != null) unitImages.TryGetValue(l.UnitId.Value, out unitImage);
 
             items.Add(new
             {
@@ -173,6 +191,9 @@ public class PlaybackController : ControllerBase
                 thumbnailUrl = l.ThumbnailUrl,
                 unitId = l.UnitId,
                 lessonIndex = l.LessonIndex,
+                lessonName = lesson?.Name,
+                lessonImageUrl = lesson?.ImageUrl,
+                unitImageUrl = unitImage,
                 positionSeconds = r.PositionSeconds,
                 durationSeconds = r.DurationSeconds,
                 progress = r.DurationSeconds is > 0 ? Math.Round(100.0 * r.PositionSeconds / r.DurationSeconds.Value, 0) : (double?)null,

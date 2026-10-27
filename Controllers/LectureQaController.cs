@@ -8,7 +8,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace EduApi.Controllers;
 
-public record PostCommentRequest(string Body, int? ParentId, int? VideoSeconds);
+public record PostCommentRequest(string? Body, int? ParentId, int? VideoSeconds);
 public record EditCommentRequest(string Body);
 
 /// <summary>
@@ -16,7 +16,8 @@ public record EditCommentRequest(string Body);
 ///
 /// Route: api/LectureQa  (students AND staff)
 ///  GET  LectureQa/{lectureId}?p=1               questions (20 per page) with their replies
-///  POST LectureQa/{lectureId}                   body { body, parentId?, videoSeconds? }  ask / reply
+///  POST LectureQa/{lectureId}                   ask / reply. multipart: Body?, ParentId?, VideoSeconds?, Image?
+///                                               (text OR image is required). Old JSON body { body, parentId?, videoSeconds? } still works.
 ///  PATCH LectureQa/comment/{id}                 body { body }   edit my own
 ///  POST LectureQa/comment/{id}/delete           author, or staff
 ///  POST LectureQa/comment/{id}/accept           toggle "best answer" (question author or staff)
@@ -34,17 +35,40 @@ public class LectureQaController : ControllerBase
 {
     private const int MaxBodyLength = 2000;
     private const int StudentPostsPerHour = 10;
+    private const long MaxImageBytes = 8 * 1024 * 1024;
+    private const string ImageSubFolder = "lectureqa";
+
+    private static readonly HashSet<string> AllowedImageExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".jpg", ".jpeg", ".png", ".gif", ".webp"
+    };
 
     private readonly AppDbContext _db;
     private readonly ITenantContext _tenant;
     private readonly IPushService _push;
+    private readonly IFileStorageService _files;
 
-    public LectureQaController(AppDbContext db, ITenantContext tenant, IPushService push)
+    public LectureQaController(AppDbContext db, ITenantContext tenant, IPushService push, IFileStorageService files)
     {
         _db = db;
         _tenant = tenant;
         _push = push;
+        _files = files;
     }
+
+    private static string? ValidateImage(IFormFile? image)
+    {
+        if (image == null || image.Length == 0) return null;
+        if (image.Length > MaxImageBytes) return "Image is too large (max 8 MB).";
+        if (!AllowedImageExtensions.Contains(Path.GetExtension(image.FileName) ?? string.Empty))
+            return "Only image files are allowed (jpg, png, gif, webp).";
+        if (!string.IsNullOrEmpty(image.ContentType) &&
+            !image.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            return "Only image files are allowed (jpg, png, gif, webp).";
+        return null;
+    }
+
+    private static bool HasImage(IFormFile? image) => image != null && image.Length > 0;
 
     private bool IsStudent => User.IsInRole(Roles.Student);
     private bool IsStaff => User.IsInRole(Roles.Teacher) || User.IsInRole(Roles.AssistantAdmin)
@@ -79,6 +103,7 @@ public class LectureQaController : ControllerBase
         {
             id = c.Id,
             body = c.Body,
+            imageUrl = c.ImageUrl,
             authorName = c.AuthorName,
             authorRole = c.AuthorRole,
             isMine = c.AuthorRole == myRole && c.AuthorId == myId,
@@ -96,6 +121,7 @@ public class LectureQaController : ControllerBase
             {
                 id = q.Id,
                 body = q.Body,
+                imageUrl = q.ImageUrl,
                 authorName = q.AuthorName,
                 authorRole = q.AuthorRole,
                 isMine = q.AuthorRole == myRole && q.AuthorId == myId,
@@ -111,17 +137,54 @@ public class LectureQaController : ControllerBase
 
     // ───────────────────────── post ─────────────────────────
 
+    // One action for both body types (a second action with the same route would break Swagger):
+    //  - multipart/form-data (new app builds): Body?, ParentId?, VideoSeconds?, Image?
+    //  - application/json   (older installed builds): { body, parentId?, videoSeconds? }
     [HttpPost("{lectureId:int}")]
-    public async Task<IActionResult> Post(int lectureId, [FromBody] PostCommentRequest request)
+    [Consumes("multipart/form-data", "application/json")]
+    [ProducesResponseType(StatusCodes.Status201Created)]
+    public async Task<IActionResult> Post(int lectureId)
+    {
+        string? body;
+        int? parentId = null, videoSeconds = null;
+        IFormFile? image = null;
+
+        if (Request.HasFormContentType)
+        {
+            var form = await Request.ReadFormAsync();
+            body = form["Body"].ToString();
+            if (int.TryParse(form["ParentId"].ToString(), out var pid)) parentId = pid;
+            if (int.TryParse(form["VideoSeconds"].ToString(), out var vs)) videoSeconds = vs;
+            image = form.Files.GetFile("Image");
+        }
+        else
+        {
+            PostCommentRequest? req;
+            try { req = await Request.ReadFromJsonAsync<PostCommentRequest>(); }
+            catch { return BadRequest(new { message = "Invalid request body." }); }
+            if (req == null) return BadRequest(new { message = "Invalid request body." });
+            body = req.Body;
+            parentId = req.ParentId;
+            videoSeconds = req.VideoSeconds;
+        }
+
+        return await CreateAsync(lectureId, body, parentId, videoSeconds, image);
+    }
+
+    private async Task<IActionResult> CreateAsync(int lectureId, string? rawBody, int? parentId, int? videoSeconds, IFormFile? image)
     {
         if (!IsStudent && !IsStaff) return Forbid();
 
         var lecture = await LectureAccess.GetAsync(_db, User, _tenant, lectureId);
         if (lecture == null) return NotFound(new { message = "Lecture not found." });
 
-        var body = (request.Body ?? string.Empty).Trim();
-        if (body.Length == 0) return BadRequest(new { message = "اكتب سؤالك أو ردك الأول." });
+        var body = (rawBody ?? string.Empty).Trim();
+        var hasImage = HasImage(image);
+        if (body.Length == 0 && !hasImage) return BadRequest(new { message = "اكتب سؤالك أو ردك أو أرفق صورة الأول." });
         if (body.Length > MaxBodyLength) return BadRequest(new { message = $"الحد الأقصى {MaxBodyLength} حرف." });
+
+        var imageError = ValidateImage(image);
+        if (imageError != null) return BadRequest(new { message = imageError });
 
         if (IsStudent)
         {
@@ -133,15 +196,19 @@ public class LectureQaController : ControllerBase
         }
 
         LectureComment? parent = null;
-        if (request.ParentId.HasValue)
+        if (parentId.HasValue)
         {
             parent = await _db.LectureComments.FirstOrDefaultAsync(c =>
-                c.Id == request.ParentId.Value && c.LectureId == lectureId && !c.IsDeleted);
+                c.Id == parentId.Value && c.LectureId == lectureId && !c.IsDeleted);
             if (parent == null) return NotFound(new { message = "السؤال غير موجود." });
             if (parent.ParentId != null) return BadRequest(new { message = "مينفعش ترد على رد." });
         }
 
         var authorName = await ResolveNameAsync();
+
+        string? imageUrl = null;
+        if (hasImage)
+            imageUrl = await _files.SaveAsync(image!, ImageSubFolder);
 
         var comment = new LectureComment
         {
@@ -152,10 +219,20 @@ public class LectureQaController : ControllerBase
             AuthorId = MyId,
             AuthorName = authorName,
             Body = body,
-            VideoSeconds = parent == null ? request.VideoSeconds : null,
+            ImageUrl = imageUrl,
+            VideoSeconds = parent == null ? videoSeconds : null,
         };
-        _db.LectureComments.Add(comment);
-        await _db.SaveChangesAsync();
+
+        try
+        {
+            _db.LectureComments.Add(comment);
+            await _db.SaveChangesAsync();
+        }
+        catch
+        {
+            await _files.DeleteAsync(imageUrl); // don't leave an orphan upload behind
+            throw;
+        }
 
         // PUSH (best effort)
         try
@@ -164,21 +241,22 @@ public class LectureQaController : ControllerBase
             {
                 ["type"] = "qa", ["id"] = lectureId.ToString(), ["teacherId"] = lecture.TeacherId.ToString(),
             };
+            var preview = body.Length == 0 ? "📷 صورة" : Preview(body);
             if (parent == null && IsStudent)
             {
                 await _push.SendToStaffAsync(new[] { lecture.TeacherId },
-                    $"سؤال جديد في: {lecture.Name}", Preview(body), data);
+                    $"سؤال جديد في: {lecture.Name}", preview, data);
             }
             else if (parent != null && !(parent.AuthorRole == MyRole && parent.AuthorId == MyId) && parent.AuthorRole == "Student")
             {
                 await _push.SendToStudentsAsync(new[] { parent.AuthorId },
                     IsStaff ? "المدرس رد على سؤالك 💬" : $"{authorName} رد على سؤالك 💬",
-                    Preview(body), data);
+                    preview, data);
             }
         }
         catch { /* never fail the post because of a push */ }
 
-        return StatusCode(201, new { id = comment.Id, message = "تم النشر." });
+        return StatusCode(201, new { id = comment.Id, imageUrl = comment.ImageUrl, message = "تم النشر." });
     }
 
     private static string Preview(string s) => s.Length <= 90 ? s : s[..90] + "…";
@@ -207,7 +285,8 @@ public class LectureQaController : ControllerBase
         if (c.AuthorRole != MyRole || c.AuthorId != MyId) return Forbid();
 
         var body = (request.Body ?? string.Empty).Trim();
-        if (body.Length == 0 || body.Length > MaxBodyLength) return BadRequest(new { message = "نص غير صالح." });
+        if (body.Length > MaxBodyLength || (body.Length == 0 && string.IsNullOrEmpty(c.ImageUrl)))
+            return BadRequest(new { message = "نص غير صالح." });
 
         c.Body = body;
         c.EditedAt = DateTime.UtcNow;
@@ -223,6 +302,11 @@ public class LectureQaController : ControllerBase
         var mine = c.AuthorRole == MyRole && c.AuthorId == MyId;
         if (!mine && !IsStaff) return Forbid();
 
+        // Collect the uploaded images (the comment itself + its replies when it's a question) to clean up.
+        var imageUrls = new List<string?> { c.ImageUrl };
+        if (c.ParentId == null)
+            imageUrls.AddRange(await _db.LectureComments.Where(x => x.ParentId == c.Id).Select(x => x.ImageUrl).ToListAsync());
+
         c.IsDeleted = true;
         c.IsPinned = false;
         c.IsAccepted = false;
@@ -232,6 +316,11 @@ public class LectureQaController : ControllerBase
             await _db.LectureComments.Where(x => x.ParentId == c.Id).ExecuteUpdateAsync(s => s.SetProperty(x => x.IsDeleted, true));
         }
         await _db.SaveChangesAsync();
+
+        foreach (var url in imageUrls.Where(u => !string.IsNullOrEmpty(u)))
+        {
+            try { await _files.DeleteAsync(url); } catch { /* cleanup is best effort */ }
+        }
         return Ok(new { message = "تم الحذف." });
     }
 
@@ -302,6 +391,7 @@ public class LectureQaController : ControllerBase
             lectureId = q.LectureId,
             lectureName = names.GetValueOrDefault(q.LectureId, ""),
             body = q.Body,
+            imageUrl = q.ImageUrl,
             authorName = q.AuthorName,
             videoSeconds = q.VideoSeconds,
             createdAt = q.CreatedAt,

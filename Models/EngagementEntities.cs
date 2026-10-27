@@ -185,6 +185,8 @@ public class LectureComment
     public int AuthorId { get; set; }
     [MaxLength(120)] public string AuthorName { get; set; } = string.Empty;
     [MaxLength(2000)] public string Body { get; set; } = default!;
+    /// <summary>Optional attached image (uploaded to storage, folder "lectureqa"). Body may be empty when an image is present.</summary>
+    [MaxLength(500)] public string? ImageUrl { get; set; }
     /// <summary>Optional: the video second the question is about.</summary>
     public int? VideoSeconds { get; set; }
     public bool IsAccepted { get; set; }
