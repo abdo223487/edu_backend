@@ -154,7 +154,8 @@ public record LectureViewerItem(
     string Status,
     List<LectureViewerSessionItem>? Sessions,
     LecturePlaybackItem? Playback = null,
-    int SessionCount = 0);
+    int SessionCount = 0,
+    int TotalWatchedSeconds = 0);
 
 public record LectureViewersResponse(
     int LectureId,

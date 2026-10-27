@@ -1273,7 +1273,9 @@ public class LecturesController : ControllerBase
                 used, lecture.ViewLimit, lecture.ViewLimit.HasValue ? extra : null, remaining, itemStatus,
                 sessionsByStudent.GetValueOrDefault(s.Id, new List<LectureViewerSessionItem>()),
                 playback == null ? null : new LecturePlaybackItem(playback.PositionSeconds, playback.DurationSeconds, playback.Completed, playback.UpdatedAt),
-                sessionGroups.TryGetValue(s.Id, out var allSessions) ? allSessions.Count : 0);
+                sessionGroups.TryGetValue(s.Id, out var allSessions) ? allSessions.Count : 0,
+                // Total REAL seconds watched across EVERY open (not just the latest 20 returned above).
+                sessionGroups.TryGetValue(s.Id, out var allSessions2) ? allSessions2.Sum(x => x.WatchedSeconds) : 0);
         }).ToList();
 
         return Ok(new LectureViewersResponse(lecture.Id, lecture.Name, lecture.ViewLimit, tracksProgress, result));
