@@ -862,7 +862,23 @@ public class LecturesController : ControllerBase
         if (lecture == null) return NotFound(new { message = "Lecture not found." });
 
         if (!lecture.ViewLimit.HasValue)
-            return Ok(new ConsumeViewResult(true, null, null));
+        {
+            // Unlimited lecture: nothing to count or block, but we still open one
+            // LectureViewSession per open so the teacher's "views" screen can list
+            // every time the student opened it and where each one stopped
+            // (ReportViewProgress fills StoppedAtSeconds / WatchedSeconds).
+            // No usage row is touched, and ResumeAtSeconds stays null on purpose:
+            // resuming is already handled by the Playback feature on the client.
+            var openSession = new LectureViewSession
+            {
+                TeacherId = User.GetStaffTenantId() ?? lecture.TeacherId,
+                StudentId = User.GetUserId(),
+                LectureId = id,
+            };
+            _db.LectureViewSessions.Add(openSession);
+            await _db.SaveChangesAsync();
+            return Ok(new ConsumeViewResult(true, null, null, openSession.Id));
+        }
 
         var studentId = User.GetUserId();
         var usage = await _db.StudentLectureViewUsages
@@ -1172,12 +1188,36 @@ public class LecturesController : ControllerBase
             .Where(u => u.LectureId == id && allCandidateIds.Contains(u.StudentId))
             .ToDictionaryAsync(u => u.StudentId);
 
+        // Where each student last stopped (LecturePlaybackPosition) -- saved for
+        // EVERY lecture, with or without a ViewLimit, so it's the one source that
+        // also tells us who opened a lecture that has no view counter at all.
+        var allPlayback = await _db.LecturePlaybackPositions.AsNoTracking()
+            .Where(x => x.LectureId == id && allCandidateIds.Contains(x.StudentId))
+            .ToDictionaryAsync(x => x.StudentId);
+
+        // Students who opened this (unlimited) lecture at least once, even if they
+        // closed it before any position was saved.
+        var sessionStudentIds = lecture.ViewLimit.HasValue
+            ? new HashSet<int>()
+            : (await _db.LectureViewSessions.AsNoTracking()
+                .Where(x => x.LectureId == id && allCandidateIds.Contains(x.StudentId))
+                .Select(x => x.StudentId).Distinct().ToListAsync()).ToHashSet();
+
         string ComputeStatus(ViewerStudentRow s)
         {
             allUsages.TryGetValue(s.Id, out var usage);
             var used = usage?.ViewsUsed ?? 0;
             var extra = usage?.ExtraViews ?? 0;
-            if (!lecture.ViewLimit.HasValue) return used > 0 ? "Watched" : "NotViewed";
+            if (!lecture.ViewLimit.HasValue)
+            {
+                // No view counter: status comes from the saved playhead / opened sessions.
+                //   Full = reached ~90% at least once, Partial = opened but not finished,
+                //   NotViewed = never opened.
+                allPlayback.TryGetValue(s.Id, out var pb);
+                if (pb != null && pb.Completed) return "Full";
+                if ((pb != null && pb.PositionSeconds > 0) || sessionStudentIds.Contains(s.Id)) return "Partial";
+                return used > 0 ? "Watched" : "NotViewed";
+            }
             if (used == 0) return "NotViewed";
             var remaining = Math.Max(0, lecture.ViewLimit.Value + extra - used);
             return remaining <= 0 ? "Full" : "Partial";
@@ -1199,39 +1239,41 @@ public class LecturesController : ControllerBase
         var groupNames = await _db.GetTenantGroupNamesAsync(pagedIds);
         var usages = allUsages; // already covers every paged id (paged is a subset of allCandidateIds)
 
-        // Sessions now exist for ANY ViewLimit'd lecture regardless of
-        // source (see ConsumeView) -- both the File and Youtube players can
-        // report a playhead position.
-        var tracksProgress = lecture.ViewLimit.HasValue;
-        var sessionsByStudent = tracksProgress
-            ? (await _db.LectureViewSessions.AsNoTracking()
+        // Sessions now exist for EVERY lecture (File or Youtube, with or without a
+        // ViewLimit) -- see ConsumeView. Per student we return the latest 20 opens
+        // (oldest first) plus the total count, so a popular lecture can't blow up the payload.
+        const int MaxSessionsPerStudent = 20;
+        var tracksProgress = true;
+        var sessionGroups = (await _db.LectureViewSessions.AsNoTracking()
                 .Where(s => s.LectureId == id && pagedIds.Contains(s.StudentId))
                 .OrderBy(s => s.CreatedAt)
                 .ToListAsync())
-                .GroupBy(s => s.StudentId)
-                .ToDictionary(g => g.Key, g => g.Select(s => new LectureViewerSessionItem(s.StoppedAtSeconds, s.WatchedSeconds, s.CreatedAt)).ToList())
-            : new Dictionary<int, List<LectureViewerSessionItem>>();
+            .GroupBy(s => s.StudentId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+        var sessionsByStudent = sessionGroups.ToDictionary(
+            kv => kv.Key,
+            kv => kv.Value.TakeLast(MaxSessionsPerStudent)
+                .Select(s => new LectureViewerSessionItem(s.StoppedAtSeconds, s.WatchedSeconds, s.CreatedAt)).ToList());
 
         var result = paged.Select(s =>
         {
             usages.TryGetValue(s.Id, out var usage);
             var used = usage?.ViewsUsed ?? 0;
             var extra = usage?.ExtraViews ?? 0;
-            // Without a ViewLimit, nothing ever gets tracked at all (see
-            // ConsumeView -- it returns early before touching
-            // StudentLectureViewUsages when ViewLimit is null), so
-            // "remaining" is meaningless and status only distinguishes
-            // watched-at-all vs never-opened.
+            // Without a ViewLimit there is no per-view counter (see ConsumeView),
+            // so "remaining" is meaningless; the status comes from the saved
+            // playhead instead (see ComputeStatus).
             int? remaining = lecture.ViewLimit.HasValue
                 ? Math.Max(0, lecture.ViewLimit.Value + extra - used)
                 : null;
-            var itemStatus = !lecture.ViewLimit.HasValue
-                ? (used > 0 ? "Watched" : "NotViewed")
-                : used == 0 ? "NotViewed" : (remaining!.Value <= 0 ? "Full" : "Partial");
+            var itemStatus = ComputeStatus(s);
+            allPlayback.TryGetValue(s.Id, out var playback);
             return new LectureViewerItem(
                 s.Id, s.Name, s.PhoneNumber, groupNames.GetValueOrDefault(s.Id) ?? "",
                 used, lecture.ViewLimit, lecture.ViewLimit.HasValue ? extra : null, remaining, itemStatus,
-                tracksProgress ? sessionsByStudent.GetValueOrDefault(s.Id, new List<LectureViewerSessionItem>()) : null);
+                sessionsByStudent.GetValueOrDefault(s.Id, new List<LectureViewerSessionItem>()),
+                playback == null ? null : new LecturePlaybackItem(playback.PositionSeconds, playback.DurationSeconds, playback.Completed, playback.UpdatedAt),
+                sessionGroups.TryGetValue(s.Id, out var allSessions) ? allSessions.Count : 0);
         }).ToList();
 
         return Ok(new LectureViewersResponse(lecture.Id, lecture.Name, lecture.ViewLimit, tracksProgress, result));

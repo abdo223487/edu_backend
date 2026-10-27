@@ -129,13 +129,18 @@ public record AdjustStudentViewsRequest(int StudentId, int LectureId, int Delta)
 // reach this ONE lecture, paged/searched like Students. Status is one of
 // "NotViewed" (never opened), "Partial" (opened, views remain), "Full" (used
 // every allowed view), or "Watched" (opened at least once, lecture has no
-// ViewLimit so there's nothing to run out of). Sessions is only ever
-// populated when the lecture has a ViewLimit (see LectureViewersResponse.
-// TracksProgress) -- one entry per individual view, each with where in the
+// ViewLimit so there's nothing to run out of). Sessions is populated for
+// EVERY lecture now (see LectureViewersResponse.TracksProgress; latest 20 per
+// student, SessionCount = total) -- one entry per individual open, each with where in the
 // video that particular view stopped (null if the student closed the player
 // before ever reporting a position). Works for both File and Youtube
 // lectures now -- both players report a position (see ReportViewProgress).
 public record LectureViewerSessionItem(int? StoppedAtSeconds, int WatchedSeconds, DateTime CreatedAt);
+
+// Where the student last stopped in this lecture, from LecturePlaybackPosition
+// (see PlaybackController). Unlike Sessions this exists for EVERY lecture --
+// YouTube or file, with or without a ViewLimit. Null = never opened it.
+public record LecturePlaybackItem(int PositionSeconds, int? DurationSeconds, bool Completed, DateTime UpdatedAt);
 
 public record LectureViewerItem(
     int StudentId,
@@ -147,7 +152,9 @@ public record LectureViewerItem(
     int? ExtraViews,
     int? RemainingViews,
     string Status,
-    List<LectureViewerSessionItem>? Sessions);
+    List<LectureViewerSessionItem>? Sessions,
+    LecturePlaybackItem? Playback = null,
+    int SessionCount = 0);
 
 public record LectureViewersResponse(
     int LectureId,
