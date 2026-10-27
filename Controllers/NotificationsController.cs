@@ -1,6 +1,7 @@
 using EduApi.Common;
 using EduApi.Data;
 using EduApi.Models;
+using EduApi.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -27,10 +28,12 @@ public class NotificationsController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly Common.ITenantContext _tenant;
-    public NotificationsController(AppDbContext db, Common.ITenantContext tenant)
+    private readonly IPushService _push;
+    public NotificationsController(AppDbContext db, Common.ITenantContext tenant, IPushService push)
     {
         _db = db;
         _tenant = tenant;
+        _push = push;
     }
 
     [HttpGet]
@@ -93,6 +96,26 @@ public class NotificationsController : ControllerBase
         };
         _db.Notifications.Add(notification);
         await _db.SaveChangesAsync();
+
+        // PUSH: deliver the announcement to the targeted groups' phones (best effort --
+        // IPushService never throws and is a no-op when FCM isn't configured).
+        try
+        {
+            var students = await Common.PushTargets.StudentsInGroupsAsync(
+                _db, notification.GroupIds,
+                notification.UnitId.HasValue ? new[] { notification.UnitId.Value } : null);
+            await _push.SendToStudentsAsync(students, notification.Title, notification.Message,
+                new Dictionary<string, string>
+                {
+                    ["type"] = "notification",
+                    ["id"] = notification.Id.ToString(),
+                    ["teacherId"] = notification.TeacherId.ToString(),
+                });
+        }
+        catch
+        {
+            // never fail the request because of a push problem
+        }
 
         return StatusCode(201, new { id = notification.Id, message = "Notification sent." });
     }

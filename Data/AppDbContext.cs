@@ -101,8 +101,59 @@ public class AppDbContext : DbContext
     public DbSet<NotificationGroupLink> NotificationGroupLinks => Set<NotificationGroupLink>();
     public DbSet<QuizGroupLink> QuizGroupLinks => Set<QuizGroupLink>();
 
+    // ── Student engagement features (see Models/EngagementEntities.cs) ──
+    public DbSet<DeviceToken> DeviceTokens => Set<DeviceToken>();
+    public DbSet<PushDispatchLog> PushDispatchLogs => Set<PushDispatchLog>();
+    public DbSet<StudentPointEvent> StudentPointEvents => Set<StudentPointEvent>();
+    public DbSet<StudentBadge> StudentBadges => Set<StudentBadge>();
+    public DbSet<ReviewCard> ReviewCards => Set<ReviewCard>();
+    public DbSet<ReviewLog> ReviewLogs => Set<ReviewLog>();
+    public DbSet<LecturePlaybackPosition> LecturePlaybackPositions => Set<LecturePlaybackPosition>();
+    public DbSet<LectureBookmark> LectureBookmarks => Set<LectureBookmark>();
+    public DbSet<LectureComment> LectureComments => Set<LectureComment>();
+    public DbSet<OfflineGrant> OfflineGrants => Set<OfflineGrant>();
+
+    /// <summary>
+    /// Indexes + tenant query filters for the student-engagement tables
+    /// (push tokens, gamification, spaced repetition, playback, Q&amp;A, offline).
+    /// DeviceToken / PushDispatchLog are deliberately NOT tenant filtered.
+    /// </summary>
+    private void ConfigureEngagement(ModelBuilder mb)
+    {
+        mb.Entity<DeviceToken>().HasIndex(d => d.Token).IsUnique();
+        mb.Entity<DeviceToken>().HasIndex(d => new { d.UserType, d.UserId });
+
+        mb.Entity<StudentPointEvent>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<StudentPointEvent>().HasIndex(x => new { x.StudentId, x.TeacherId, x.RefKey }).IsUnique();
+        mb.Entity<StudentPointEvent>().HasIndex(x => new { x.TeacherId, x.OccurredAt });
+
+        mb.Entity<StudentBadge>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<StudentBadge>().HasIndex(x => new { x.StudentId, x.TeacherId, x.Code }).IsUnique();
+
+        mb.Entity<ReviewCard>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<ReviewCard>().HasIndex(x => new { x.StudentId, x.TeacherId, x.SourceType, x.SourceId, x.QuestionId }).IsUnique();
+        mb.Entity<ReviewCard>().HasIndex(x => new { x.StudentId, x.DueAt });
+
+        mb.Entity<ReviewLog>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<ReviewLog>().HasIndex(x => new { x.StudentId, x.ReviewedAt });
+
+        mb.Entity<LecturePlaybackPosition>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<LecturePlaybackPosition>().HasIndex(x => new { x.StudentId, x.LectureId }).IsUnique();
+
+        mb.Entity<LectureBookmark>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<LectureBookmark>().HasIndex(x => new { x.StudentId, x.LectureId });
+
+        mb.Entity<LectureComment>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<LectureComment>().HasIndex(x => new { x.LectureId, x.ParentId });
+
+        mb.Entity<OfflineGrant>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<OfflineGrant>().HasIndex(x => new { x.StudentId, x.ItemType, x.ItemId }).IsUnique();
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        ConfigureEngagement(modelBuilder);
+
         modelBuilder.Entity<Student>()
             .HasIndex(s => s.PhoneNumber);
 

@@ -42,6 +42,14 @@ builder.Services.AddHttpClient("WhatsApp", client =>
 builder.Services.Configure<WhatsAppOptions>(builder.Configuration.GetSection(WhatsAppOptions.SectionName));
 builder.Services.AddScoped<IWhatsAppService, MetaWhatsAppService>();
 
+// ── Student engagement: push (FCM), gamification, background reminders ──
+// FCM is OFF unless Fcm:Enabled=true AND a service account is supplied through env vars
+// (Fcm__Enabled / Fcm__ServiceAccountJson). When off, every push call is a silent no-op.
+builder.Services.Configure<FcmOptions>(builder.Configuration.GetSection(FcmOptions.SectionName));
+builder.Services.AddScoped<IPushService, FcmPushService>();
+builder.Services.AddScoped<GamificationService>();
+builder.Services.AddHostedService<EngagementPushJob>();
+
 // ALTERNATE PROVIDER (currently unused — kept here in case Meta ever gets
 // re-restricted and we need to fall back to Green API again). To switch back:
 // comment the "ACTIVE PROVIDER" block above and uncomment this one instead.
