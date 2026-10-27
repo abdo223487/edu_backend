@@ -20,6 +20,7 @@ public record AddBookmarkRequest(int Seconds, string? Note);
 ///  PUT  Playback/{lectureId}/position        body { positionSeconds, durationSeconds?, clientTime? }
 ///  POST Playback/sync                        body { items: [...] }  positions queued while offline
 ///  GET  Playback/continue                    "كمّل من حيث وقفت": recent unfinished lectures
+///  GET  Playback/history?skip=&take=         "الكل": every watched lecture (completed or not) + stop second
 ///  GET  Playback/{lectureId}/bookmarks
 ///  POST Playback/{lectureId}/bookmarks       body { seconds, note? }
 ///  POST Playback/{lectureId}/bookmarks/{id}/delete
@@ -202,6 +203,78 @@ public class PlaybackController : ControllerBase
             if (items.Count >= take) break;
         }
         return Ok(items);
+    }
+
+    /// <summary>
+    /// "الكل": every lecture this student has watched (completed or not, with or without a
+    /// view limit), newest first, with the second he stopped at. Paged with skip/take.
+    /// </summary>
+    [HttpGet("history")]
+    public async Task<IActionResult> History([FromQuery] int skip = 0, [FromQuery] int take = 20)
+    {
+        var studentId = User.GetUserId();
+        skip = Math.Max(skip, 0);
+        take = Math.Clamp(take, 1, 50);
+
+        // Anything the student actually started (>= 5s) or finished.
+        var baseQuery = _db.LecturePlaybackPositions.AsNoTracking()
+            .Where(p => p.StudentId == studentId && (p.Completed || p.PositionSeconds >= 5));
+
+        var total = await baseQuery.CountAsync();
+        var rows = await baseQuery
+            .OrderByDescending(p => p.UpdatedAt)
+            .Skip(skip).Take(take)
+            .ToListAsync();
+
+        var ids = rows.Select(r => r.LectureId).ToList();
+        var lectures = await _db.Lectures.AsNoTracking()
+            .Where(l => ids.Contains(l.Id))
+            .Select(l => new { l.Id, l.Name, l.ThumbnailUrl, l.UnitId, l.LessonIndex })
+            .ToDictionaryAsync(l => l.Id);
+
+        var unitIds = lectures.Values.Where(l => l.UnitId != null).Select(l => l.UnitId!.Value).Distinct().ToList();
+        var unitImages = await _db.Units.AsNoTracking()
+            .Where(u => unitIds.Contains(u.Id))
+            .Select(u => new { u.Id, u.ImageUrl })
+            .ToDictionaryAsync(u => u.Id, u => u.ImageUrl);
+        var lessonRows = await _db.Lessons.AsNoTracking()
+            .Where(x => unitIds.Contains(x.UnitId))
+            .Select(x => new { x.UnitId, x.LessonIndex, x.Name, x.ImageUrl })
+            .ToListAsync();
+
+        var items = new List<object>();
+        foreach (var r in rows)
+        {
+            if (!lectures.TryGetValue(r.LectureId, out var l)) continue;
+            if (await LectureAccess.GetAsync(_db, User, _tenant, r.LectureId) == null) continue;
+
+            var lesson = (l.UnitId != null && l.LessonIndex != null)
+                ? lessonRows.FirstOrDefault(x => x.UnitId == l.UnitId && x.LessonIndex == l.LessonIndex)
+                : null;
+            string? unitImage = null;
+            if (l.UnitId != null) unitImages.TryGetValue(l.UnitId.Value, out unitImage);
+
+            items.Add(new
+            {
+                lectureId = l.Id,
+                name = l.Name,
+                thumbnailUrl = l.ThumbnailUrl,
+                unitId = l.UnitId,
+                lessonIndex = l.LessonIndex,
+                lessonName = lesson?.Name,
+                lessonImageUrl = lesson?.ImageUrl,
+                unitImageUrl = unitImage,
+                positionSeconds = r.PositionSeconds,
+                durationSeconds = r.DurationSeconds,
+                completed = r.Completed,
+                progress = r.DurationSeconds is > 0
+                    ? Math.Min(100.0, Math.Round(100.0 * r.PositionSeconds / r.DurationSeconds.Value, 0))
+                    : (double?)null,
+                updatedAt = r.UpdatedAt,
+            });
+        }
+
+        return Ok(new { total, skip, take, hasMore = skip + rows.Count < total, items });
     }
 
     // ───────────────────────── bookmarks ─────────────────────────
