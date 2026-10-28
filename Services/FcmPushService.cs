@@ -84,6 +84,60 @@ public class FcmPushService : IPushService
         Dictionary<string, string>? data = null, CancellationToken ct = default)
         => SendAsync("Staff", staffIds, title, body, data, ct);
 
+    public async Task<PushTestResult> SendTestAsync(string userType, int userId, string title, string body,
+        CancellationToken ct = default)
+    {
+        var result = new PushTestResult { FcmEnabled = _ready };
+
+        var tokens = await _db.DeviceTokens.AsNoTracking()
+            .Where(d => d.UserType == userType && d.UserId == userId)
+            .Select(d => d.Token)
+            .Distinct()
+            .ToListAsync(ct);
+        result.Devices = tokens.Count;
+
+        if (!_ready)
+        {
+            result.Errors.Add("FCM مش مفعّل على السيرفر (راجع Fcm__Enabled و Fcm__ServiceAccountJson وشوف اللوج).");
+            return result;
+        }
+        if (tokens.Count == 0)
+        {
+            result.Errors.Add("مفيش جهاز متسجل للحساب ده.");
+            return result;
+        }
+
+        try
+        {
+            var message = new MulticastMessage
+            {
+                Tokens = tokens,
+                Notification = new FirebaseAdmin.Messaging.Notification { Title = title, Body = body },
+                Data = new Dictionary<string, string> { ["type"] = "test" },
+                Android = new AndroidConfig
+                {
+                    Priority = Priority.High,
+                    Notification = new AndroidNotification { ChannelId = "default_channel" }
+                },
+                Apns = new ApnsConfig { Aps = new Aps { Sound = "default" } }
+            };
+
+            var response = await FirebaseMessaging.DefaultInstance.SendEachForMulticastAsync(message, ct);
+            result.Sent = response.SuccessCount;
+            result.Failed = response.FailureCount;
+            foreach (var r in response.Responses.Where(x => !x.IsSuccess))
+                result.Errors.Add($"{r.Exception?.MessagingErrorCode}: {r.Exception?.Message}");
+        }
+        catch (Exception ex)
+        {
+            result.Failed = tokens.Count;
+            result.Errors.Add(ex.Message);
+            _log.LogWarning(ex, "Test push failed ({UserType} {UserId}).", userType, userId);
+        }
+
+        return result;
+    }
+
     private async Task SendAsync(string userType, IEnumerable<int> userIds, string title, string body,
         Dictionary<string, string>? data, CancellationToken ct)
     {

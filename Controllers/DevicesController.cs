@@ -1,6 +1,7 @@
 using EduApi.Common;
 using EduApi.Data;
 using EduApi.Models;
+using EduApi.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -14,6 +15,8 @@ public record UnregisterDeviceRequest(string Token);
 /// Route: api/Devices
 ///  POST Devices/register    body: { token, platform }   (any logged-in user)
 ///  POST Devices/unregister  body: { token }             (call on logout)
+///  GET  Devices/status                                  (diagnostics: is FCM on? which devices are registered for me?)
+///  POST Devices/test-push                               (diagnostics: send a test push to MY registered devices)
 ///
 /// One physical phone = one FCM token. If the same phone logs into a different
 /// account, the token row is simply re-assigned to the new user, so the previous
@@ -25,9 +28,38 @@ public record UnregisterDeviceRequest(string Token);
 public class DevicesController : ControllerBase
 {
     private readonly AppDbContext _db;
-    public DevicesController(AppDbContext db) => _db = db;
+    private readonly IPushService _push;
+
+    public DevicesController(AppDbContext db, IPushService push)
+    {
+        _db = db;
+        _push = push;
+    }
 
     private string UserType => User.IsInRole(Roles.Student) ? "Student" : "Staff";
+
+    [HttpGet("status")]
+    public async Task<IActionResult> Status()
+    {
+        var userId = User.GetUserId();
+        var devices = await _db.DeviceTokens.AsNoTracking()
+            .Where(d => d.UserType == UserType && d.UserId == userId)
+            .OrderByDescending(d => d.LastSeenAt)
+            .Select(d => new { platform = d.Platform, lastSeenAt = d.LastSeenAt })
+            .ToListAsync();
+
+        return Ok(new { fcmEnabled = _push.Enabled, userType = UserType, userId, devices });
+    }
+
+    [HttpPost("test-push")]
+    public async Task<IActionResult> TestPush()
+    {
+        var userId = User.GetUserId();
+        if (userId <= 0) return Unauthorized();
+
+        var result = await _push.SendTestAsync(UserType, userId, "إشعار تجريبي 🔔", "لو وصلك الإشعار ده يبقى الإشعارات شغالة تمام ✅");
+        return Ok(result);
+    }
 
     [HttpPost("register")]
     public async Task<IActionResult> Register([FromBody] RegisterDeviceRequest request)
