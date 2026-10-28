@@ -141,19 +141,31 @@ public class FcmPushService : IPushService
     private async Task SendAsync(string userType, IEnumerable<int> userIds, string title, string body,
         Dictionary<string, string>? data, CancellationToken ct)
     {
-        if (!_ready) return;
+        if (!_ready)
+        {
+            _log.LogInformation("Push skipped: FCM is not initialized.");
+            return;
+        }
 
         try
         {
             var ids = userIds.Distinct().ToList();
-            if (ids.Count == 0) return;
+            if (ids.Count == 0)
+            {
+                _log.LogInformation("Push {UserType} '{Title}': no target users.", userType, title);
+                return;
+            }
 
             var tokens = await _db.DeviceTokens.AsNoTracking()
                 .Where(d => d.UserType == userType && ids.Contains(d.UserId))
                 .Select(d => d.Token)
                 .Distinct()
                 .ToListAsync(ct);
-            if (tokens.Count == 0) return;
+            if (tokens.Count == 0)
+            {
+                _log.LogInformation("Push {UserType} '{Title}': {Users} target user(s) but NO registered devices.", userType, title, ids.Count);
+                return;
+            }
 
             // FCM data payload values must all be strings.
             var payload = data != null
@@ -161,6 +173,7 @@ public class FcmPushService : IPushService
                 : new Dictionary<string, string>();
 
             var dead = new List<string>();
+            int okCount = 0, failCount = 0;
 
             // FCM multicast limit = 500 tokens per call.
             foreach (var chunk in tokens.Chunk(500))
@@ -182,15 +195,21 @@ public class FcmPushService : IPushService
                 };
 
                 var response = await FirebaseMessaging.DefaultInstance.SendEachForMulticastAsync(message, ct);
+                okCount += response.SuccessCount;
+                failCount += response.FailureCount;
                 for (var i = 0; i < response.Responses.Count; i++)
                 {
                     var r = response.Responses[i];
                     if (r.IsSuccess) continue;
                     var code = r.Exception?.MessagingErrorCode;
+                    _log.LogWarning("Push failure {Code}: {Message}", code, r.Exception?.Message);
                     if (code == MessagingErrorCode.Unregistered || code == MessagingErrorCode.InvalidArgument)
                         dead.Add(chunk[i]);
                 }
             }
+
+            _log.LogInformation("Push {UserType} '{Title}': users={Users} devices={Devices} ok={Ok} failed={Failed}",
+                userType, title, ids.Count, tokens.Count, okCount, failCount);
 
             if (dead.Count > 0)
             {
