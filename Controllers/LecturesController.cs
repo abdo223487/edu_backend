@@ -32,8 +32,10 @@ public class LecturesController : ControllerBase
 
     private readonly Common.ITenantContext _tenant;
 
-    public LecturesController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, ILogger<LecturesController> logger)
+    private readonly EduApi.Services.StudentPushNotifier _studentPush;
+    public LecturesController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, ILogger<LecturesController> logger, EduApi.Services.StudentPushNotifier studentPush)
     {
+        _studentPush = studentPush;
         _db = db;
         _files = files;
         _tenant = tenant;
@@ -329,6 +331,9 @@ public class LecturesController : ControllerBase
 
         _db.Lectures.Add(lecture);
         await _db.SaveChangesAsync();
+
+        // Push to the students this was created for (best effort, never throws).
+        await _studentPush.LectureUploadedAsync(lecture.Id);
 
         return StatusCode(201, ToDto(lecture));
     }

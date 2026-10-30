@@ -43,8 +43,10 @@ public class OnlineLessonsController : ControllerBase
     private readonly IFileStorageService _files;
     private readonly ILogger<OnlineLessonsController> _logger;
 
-    public OnlineLessonsController(AppDbContext db, IFileStorageService files, ILogger<OnlineLessonsController> logger)
+    private readonly EduApi.Services.StudentPushNotifier _studentPush;
+    public OnlineLessonsController(AppDbContext db, IFileStorageService files, ILogger<OnlineLessonsController> logger, EduApi.Services.StudentPushNotifier studentPush)
     {
+        _studentPush = studentPush;
         _db = db;
         _files = files;
         _logger = logger;
@@ -313,6 +315,9 @@ public class OnlineLessonsController : ControllerBase
 
         _db.Lectures.Add(lecture);
         await _db.SaveChangesAsync();
+
+        // Push to the students this was created for (best effort, never throws).
+        await _studentPush.LectureUploadedAsync(lecture.Id);
 
         return StatusCode(201, ToDto(lecture, new List<MaterialListItem>()));
     }

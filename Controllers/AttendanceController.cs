@@ -44,13 +44,16 @@ public class AttendanceController : ControllerBase
     private readonly ITenantContext _tenant;
     private readonly IWhatsAppService _whatsApp;
     private readonly ILogger<AttendanceController> _logger;
+    private readonly EduApi.Services.StudentPushNotifier _studentPush;
 
-    public AttendanceController(AppDbContext db, ITenantContext tenant, IWhatsAppService whatsApp, ILogger<AttendanceController> logger)
+    public AttendanceController(AppDbContext db, ITenantContext tenant, IWhatsAppService whatsApp, ILogger<AttendanceController> logger,
+        EduApi.Services.StudentPushNotifier studentPush)
     {
         _db = db;
         _tenant = tenant;
         _whatsApp = whatsApp;
         _logger = logger;
+        _studentPush = studentPush;
     }
 
     [HttpPost]
@@ -167,6 +170,8 @@ public class AttendanceController : ControllerBase
         }
 
         await SendAttendanceWhatsAppAsync(studentId.Value, attendance.Date);
+        // Push to the student: "تم تسجيل حضورك" + the time it was recorded.
+        await _studentPush.AttendanceAsync(studentId.Value, _tenant.CurrentTenantId!.Value, lectureId, attendance.Date);
 
         return StatusCode(201, new { message = "Attendance recorded." });
     }
@@ -333,7 +338,11 @@ public class AttendanceController : ControllerBase
         }
 
         foreach (var (studentId, date) in notifyList)
+        {
             await SendAttendanceWhatsAppAsync(studentId, date);
+            // Same push as the single-record path; an offline-synced record keeps its ORIGINAL time.
+            await _studentPush.AttendanceAsync(studentId, _tenant.CurrentTenantId!.Value, lectureId, date);
+        }
 
         return Ok(new
         {

@@ -45,8 +45,10 @@ public class LectureAssignmentsController : ControllerBase
     private readonly ILogger<LectureAssignmentsController> _logger;
     private readonly Common.ITenantContext _tenant;
 
-    public LectureAssignmentsController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, IWhatsAppService whatsApp, ILogger<LectureAssignmentsController> logger)
+    private readonly EduApi.Services.StudentPushNotifier _studentPush;
+    public LectureAssignmentsController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, IWhatsAppService whatsApp, ILogger<LectureAssignmentsController> logger, EduApi.Services.StudentPushNotifier studentPush)
     {
+        _studentPush = studentPush;
         _db = db;
         _files = files;
         _tenant = tenant;
@@ -393,6 +395,9 @@ public class LectureAssignmentsController : ControllerBase
 
         _db.LectureAssignments.Add(assignment);
         await _db.SaveChangesAsync();
+
+        // Push to the students this was created for (best effort, never throws).
+        await _studentPush.LectureAssignmentCreatedAsync(assignment.Id);
 
         // CreateLectureAssignmentPage only treats statusCode == 200 as
         // success (same convention as CreateLectureExamPage) so we return

@@ -29,8 +29,11 @@ public class StudentsController : ControllerBase
     private readonly ICacheService _cache;
     private readonly ILogger<StudentsController> _logger;
     private readonly IFileStorageService _files;
-    public StudentsController(AppDbContext db, Common.ITenantContext tenant, IHttpClientFactory httpClientFactory, IWhatsAppService whatsApp, ICacheService cache, ILogger<StudentsController> logger, IFileStorageService files)
+    private readonly EduApi.Services.StudentPushNotifier _studentPush;
+    public StudentsController(AppDbContext db, Common.ITenantContext tenant, IHttpClientFactory httpClientFactory, IWhatsAppService whatsApp, ICacheService cache, ILogger<StudentsController> logger, IFileStorageService files,
+        EduApi.Services.StudentPushNotifier studentPush)
     {
+        _studentPush = studentPush;
         _db = db;
         _tenant = tenant;
         _httpClientFactory = httpClientFactory;
@@ -1592,6 +1595,10 @@ public class StudentsController : ControllerBase
         }
 
         await _db.SaveChangesAsync();
+
+        // Push to the student: what the code just unlocked.
+        await _studentPush.CodeRedeemedAsync(studentId, code.TeacherId, code.UnitIds, code.LectureIds, code.OnlineLessonIds, code.ExternalBookIds);
+
         return Ok(new {
             message = "Code redeemed successfully.",
             unitIds = code.UnitIds,
@@ -1964,6 +1971,9 @@ public class StudentsController : ControllerBase
                 await _db.SaveChangesAsync();
                 await tx.CommitAsync();
 
+                // Push to the student: payment recorded + what's still owed.
+                await _studentPush.NotebookPaymentAsync(resolvedStudentId.Value, notebook.TeacherId, notebookId, notebook.Name, request.Amount, remaining - request.Amount);
+
                 return StatusCode(201, new { id = payment.Id, message = "Payment recorded." });
             }
             catch (DbUpdateException ex) when (attempt < maxAttempts && IsSerializationFailure(ex))
@@ -2266,6 +2276,9 @@ public class StudentsController : ControllerBase
                 _db.BillingPayments.Add(payment);
                 await _db.SaveChangesAsync();
                 await tx.CommitAsync();
+
+                // Push to the student: monthly-invoice payment recorded + what's still owed.
+                await _studentPush.BillingPaymentAsync(resolvedStudentId.Value, billing.TeacherId, billingId, billing.Name, request.Amount, remaining - request.Amount);
 
                 return StatusCode(201, new { id = payment.Id, message = "Payment recorded." });
             }

@@ -49,8 +49,10 @@ public class LectureExamsController : ControllerBase
     private readonly ILogger<LectureExamsController> _logger;
     private readonly Common.ITenantContext _tenant;
 
-    public LectureExamsController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, IWhatsAppService whatsApp, ILogger<LectureExamsController> logger)
+    private readonly EduApi.Services.StudentPushNotifier _studentPush;
+    public LectureExamsController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, IWhatsAppService whatsApp, ILogger<LectureExamsController> logger, EduApi.Services.StudentPushNotifier studentPush)
     {
+        _studentPush = studentPush;
         _db = db;
         _files = files;
         _tenant = tenant;
@@ -496,6 +498,9 @@ public class LectureExamsController : ControllerBase
 
         _db.LectureExams.Add(exam);
         await _db.SaveChangesAsync();
+
+        // Push to the students this was created for (best effort, never throws).
+        await _studentPush.LectureExamCreatedAsync(exam.Id);
 
         // CreateLectureExamPage only treats statusCode == 200 as success
         // (same convention as create_Exam.dart's CreateExamPage) so we

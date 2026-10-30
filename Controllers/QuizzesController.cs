@@ -35,8 +35,10 @@ public class QuizzesController : ControllerBase
 
     private readonly Common.ITenantContext _tenant;
 
-    public QuizzesController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, IWhatsAppService whatsApp, ILogger<QuizzesController> logger)
+    private readonly EduApi.Services.StudentPushNotifier _studentPush;
+    public QuizzesController(AppDbContext db, IFileStorageService files, Common.ITenantContext tenant, IWhatsAppService whatsApp, ILogger<QuizzesController> logger, EduApi.Services.StudentPushNotifier studentPush)
     {
+        _studentPush = studentPush;
         _db = db;
         _files = files;
         _tenant = tenant;
@@ -314,6 +316,9 @@ public class QuizzesController : ControllerBase
 
         _db.Quizzes.Add(quiz);
         await _db.SaveChangesAsync();
+
+        // Push to the students this was created for (best effort, never throws).
+        await _studentPush.QuizCreatedAsync(quiz.Id);
 
         // create_Exam.dart only treats statusCode == 200 as success (it does
         // NOT check for 201), so we return 200 here instead of the more

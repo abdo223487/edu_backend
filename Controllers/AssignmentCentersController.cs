@@ -39,8 +39,10 @@ public class AssignmentCentersController : ControllerBase
     private readonly IWhatsAppService _whatsApp;
     private readonly ILogger<AssignmentCentersController> _logger;
 
-    public AssignmentCentersController(AppDbContext db, Common.ITenantContext tenant, IWhatsAppService whatsApp, ILogger<AssignmentCentersController> logger)
+    private readonly EduApi.Services.StudentPushNotifier _studentPush;
+    public AssignmentCentersController(AppDbContext db, Common.ITenantContext tenant, IWhatsAppService whatsApp, ILogger<AssignmentCentersController> logger, EduApi.Services.StudentPushNotifier studentPush)
     {
+        _studentPush = studentPush;
         _db = db;
         _tenant = tenant;
         _whatsApp = whatsApp;
@@ -215,6 +217,9 @@ public class AssignmentCentersController : ControllerBase
 
         _db.AssignmentCenters.Add(assignment);
         await _db.SaveChangesAsync();
+
+        // Push to the students this was created for (best effort, never throws).
+        await _studentPush.AssignmentCenterCreatedAsync(assignment.Id);
 
         return Ok(new { id = assignment.Id, title = assignment.Title });
     }

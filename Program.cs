@@ -48,7 +48,7 @@ builder.Services.AddScoped<IWhatsAppService, MetaWhatsAppService>();
 builder.Services.Configure<FcmOptions>(builder.Configuration.GetSection(FcmOptions.SectionName));
 builder.Services.AddScoped<IPushService, FcmPushService>();
 builder.Services.AddScoped<GamificationService>();
-builder.Services.AddHostedService<EngagementPushJob>();
+builder.Services.AddScoped<StudentPushNotifier>();
 
 // ALTERNATE PROVIDER (currently unused — kept here in case Meta ever gets
 // re-restricted and we need to fall back to Green API again). To switch back:
