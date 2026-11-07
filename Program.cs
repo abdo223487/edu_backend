@@ -49,6 +49,7 @@ builder.Services.Configure<FcmOptions>(builder.Configuration.GetSection(FcmOptio
 builder.Services.AddScoped<IPushService, FcmPushService>();
 builder.Services.AddScoped<GamificationService>();
 builder.Services.AddScoped<StudentPushNotifier>();
+builder.Services.AddHostedService<ScheduleReminderJob>();
 
 // ALTERNATE PROVIDER (currently unused — kept here in case Meta ever gets
 // re-restricted and we need to fall back to Green API again). To switch back:

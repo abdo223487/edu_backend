@@ -22,11 +22,13 @@ public class ScheduleController : ControllerBase
 {
     private readonly AppDbContext _db;
     private readonly Common.ITenantContext _tenant;
+    private readonly EduApi.Services.StudentPushNotifier _studentPush;
 
-    public ScheduleController(AppDbContext db, Common.ITenantContext tenant)
+    public ScheduleController(AppDbContext db, Common.ITenantContext tenant, EduApi.Services.StudentPushNotifier studentPush)
     {
         _db = db;
         _tenant = tenant;
+        _studentPush = studentPush;
     }
 
     // GET Schedule?schoolYear=10&year=2026&month=9
@@ -63,6 +65,7 @@ public class ScheduleController : ControllerBase
 
         var existing = await _db.ClassScheduleEntries
             .FirstOrDefaultAsync(e => e.SchoolYear == request.SchoolYear && e.Date == request.Date);
+        ClassScheduleEntry? saved = null;
 
         if (text == null)
         {
@@ -71,19 +74,32 @@ public class ScheduleController : ControllerBase
         else if (existing != null)
         {
             existing.Text = text;
+            saved = existing;
         }
         else
         {
-            _db.ClassScheduleEntries.Add(new ClassScheduleEntry
+            saved = new ClassScheduleEntry
             {
                 TeacherId = teacherId.Value,
                 SchoolYear = request.SchoolYear,
                 Date = request.Date,
                 Text = text,
-            });
+            };
+            _db.ClassScheduleEntries.Add(saved);
         }
 
         await _db.SaveChangesAsync();
+
+        // The students are reminded the DAY BEFORE (ScheduleReminderJob, once a day at ReminderHourCairo).
+        // If the teacher sets a lesson for TOMORROW after that time already passed today, send it right now.
+        if (saved != null)
+        {
+            var cairoNow = PushTargets.ToCairo(DateTime.UtcNow);
+            var tomorrow = DateOnly.FromDateTime(cairoNow.Date.AddDays(1));
+            if (saved.Date == tomorrow && cairoNow.Hour >= EduApi.Services.ScheduleReminderJob.ReminderHourCairo)
+                await _studentPush.ScheduleReminderAsync(saved.Id);
+        }
+
         return Ok(new { message = "Schedule saved.", date = request.Date, text });
     }
 }

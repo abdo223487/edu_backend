@@ -228,6 +228,106 @@ public class StudentPushNotifier
         }
     }
 
+    // ───────────────────────── class schedule: "عندك حصة بكرة" ─────────────────────────
+
+    /// <summary>
+    /// Reminders for every schedule entry ("مواعيد الحصص") dated TOMORROW (Cairo date).
+    /// Called once a day by ScheduleReminderJob.
+    /// </summary>
+    public async Task SendScheduleRemindersForTomorrowAsync(CancellationToken ct = default)
+    {
+        var tomorrow = DateOnly.FromDateTime(PushTargets.ToCairo(DateTime.UtcNow).Date.AddDays(1));
+        var ids = await _db.ClassScheduleEntries.IgnoreQueryFilters().AsNoTracking()
+            .Where(e => e.Date == tomorrow && e.Text != null && e.Text != "")
+            .Select(e => e.Id)
+            .ToListAsync(ct);
+
+        foreach (var id in ids)
+        {
+            ct.ThrowIfCancellationRequested();
+            await ScheduleReminderAsync(id, ct);
+        }
+    }
+
+    /// <summary>
+    /// ONE schedule entry -> "خلي بالك عندك حصة {الحصة} مع مستر {المدرس}".
+    /// Audience: students of the entry's school year (the teacher's groups of that year, active members only)
+    /// who are subscribed to the teacher's LATEST course of that year.
+    /// Sent at most once per entry + date (editing the text later never re-sends it).
+    /// </summary>
+    public async Task ScheduleReminderAsync(int entryId, CancellationToken ct = default)
+    {
+        try
+        {
+            var e = await _db.ClassScheduleEntries.IgnoreQueryFilters().AsNoTracking()
+                .Where(x => x.Id == entryId)
+                .Select(x => new { x.Id, x.TeacherId, x.SchoolYear, x.Date, x.Text })
+                .FirstOrDefaultAsync(ct);
+            if (e == null || string.IsNullOrWhiteSpace(e.Text)) return;
+
+            if (!await ClaimAsync($"sched:{e.Id}:{e.Date.ToString("yyyyMMdd")}", ct)) return;
+
+            // "آخر كورس": the teacher's newest course of that school year.
+            var latestUnitId = await _db.Units.IgnoreQueryFilters().AsNoTracking()
+                .Where(u => u.TeacherId == e.TeacherId && u.SchoolYear == e.SchoolYear)
+                .OrderByDescending(u => u.Id)
+                .Select(u => (int?)u.Id)
+                .FirstOrDefaultAsync(ct);
+            if (latestUnitId == null) return;
+
+            // Same school year = the teacher's groups of that year.
+            var groupIds = await _db.Groups.IgnoreQueryFilters().AsNoTracking()
+                .Where(g => g.TeacherId == e.TeacherId && g.SchoolYear == e.SchoolYear)
+                .Select(g => g.Id)
+                .ToListAsync(ct);
+
+            var students = await PushTargets.StudentsInGroupsAsync(_db, groupIds, new[] { latestUnitId.Value }, ct);
+            if (students.Count == 0) return;
+
+            var teacherName = await _db.Teachers.IgnoreQueryFilters().AsNoTracking()
+                .Where(t => t.Id == e.TeacherId).Select(t => t.Name).FirstOrDefaultAsync(ct);
+            var mister = string.IsNullOrWhiteSpace(teacherName)
+                ? "المدرس"
+                : (teacherName.Trim().StartsWith("مستر") ? teacherName.Trim() : $"مستر {teacherName.Trim()}");
+
+            // The entry text is the lesson's name; don't say "حصة حصة ..." when it already starts with it.
+            var lesson = e.Text.Trim();
+            var lessonPart = (lesson.StartsWith("حصة") || lesson.StartsWith("الحصة")) ? lesson : $"حصة {lesson}";
+
+            await _push.SendToStudentsAsync(students, "تنبيه: عندك حصة بكرة 📅",
+                $"خلي بالك عندك {lessonPart} مع {mister}",
+                new Dictionary<string, string>
+                {
+                    ["type"] = "schedule",
+                    ["id"] = e.Id.ToString(),
+                    ["teacherId"] = e.TeacherId.ToString(),
+                    ["schoolYear"] = e.SchoolYear.ToString(),
+                }, ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "Schedule reminder failed (entry {EntryId}).", entryId);
+        }
+    }
+
+    /// <summary>First caller wins: PushDispatchLogs.Key is unique, so a restart / second instance never re-sends.</summary>
+    private async Task<bool> ClaimAsync(string key, CancellationToken ct)
+    {
+        try
+        {
+            _db.PushDispatchLogs.Add(new EduApi.Models.PushDispatchLog { Key = key, SentAt = DateTime.UtcNow });
+            await _db.SaveChangesAsync(ct);
+            return true;
+        }
+        catch (DbUpdateException)
+        {
+            foreach (var entry in _db.ChangeTracker.Entries<EduApi.Models.PushDispatchLog>().ToList())
+                entry.State = EntityState.Detached;
+            return false;
+        }
+    }
+
     // ───────────────────────── attendance ─────────────────────────
 
     /// <param name="attendanceUtc">Attendance.Date (UTC; an offline-synced record keeps its ORIGINAL time).</param>
