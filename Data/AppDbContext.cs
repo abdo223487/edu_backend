@@ -113,6 +113,15 @@ public class AppDbContext : DbContext
     public DbSet<LectureComment> LectureComments => Set<LectureComment>();
     public DbSet<OfflineGrant> OfflineGrants => Set<OfflineGrant>();
 
+    // ── Learning insights (see Models/LearningInsightEntities.cs) ──
+    public DbSet<QuestionExplanation> QuestionExplanations => Set<QuestionExplanation>();
+    public DbSet<LectureNote> LectureNotes => Set<LectureNote>();
+    public DbSet<StudentChallenge> StudentChallenges => Set<StudentChallenge>();
+    public DbSet<LectureCheckpoint> LectureCheckpoints => Set<LectureCheckpoint>();
+    public DbSet<LectureCheckpointQuestion> LectureCheckpointQuestions => Set<LectureCheckpointQuestion>();
+    public DbSet<LectureCheckpointProgress> LectureCheckpointProgresses => Set<LectureCheckpointProgress>();
+    public DbSet<LectureCheckpointAttempt> LectureCheckpointAttempts => Set<LectureCheckpointAttempt>();
+
     /// <summary>
     /// Indexes + tenant query filters for the student-engagement tables
     /// (push tokens, gamification, spaced repetition, playback, Q&amp;A, offline).
@@ -150,9 +159,41 @@ public class AppDbContext : DbContext
         mb.Entity<OfflineGrant>().HasIndex(x => new { x.StudentId, x.ItemType, x.ItemId }).IsUnique();
     }
 
+    /// <summary>
+    /// Indexes + tenant query filters for the learning-insight tables
+    /// (question explanations, lecture notes, student challenges).
+    /// </summary>
+    private void ConfigureLearningInsights(ModelBuilder mb)
+    {
+        mb.Entity<QuestionExplanation>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<QuestionExplanation>().HasIndex(x => new { x.TeacherId, x.SourceType, x.QuestionId }).IsUnique();
+        mb.Entity<QuestionExplanation>().HasIndex(x => x.LectureId);
+
+        mb.Entity<LectureNote>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<LectureNote>().HasIndex(x => new { x.StudentId, x.LectureId });
+
+        mb.Entity<StudentChallenge>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<StudentChallenge>().HasIndex(x => new { x.TeacherId, x.ChallengerId });
+        mb.Entity<StudentChallenge>().HasIndex(x => new { x.TeacherId, x.OpponentId });
+        mb.Entity<StudentChallenge>().HasIndex(x => new { x.TeacherId, x.Status });
+
+        mb.Entity<LectureCheckpoint>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<LectureCheckpoint>().HasIndex(x => new { x.LectureId, x.Seconds });
+
+        mb.Entity<LectureCheckpointQuestion>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<LectureCheckpointQuestion>().HasIndex(x => x.CheckpointId);
+
+        mb.Entity<LectureCheckpointProgress>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<LectureCheckpointProgress>().HasIndex(x => new { x.CheckpointId, x.StudentId }).IsUnique();
+
+        mb.Entity<LectureCheckpointAttempt>().HasQueryFilter(x => x.TeacherId == _tenant.CurrentTenantId);
+        mb.Entity<LectureCheckpointAttempt>().HasIndex(x => new { x.CheckpointId, x.StudentId });
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         ConfigureEngagement(modelBuilder);
+        ConfigureLearningInsights(modelBuilder);
 
         modelBuilder.Entity<Student>()
             .HasIndex(s => s.PhoneNumber);

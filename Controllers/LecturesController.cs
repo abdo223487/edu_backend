@@ -600,6 +600,55 @@ public class LecturesController : ControllerBase
         }));
     }
 
+    /// <summary>
+    /// One lecture, in EXACTLY the shape of an item of ByGroup / ByYear (link, videoSourceType, viewLimit,
+    /// remainingViews, locked, lockReason ...), for a student. The app's LectureViewGate needs that map to open a
+    /// lecture (view limit + "الربط" gates), so a screen that only knows the lecture id -- like the home card
+    /// "كمّل من حيث وقفت" -- can open the video itself instead of the lesson page.
+    /// Same visibility rule as the lists: a code-unlocked lecture, or a subscribed course/book AND the student's group.
+    /// </summary>
+    [HttpGet("{id:int}/open-info")]
+    [Authorize(Roles = Roles.Student)]
+    public async Task<IActionResult> OpenInfo(int id)
+    {
+        var studentId = User.GetUserId();
+        var subscribedIds = await Common.StudentAccessHelpers.GetEffectiveUnitIdsAsync(_db, User, studentId);
+        var studentGroupId = User.GetGroupId(_tenant.CurrentTenantId);
+        var unlocked = await _db.StudentLectureUnlocks.AsNoTracking()
+            .AnyAsync(u => u.StudentId == studentId && u.LectureId == id);
+        var accessibleBookIds = await GetAccessibleExternalBookIdsAsync(studentId);
+
+        var l = await _db.Lectures.AsNoTracking()
+            .Where(x => x.Id == id)
+            .Where(x =>
+                unlocked ||
+                (x.UnitId != null && subscribedIds.Contains(x.UnitId.Value) &&
+                    (studentGroupId.HasValue && _db.LectureGroupLinks.Any(g => g.LectureId == x.Id && g.GroupId == studentGroupId.Value))) ||
+                (x.ExternalBookId != null && accessibleBookIds.Contains(x.ExternalBookId.Value) &&
+                    (studentGroupId.HasValue && _db.LectureGroupLinks.Any(g => g.LectureId == x.Id && g.GroupId == studentGroupId.Value))))
+            .Select(x => new { x.Id, x.Name, x.AttendanceMethod, x.YoutubeLink, x.StorageFileKey, x.ThumbnailUrl, x.UnitId, x.LessonIndex, x.GroupIdsCsv, x.CreatedAt, x.ExternalBookId, x.ViewLimit, x.RequireLinkExam, x.RequireLinkAssignment, x.OnlineLessonId })
+            .FirstOrDefaultAsync();
+        if (l == null) return NotFound(new { message = "Lecture not found." });
+
+        var remainingViewsMap = l.ViewLimit.HasValue
+            ? await GetRemainingViewsMapAsync(studentId, new List<int> { l.Id })
+            : new Dictionary<int, int>();
+        var lockedMap = await GetLockedLectureMapAsync(studentId,
+            new List<(int Id, int? UnitId, int? ExternalBookId, int? OnlineLessonId, bool RequireLinkExam, bool RequireLinkAssignment, DateTime CreatedAt)>
+            {
+                (l.Id, l.UnitId, l.ExternalBookId, l.OnlineLessonId, l.RequireLinkExam, l.RequireLinkAssignment, l.CreatedAt),
+            });
+
+        var isLocked = lockedMap.TryGetValue(l.Id, out var lockReason);
+        var (link, sourceType) = PlaybackInfo(l.StorageFileKey, l.YoutubeLink);
+        return Ok(new LectureListItem(
+            l.Id, l.Name, l.AttendanceMethod.ToString(), link, sourceType, l.ThumbnailUrl, l.UnitId, l.LessonIndex,
+            l.GroupIdsCsv.Length == 0 ? new List<int>() : l.GroupIdsCsv.Split(',').Select(int.Parse).ToList(),
+            l.CreatedAt, l.ExternalBookId, l.ViewLimit,
+            l.ViewLimit.HasValue && remainingViewsMap.TryGetValue(l.Id, out var rem) ? rem : null,
+            l.RequireLinkExam, l.RequireLinkAssignment, isLocked, lockReason));
+    }
+
     [HttpGet("{lectureId:int}/materials")]
     public async Task<IActionResult> GetMaterials(int lectureId)
     {

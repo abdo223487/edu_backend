@@ -142,6 +142,27 @@ public class PlaybackController : ControllerBase
         return true;
     }
 
+    /// Thumbnail for a lecture card: the frame generated for an uploaded video, otherwise YouTube's own
+    /// thumbnail for a YouTube lecture (null when the lecture has neither -- the app then falls back to
+    /// the lesson / course image).
+    private static string? ThumbnailOf(string? generated, string? youtubeLink)
+    {
+        if (!string.IsNullOrWhiteSpace(generated)) return generated;
+        var id = YoutubeIdOf(youtubeLink);
+        return id == null ? null : $"https://img.youtube.com/vi/{id}/mqdefault.jpg";
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex YoutubeIdRegex = new(
+        @"(?:youtu\.be/|youtube\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/|live/|v/))([A-Za-z0-9_-]{11})",
+        System.Text.RegularExpressions.RegexOptions.Compiled | System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+    private static string? YoutubeIdOf(string? link)
+    {
+        if (string.IsNullOrWhiteSpace(link)) return null;
+        var m = YoutubeIdRegex.Match(link);
+        return m.Success ? m.Groups[1].Value : null;
+    }
+
     [HttpGet("continue")]
     public async Task<IActionResult> Continue([FromQuery] int take = 5)
     {
@@ -157,7 +178,7 @@ public class PlaybackController : ControllerBase
         var ids = rows.Select(r => r.LectureId).ToList();
         var lectures = await _db.Lectures.AsNoTracking()
             .Where(l => ids.Contains(l.Id))
-            .Select(l => new { l.Id, l.Name, l.ThumbnailUrl, l.UnitId, l.LessonIndex })
+            .Select(l => new { l.Id, l.Name, l.ThumbnailUrl, l.YoutubeLink, l.UnitId, l.LessonIndex })
             .ToDictionaryAsync(l => l.Id);
 
         // Lesson + unit cover images so the app can open the lesson page with its real header
@@ -189,7 +210,7 @@ public class PlaybackController : ControllerBase
             {
                 lectureId = l.Id,
                 name = l.Name,
-                thumbnailUrl = l.ThumbnailUrl,
+                thumbnailUrl = ThumbnailOf(l.ThumbnailUrl, l.YoutubeLink),
                 unitId = l.UnitId,
                 lessonIndex = l.LessonIndex,
                 lessonName = lesson?.Name,
@@ -229,7 +250,7 @@ public class PlaybackController : ControllerBase
         var ids = rows.Select(r => r.LectureId).ToList();
         var lectures = await _db.Lectures.AsNoTracking()
             .Where(l => ids.Contains(l.Id))
-            .Select(l => new { l.Id, l.Name, l.ThumbnailUrl, l.UnitId, l.LessonIndex })
+            .Select(l => new { l.Id, l.Name, l.ThumbnailUrl, l.YoutubeLink, l.UnitId, l.LessonIndex })
             .ToDictionaryAsync(l => l.Id);
 
         var unitIds = lectures.Values.Where(l => l.UnitId != null).Select(l => l.UnitId!.Value).Distinct().ToList();
@@ -258,7 +279,7 @@ public class PlaybackController : ControllerBase
             {
                 lectureId = l.Id,
                 name = l.Name,
-                thumbnailUrl = l.ThumbnailUrl,
+                thumbnailUrl = ThumbnailOf(l.ThumbnailUrl, l.YoutubeLink),
                 unitId = l.UnitId,
                 lessonIndex = l.LessonIndex,
                 lessonName = lesson?.Name,

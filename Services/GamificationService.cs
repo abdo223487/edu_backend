@@ -28,6 +28,8 @@ public record BadgeDef(string Code, string Title, string Description, string Ico
 ///   correct spaced-repetition answer 2   (max 30 per day)
 ///   answer accepted in lecture Q&amp;A  5
 ///   streak milestones (3/7/14/30/60/100 days) 10/25/50/100/200/400
+///   finished challenge vs a classmate  win 20 / draw 10 / loss 5
+///   passed a question inside a video   first try 3 / later 1
 /// </summary>
 public class GamificationService
 {
@@ -57,6 +59,8 @@ public class GamificationService
         new("watcher_25",   "مدمن محاضرات",      "خلّصت 25 محاضرة فيديو",                   "ondemand_video", "silver", "lectures_done", 25),
         new("attendance_10","منتظم",             "حضرت 10 حصص",                             "event_available","silver", "attendance", 10),
         new("helper_3",     "مساعد زمايله",      "3 إجابات اتقبلت في أسئلة المحاضرات",      "volunteer_activism", "gold", "accepted_answers", 3),
+        new("duelist_1",    "أول انتصار",        "كسبت أول تحدي ضد زميلك",                   "sports_mma",     "bronze", "challenge_wins", 1),
+        new("duelist_10",   "بطل التحديات",      "كسبت 10 تحديات ضد زمايلك",                 "emoji_events",   "gold",   "challenge_wins", 10),
     };
 
     private static readonly Dictionary<string, string> KindLabels = new()
@@ -64,7 +68,7 @@ public class GamificationService
         ["quiz"] = "كويز", ["lecture_exam"] = "امتحان محاضرة", ["lecture_assignment"] = "واجب محاضرة",
         ["assignment"] = "واجب", ["assignment_center"] = "واجب سنتر", ["bank"] = "تدريب من بنك الأسئلة",
         ["attendance"] = "حضور", ["lecture"] = "إنهاء محاضرة", ["review"] = "مراجعة أخطاء",
-        ["qa"] = "إجابة مقبولة", ["streak"] = "مكافأة التزام",
+        ["qa"] = "إجابة مقبولة", ["streak"] = "مكافأة التزام", ["challenge"] = "تحدي زميل", ["checkpoint"] = "سؤال أثناء الفيديو",
     };
 
     private static readonly ConcurrentDictionary<(int Student, int Tenant), DateTime> LastSync = new();
@@ -193,6 +197,26 @@ public class GamificationService
                      .Select(c => new { c.Id, c.CreatedAt }).ToListAsync(ct))
             Add("qa", $"qa:{c.Id}", 5, c.CreatedAt);
 
+        // 5b) finished 1v1 challenges (win 20 / draw 10 / loss 5). Percent = 100 marks a win (used by the duelist badges).
+        foreach (var c in await _db.StudentChallenges.AsNoTracking()
+                     .Where(c => c.Status == "Completed" && c.CompletedAt != null
+                                 && (c.ChallengerId == studentId || c.OpponentId == studentId)
+                                 && (c.ChallengerId == studentId ? c.ChallengerFinishedAt != null : c.OpponentFinishedAt != null))
+                     .Select(c => new { c.Id, c.WinnerId, c.CompletedAt })
+                     .ToListAsync(ct))
+        {
+            var won = c.WinnerId == studentId;
+            var draw = c.WinnerId == null;
+            Add("challenge", $"chal:{c.Id}", won ? 20 : draw ? 10 : 5, c.CompletedAt!.Value, won ? 100 : (int?)null);
+        }
+
+        // 5c) questions answered inside lecture videos (first try 3 / later 1)
+        foreach (var cp in await _db.LectureCheckpointProgresses.AsNoTracking()
+                     .Where(x => x.StudentId == studentId && x.Passed && x.PassedAt != null)
+                     .Select(x => new { x.Id, x.PassedFirstTry, x.PassedAt })
+                     .ToListAsync(ct))
+            Add("checkpoint", $"cp:{cp.Id}", cp.PassedFirstTry ? 3 : 1, cp.PassedAt!.Value);
+
         // 6) streak bonuses (computed from every activity day, retroactively)
         var activityDays = new HashSet<DateOnly>();
         foreach (var e in existingRows) activityDays.Add(CairoDay(e.OccurredAt));
@@ -296,6 +320,7 @@ public class GamificationService
             ["lectures_done"] = events.Count(e => e.Kind == "lecture"),
             ["attendance"] = events.Count(e => e.Kind == "attendance"),
             ["accepted_answers"] = events.Count(e => e.Kind == "qa"),
+            ["challenge_wins"] = events.Count(e => e.Kind == "challenge" && e.Percent == 100),
         };
         return (stats, current, longest, activeToday);
     }
