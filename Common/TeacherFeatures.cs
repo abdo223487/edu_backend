@@ -45,7 +45,14 @@ public static class TeacherFeatures
         // أخرى
         new("schedule",         "مواعيد الحصص",               "أخرى"),
         new("analytics",        "الإحصائيات",                 "أخرى"),
+        new("code_editor",      "محرر الأكواد للطلاب",        "أخرى"),
     };
+
+    /// <summary>
+    /// Features that live in the STUDENT app (not on the teacher dashboard). The student
+    /// endpoint GET api/StudentFeatures/me only ever reports these keys.
+    /// </summary>
+    public static readonly IReadOnlySet<string> StudentFacing = new HashSet<string> { "code_editor" };
 
     private static readonly HashSet<string> Keys = Catalog.Select(f => f.Key).ToHashSet();
 

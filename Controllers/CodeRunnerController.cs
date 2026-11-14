@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
 using EduApi.Common;
+using EduApi.Data;
 using EduApi.Models;
 using EduApi.Services;
 using Microsoft.AspNetCore.Authorization;
@@ -51,18 +52,33 @@ public class CodeRunnerController : ControllerBase
     private const int PollAttempts = 15;
     private const int PollDelayMs = 700;
 
+    private const string FeatureKey = "code_editor";
+
     private readonly IHttpClientFactory _http;
     private readonly CodeRunnerOptions _opt;
     private readonly ILogger<CodeRunnerController> _log;
+    private readonly AppDbContext _db;
+    private readonly ITenantContext _tenant;
 
     public CodeRunnerController(
         IHttpClientFactory http,
         IOptions<CodeRunnerOptions> opt,
-        ILogger<CodeRunnerController> log)
+        ILogger<CodeRunnerController> log,
+        AppDbContext db,
+        ITenantContext tenant)
     {
         _http = http;
         _opt = opt.Value;
         _log = log;
+        _db = db;
+        _tenant = tenant;
+    }
+
+    /// <summary>The code editor is a plan feature: the student's teacher must have it enabled.</summary>
+    private async Task<bool> FeatureEnabledAsync(CancellationToken ct)
+    {
+        var tenantId = _tenant.CurrentTenantId;
+        return tenantId != null && await TenantFeatureLookup.IsEnabledAsync(_db, tenantId.Value, FeatureKey, ct);
     }
 
     public class RunRequest
@@ -73,11 +89,15 @@ public class CodeRunnerController : ControllerBase
     }
 
     [HttpGet("languages")]
-    public IActionResult GetLanguages() => Ok(DefaultLanguageIds.Keys.ToArray());
+    public async Task<IActionResult> GetLanguages(CancellationToken ct)
+        => await FeatureEnabledAsync(ct) ? Ok(DefaultLanguageIds.Keys.ToArray()) : Ok(Array.Empty<string>());
 
     [HttpPost("run")]
     public async Task<IActionResult> Run([FromBody] RunRequest req, CancellationToken ct)
     {
+        if (!await FeatureEnabledAsync(ct))
+            return Ok(Error("محرر الأكواد غير مفعّل في باقة المدرس بتاعك."));
+
         if (req == null || string.IsNullOrWhiteSpace(req.Code))
             return BadRequest(new { message = "اكتب الكود الأول." });
 
