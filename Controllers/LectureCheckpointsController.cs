@@ -1,6 +1,7 @@
 using EduApi.Common;
 using EduApi.Data;
 using EduApi.Models;
+using EduApi.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -8,7 +9,8 @@ using Microsoft.EntityFrameworkCore;
 namespace EduApi.Controllers;
 
 /// <summary>A question for a checkpoint: either an existing bank question, or a new one typed on the spot.</summary>
-public record CheckpointQuestionInput(int? BankQuestionId, string? Text, List<string>? Choices, string? Answer, string? Difficulty);
+/// <summary>ImageUrl (اختياري، للسؤال الجديد بس): الرابط اللي رجّعه POST teacher/image.</summary>
+public record CheckpointQuestionInput(int? BankQuestionId, string? Text, List<string>? Choices, string? Answer, string? Difficulty, string? ImageUrl = null);
 public record SaveCheckpointRequest(int LectureId, int Seconds, string? Title, int? MaxAttempts, bool? IsActive, List<CheckpointQuestionInput>? Questions);
 public record CheckpointAnswerRequest(int QuestionId, string? Answer);
 
@@ -28,6 +30,7 @@ public record CheckpointAnswerRequest(int QuestionId, string? Answer);
 /// Route: api/LectureCheckpoints
 ///  TEACHER / ASSISTANT ADMIN
 ///   GET  LectureCheckpoints/teacher/lecture/{lectureId}   checkpoints + questions + statistics
+///   POST LectureCheckpoints/teacher/image                 multipart: image  ->  { imageUrl }  (صورة سؤال جديد، زي بنك الأسئلة)
 ///   POST LectureCheckpoints/teacher                       body { lectureId, seconds, title?, maxAttempts?, questions: [...] }
 ///   PUT  LectureCheckpoints/teacher/{id}                  same body (lectureId ignored), replaces the questions
 ///   POST LectureCheckpoints/teacher/{id}/delete
@@ -46,13 +49,18 @@ public class LectureCheckpointsController : ControllerBase
     private const int MinGapSeconds = 3;
     private const int DefaultMaxAttempts = 3;
 
+    private const long MaxImageBytes = 8 * 1024 * 1024;
+    private static readonly string[] ImageExtensions = { ".jpg", ".jpeg", ".png", ".gif", ".webp" };
+
     private readonly AppDbContext _db;
     private readonly ITenantContext _tenant;
+    private readonly IFileStorageService _files;
 
-    public LectureCheckpointsController(AppDbContext db, ITenantContext tenant)
+    public LectureCheckpointsController(AppDbContext db, ITenantContext tenant, IFileStorageService files)
     {
         _db = db;
         _tenant = tenant;
+        _files = files;
     }
 
     private static string Norm(string? s) => (s ?? string.Empty).Trim().ToLowerInvariant();
@@ -189,6 +197,17 @@ public class LectureCheckpointsController : ControllerBase
             if (!lessonId.HasValue && !unitId.HasValue)
                 return (null, BadRequest(new { message = "This lecture is not linked to a course, so a new question can't be saved. Pick questions from the bank instead." }));
 
+            // الصورة (لو فيه) لازم تكون من اللي اترفع لنفس المدرس في مجلد بنك الأسئلة: "{tenant}/bank-questions/"
+            // (على R2 الرابط {base}/{tenant}/bank-questions/{file}، وعلى القرص المحلي {base}/uploads/{tenant}/bank-questions/{file}).
+            string? imageUrl = null;
+            if (!string.IsNullOrWhiteSpace(q.ImageUrl))
+            {
+                var candidate = q.ImageUrl.Trim();
+                if (!candidate.Contains($"/{tenantId.Value}/bank-questions/", StringComparison.OrdinalIgnoreCase))
+                    return (null, BadRequest(new { message = "Invalid image. Upload it with POST LectureCheckpoints/teacher/image first." }));
+                imageUrl = candidate;
+            }
+
             var difficulty = q.Difficulty is "Easy" or "Medium" or "Hard" ? q.Difficulty : "Medium";
             var bank = new BankQuestion
             {
@@ -201,6 +220,7 @@ public class LectureCheckpointsController : ControllerBase
                 Answer = choices.First(c => Norm(c) == Norm(answer)),
                 Mark = 1,
                 Difficulty = difficulty!,
+                ImageUrl = imageUrl,
             };
             bank.Choices = choices;
             _db.BankQuestions.Add(bank);
@@ -209,6 +229,29 @@ public class LectureCheckpointsController : ControllerBase
         }
 
         return (ids, null);
+    }
+
+    /// <summary>
+    /// رفع صورة لسؤال جديد: نفس مكان وطريقة صور بنك الأسئلة (مجلد bank-questions الخاص بالمدرس).
+    /// بيرجّع الرابط، والمدرس يبعته في ImageUrl بتاع السؤال وقت الحفظ.
+    /// </summary>
+    [HttpPost("teacher/image")]
+    [Authorize(Roles = StaffWrite)]
+    [Consumes("multipart/form-data")]
+    public async Task<IActionResult> UploadImage()
+    {
+        var form = await Request.ReadFormAsync();
+        var file = form.Files["image"] ?? form.Files.FirstOrDefault();
+        if (file == null || file.Length == 0) return BadRequest(new { message = "No image was provided." });
+        if (file.Length > MaxImageBytes) return BadRequest(new { message = "The image is too large (max 8 MB)." });
+
+        var extension = Path.GetExtension(file.FileName ?? string.Empty).ToLowerInvariant();
+        var looksLikeImage = (file.ContentType ?? string.Empty).StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+                             || ImageExtensions.Contains(extension);
+        if (!looksLikeImage) return BadRequest(new { message = "Only image files are allowed." });
+
+        var url = await _files.SaveAsync(file, "bank-questions");
+        return Ok(new { imageUrl = url });
     }
 
     [HttpPost("teacher")]
