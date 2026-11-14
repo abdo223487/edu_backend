@@ -32,6 +32,16 @@ builder.Services.AddHttpClient("GoogleSheets", client =>
     client.Timeout = TimeSpan.FromSeconds(30);
 });
 
+// Student code editor: forwards source code to a Judge0 sandbox
+// (see Services/CodeRunnerOptions.cs and Controllers/CodeRunnerController.cs).
+builder.Services.Configure<CodeRunnerOptions>(builder.Configuration.GetSection(CodeRunnerOptions.SectionName));
+builder.Services.AddHttpClient("CodeRunner", (sp, client) =>
+{
+    var opt = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<CodeRunnerOptions>>().Value;
+    client.BaseAddress = new Uri(opt.BaseUrl.TrimEnd('/') + "/");
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
 // ACTIVE PROVIDER: Meta WhatsApp Cloud API (now approved/verified — see
 // WhatsAppOptions for the approved "attendance_notification" template shape).
 builder.Services.AddHttpClient("WhatsApp", client =>
