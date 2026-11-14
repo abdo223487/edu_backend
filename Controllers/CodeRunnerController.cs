@@ -36,6 +36,11 @@ public class CodeRunnerController : ControllerBase
         ["javascript"] = 102,  // JavaScript (Node.js 22)
         ["csharp"] = 51,       // C# (Mono 6.6.0.161)
         ["dart"] = 90,         // Dart (2.19.2)
+        ["sql"] = 82,          // SQL (SQLite 3.27.2)
+        ["typescript"] = 101,  // TypeScript (5.6.2)
+        ["kotlin"] = 111,      // Kotlin (2.1.10)  -> slower first run (JVM)
+        ["php"] = 98,          // PHP (8.3.11)
+        ["r"] = 99,            // R (4.4.1)
     };
 
     // userId -> timestamps of recent runs (sliding 60s window).
