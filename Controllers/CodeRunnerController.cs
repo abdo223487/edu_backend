@@ -301,7 +301,9 @@ public class CodeRunnerController : ControllerBase
         if (status == "timeout" && string.IsNullOrWhiteSpace(stderr))
             stderr = "Time Limit Exceeded";
         else if (status == "runtime_error" && string.IsNullOrWhiteSpace(stderr))
-            stderr = message;
+            stderr = string.IsNullOrWhiteSpace(message)
+                ? Str(root["status"]?["description"])
+                : $"{Str(root["status"]?["description"])}\n{message}".Trim();
         else if (status == "error" && string.IsNullOrWhiteSpace(stderr))
             stderr = string.IsNullOrWhiteSpace(message) ? "Internal error" : message;
 
